@@ -2505,11 +2505,12 @@ describe('TerminalGateway disconnect authority sweep', () => {
     expect(session.getAuthority()).toBeNull();
   });
 
-  it('heartbeat timeout sweeps authority through the same release helper', async () => {
+  it('heartbeat timeout closes the transport for reconnect and sweeps authority', async () => {
     jest.useFakeTimers();
+    const { gateway, registry } = createGateway();
     try {
-      const { gateway, registry } = createGateway();
       const client = createMockSocket('client-hb');
+      gateway.server.sockets.sockets.set(client.id, client);
 
       gateway.handleConnection(client as unknown as Socket);
       // Dimensionless subscribe → no 50ms latch settle to advance past; subscribe() still grants
@@ -2522,6 +2523,8 @@ describe('TerminalGateway disconnect authority sweep', () => {
       // Two interval ticks (30s each) → elapsed since lastHeartbeat exceeds HEARTBEAT_TIMEOUT (45s).
       jest.advanceTimersByTime(60_001);
 
+      expect(client.conn.close).toHaveBeenCalledTimes(1);
+      expect(client.disconnect).not.toHaveBeenCalled();
       expect(session.getAuthority()).toBeNull();
       expect(
         (gateway as unknown as { clientSessions: Map<string, unknown> }).clientSessions.has(
@@ -2529,6 +2532,7 @@ describe('TerminalGateway disconnect authority sweep', () => {
         ),
       ).toBe(false);
     } finally {
+      gateway.onModuleDestroy();
       jest.useRealTimers();
     }
   });

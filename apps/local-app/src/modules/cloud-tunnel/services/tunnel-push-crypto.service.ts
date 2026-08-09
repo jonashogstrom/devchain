@@ -56,8 +56,8 @@ export function pushRouteKey(topic: string, eventType: string): string {
  * PC-side push transport-encryption seam (Phase 3, Task:1).
  *
  * The push lane is mostly hints, but it carries real content today (`ask_user_question.pending`
- * question text) and latently (`chat.message.created`). This service resolves whether the lane
- * can encrypt to the paired mobile and, when it can, seals each push `payload` into an
+ * question text, transcript deltas, and agent names). This service resolves whether the lane can
+ * encrypt to the paired mobile and, when it can, seals each push `payload` into an
  * {@link E2eeEnvelope} — keeping `type`/`v`/`topic`/`eventType` cleartext for the bridge's
  * routing + allowlist. It mirrors {@link TunnelRpcCryptoService} (same key model: the pairwise
  * shared key is re-derived on demand from the PC private key + the paired device's public key,

@@ -1,3 +1,8 @@
+/**
+ * Test layer: module unit.
+ * Subscriber scheduling and execution require Nest wiring, while mocked storage and scheduler
+ * boundaries avoid real I/O and make this the cheapest reliable layer for the orchestration.
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ModuleRef } from '@nestjs/core';
@@ -7,7 +12,12 @@ import {
   type SubscribableEventPayload,
 } from './subscriber-executor.service';
 import { STORAGE_SERVICE, type StorageService } from '../../storage/interfaces/storage.interface';
-import type { Subscriber, EventFilter, ActionInput } from '../../storage/models/domain.models';
+import type {
+  Subscriber,
+  EventFilter,
+  EventFilterCondition,
+  ActionInput,
+} from '../../storage/models/domain.models';
 import type { TerminalWatcherTriggeredEventPayload } from '../../events/catalog/terminal.watcher.triggered';
 import { TerminalIOService } from '../../terminal/services/terminal-io/terminal-io.service';
 import { SessionsService } from '../../sessions/services/sessions.service';
@@ -431,6 +441,52 @@ describe('SubscriberExecutorService', () => {
       expect(executeSpy).not.toHaveBeenCalled();
     });
 
+    it('schedules and executes one action when multiple OR conditions match', async () => {
+      const subscriber = createMockSubscriber({
+        eventFilter: {
+          combinator: 'or',
+          filters: [
+            { field: 'agentName', operator: 'equals', value: 'Test Agent' },
+            { field: 'viewportSnippet', operator: 'contains', value: 'Error' },
+          ],
+        },
+      });
+      mockStorage.findSubscribersByEventName.mockResolvedValue([subscriber]);
+      mockStorage.getSubscriber.mockResolvedValue(subscriber);
+      const executeSpy = jest
+        .spyOn(service, 'executeSubscriber')
+        .mockResolvedValue(createMockExecutionResult(subscriber));
+
+      const result = await service.handleEvent('terminal.watcher.triggered', createMockPayload());
+
+      expect(result?.subscribersScheduled).toBe(1);
+      expect(mockScheduler.schedule).toHaveBeenCalledTimes(1);
+
+      const task = mockScheduler.schedule.mock.calls[0][0];
+      await task.execute();
+
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails a malformed group closed without preventing later subscribers from scheduling', async () => {
+      const malformed = createMockSubscriber({
+        id: 'malformed-sub',
+        eventFilter: { combinator: 'and', filters: [] } as unknown as EventFilter,
+      });
+      const valid = createMockSubscriber({ id: 'valid-sub' });
+      mockStorage.findSubscribersByEventName.mockResolvedValue([malformed, valid]);
+
+      const result = await service.handleEvent('terminal.watcher.triggered', createMockPayload());
+
+      expect(result).toMatchObject({
+        subscribersMatched: 2,
+        subscribersScheduled: 1,
+        subscribersSkipped: 1,
+      });
+      expect(mockScheduler.schedule).toHaveBeenCalledTimes(1);
+      expect(mockScheduler.schedule.mock.calls[0][0].subscriberId).toBe('valid-sub');
+    });
+
     it('should handle no subscribers found', async () => {
       mockStorage.findSubscribersByEventName.mockResolvedValue([]);
       const payload = createMockPayload();
@@ -549,6 +605,95 @@ describe('SubscriberExecutorService', () => {
   });
 
   describe('matchesFilter', () => {
+    describe('compound groups', () => {
+      it('requires every condition in an AND group to match', () => {
+        const payload = createMockPayload();
+
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'and',
+              filters: [
+                { field: 'agentName', operator: 'equals', value: 'Test Agent' },
+                { field: 'viewportSnippet', operator: 'contains', value: 'Error' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(true);
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'and',
+              filters: [
+                { field: 'agentName', operator: 'equals', value: 'Test Agent' },
+                { field: 'viewportSnippet', operator: 'contains', value: 'Warning' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(false);
+      });
+
+      it('requires at least one condition in an OR group to match', () => {
+        const payload = createMockPayload();
+
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'or',
+              filters: [
+                { field: 'agentName', operator: 'equals', value: 'Other Agent' },
+                { field: 'viewportSnippet', operator: 'contains', value: 'Error' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(true);
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'or',
+              filters: [
+                { field: 'agentName', operator: 'equals', value: 'Other Agent' },
+                { field: 'viewportSnippet', operator: 'contains', value: 'Warning' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(false);
+      });
+
+      it.each([
+        { combinator: 'and', filters: [] },
+        { combinator: 'xor', filters: [{ field: 'agentName', operator: 'equals', value: 'x' }] },
+        { combinator: 'and', filters: 'not-an-array' },
+        { combinator: 'or', filters: [null] },
+        {
+          combinator: 'and',
+          filters: [
+            {
+              combinator: 'or',
+              filters: [{ field: 'agentName', operator: 'equals', value: 'Test Agent' }],
+            },
+          ],
+        },
+      ])('fails malformed stored group closed: %j', (malformedFilter) => {
+        const logger = Reflect.get(service, 'logger') as {
+          warn: (context: unknown, message: string) => void;
+        };
+        const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
+
+        expect(
+          service.matchesFilter(malformedFilter as unknown as EventFilter, createMockPayload()),
+        ).toBe(false);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ filter: malformedFilter }),
+          'Malformed event filter; failing closed',
+        );
+      });
+    });
+
     describe('equals operator', () => {
       it('should return true when field value equals filter value', () => {
         const filter: EventFilter = { field: 'agentName', operator: 'equals', value: 'Test Agent' };
@@ -573,6 +718,60 @@ describe('SubscriberExecutorService', () => {
         const payload = createMockPayload({ triggerCount: 5 });
 
         expect(service.matchesFilter(filter, payload)).toBe(true);
+      });
+    });
+
+    describe('null-aware operators', () => {
+      it.each([
+        { operator: 'is_null', field: 'agentName', value: null, expected: true },
+        { operator: 'is_null', field: 'agentName', value: 'Test Agent', expected: false },
+        { operator: 'is_null', field: 'agentName', value: undefined, expected: false },
+        { operator: 'is_null', field: 'missingField', value: undefined, expected: false },
+        { operator: 'is_not_null', field: 'agentName', value: null, expected: false },
+        { operator: 'is_not_null', field: 'agentName', value: 'Test Agent', expected: true },
+        { operator: 'is_not_null', field: 'agentName', value: undefined, expected: false },
+        { operator: 'is_not_null', field: 'missingField', value: undefined, expected: false },
+      ] as const)(
+        '$operator matches only the expected field state',
+        ({ operator, field, value, expected }) => {
+          const payload =
+            field === 'missingField'
+              ? createMockPayload()
+              : createMockPayload({ agentName: value });
+          const filter: EventFilter = { field, operator, value: '' };
+
+          expect(service.matchesFilter(filter, payload)).toBe(expected);
+        },
+      );
+
+      it('supports null-aware conditions inside flat AND and OR groups', () => {
+        const payload = createMockPayload({ agentName: null });
+
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'and',
+              filters: [
+                { field: 'agentName', operator: 'is_null', value: '' },
+                { field: 'projectId', operator: 'is_not_null', value: '' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(true);
+
+        expect(
+          service.matchesFilter(
+            {
+              combinator: 'or',
+              filters: [
+                { field: 'agentName', operator: 'is_not_null', value: '' },
+                { field: 'missingField', operator: 'is_null', value: '' },
+              ],
+            },
+            payload,
+          ),
+        ).toBe(false);
       });
     });
 
@@ -800,7 +999,7 @@ describe('SubscriberExecutorService', () => {
       it('should return false for unknown operator', () => {
         const filter = {
           field: 'agentName',
-          operator: 'unknown' as EventFilter['operator'],
+          operator: 'unknown' as EventFilterCondition['operator'],
           value: 'test',
         };
         const payload = createMockPayload();
@@ -2139,6 +2338,40 @@ describe('SubscriberExecutorService', () => {
       const result = await task.execute();
 
       expect(result).toMatchObject({ skipped: true, skipReason: 'filter_not_matched' });
+    });
+
+    it('skips with filter_not_matched when the latest persisted group no longer matches', async () => {
+      const atSchedule = createMockSubscriber({
+        eventFilter: {
+          combinator: 'or',
+          filters: [
+            { field: 'agentId', operator: 'equals', value: 'agent-456' },
+            { field: 'agentName', operator: 'equals', value: 'Other Agent' },
+          ],
+        },
+      });
+      mockStorage.findSubscribersByEventName.mockResolvedValue([atSchedule]);
+
+      await service.handleEvent('terminal.watcher.triggered', createMockPayload());
+
+      const task = captureScheduledTask();
+      mockStorage.getSubscriber.mockResolvedValue(
+        createMockSubscriber({
+          eventFilter: {
+            combinator: 'and',
+            filters: [
+              { field: 'agentId', operator: 'equals', value: 'agent-456' },
+              { field: 'agentName', operator: 'equals', value: 'Other Agent' },
+            ],
+          },
+        }),
+      );
+      const executeSpy = jest.spyOn(service, 'executeSubscriber');
+
+      const result = await task.execute();
+
+      expect(result).toMatchObject({ skipped: true, skipReason: 'filter_not_matched' });
+      expect(executeSpy).not.toHaveBeenCalled();
     });
 
     it('skips with disabled when the subscriber is disabled after scheduling', async () => {

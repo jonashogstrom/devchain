@@ -125,6 +125,7 @@ export const EVENT_FIELDS_CATALOG: Record<string, SubscribableEventDefinition> =
       // Base fields
       { field: 'epicId', label: 'Epic ID', type: 'string' },
       { field: 'projectId', label: 'Project ID', type: 'string' },
+      { field: 'parentId', label: 'Parent Epic ID', type: 'string', nullable: true },
       { field: 'version', label: 'Version', type: 'number' },
       { field: 'epicTitle', label: 'Epic Title', type: 'string' },
       { field: 'projectName', label: 'Project Name', type: 'string', nullable: true },
@@ -302,7 +303,11 @@ export const EVENT_FIELDS_CATALOG: Record<string, SubscribableEventDefinition> =
     label: 'Session Stopped',
     description: 'Fired when a session is stopped',
     category: 'session',
-    fields: [{ field: 'sessionId', label: 'Session ID', type: 'string' }],
+    fields: [
+      { field: 'sessionId', label: 'Session ID', type: 'string' },
+      { field: 'source', label: 'Termination Source', type: 'string' },
+      { field: 'reason', label: 'Termination Reason', type: 'string' },
+    ],
   },
 
   'session.crashed': {

@@ -21,6 +21,14 @@ describe('EVENT_FIELDS_CATALOG', () => {
     });
   });
 
+  describe('session.stopped', () => {
+    const entry = EVENT_FIELDS_CATALOG['session.stopped'];
+
+    it('exposes termination source and reason to subscribers', () => {
+      expect(entry.fields.map((field) => field.field)).toEqual(['sessionId', 'source', 'reason']);
+    });
+  });
+
   describe('agent.message.sent', () => {
     const entry = EVENT_FIELDS_CATALOG['agent.message.sent'];
 
@@ -57,6 +65,21 @@ describe('EVENT_FIELDS_CATALOG', () => {
         .map((field) => field.field);
 
       expect(nullableFields).toEqual(['groupKind', 'teamId', 'teamName', 'teamDeliveryMode']);
+    });
+  });
+
+  describe('epic.updated', () => {
+    const entry = EVENT_FIELDS_CATALOG['epic.updated'];
+
+    it('exposes the current root parent ID when the parent is unchanged', () => {
+      const parentId = entry.fields.find((field) => field.field === 'parentId');
+
+      expect(parentId).toEqual({
+        field: 'parentId',
+        label: 'Parent Epic ID',
+        type: 'string',
+        nullable: true,
+      });
     });
   });
 

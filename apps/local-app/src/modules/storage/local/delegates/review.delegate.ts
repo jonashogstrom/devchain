@@ -470,28 +470,4 @@ export class ReviewStorageDelegate extends BaseStorageDelegate {
     // Drizzle returns { changes: number } for SQLite
     return (result as unknown as { changes: number }).changes ?? 0;
   }
-
-  async markMessageAsRead(messageId: string, agentId: string, readAt: string): Promise<void> {
-    const { chatMessageReads } = await import('../../db/schema');
-    const { eq, and } = await import('drizzle-orm');
-
-    // Check if already exists
-    const existing = await this.db
-      .select()
-      .from(chatMessageReads)
-      .where(and(eq(chatMessageReads.messageId, messageId), eq(chatMessageReads.agentId, agentId)))
-      .limit(1);
-
-    if (!existing[0]) {
-      // Insert new read record
-      await this.db.insert(chatMessageReads).values({
-        messageId,
-        agentId,
-        readAt,
-      });
-      logger.info({ messageId, agentId }, 'Marked message as read');
-    } else {
-      logger.debug({ messageId, agentId }, 'Message already marked as read');
-    }
-  }
 }

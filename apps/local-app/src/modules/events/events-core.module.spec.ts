@@ -2,7 +2,6 @@ import { MODULE_METADATA } from '@nestjs/common/constants';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { AgentMessageDeliveryModule } from '../agent-message-delivery/agent-message-delivery.module';
 import { AgentsModule } from '../agents/agents.module';
-import { ChatModule } from '../chat/chat.module';
 import { CloudModule } from '../cloud/cloud.module';
 import { EpicsModule } from '../epics/epics.module';
 import { GuestsModule } from '../guests/guests.module';
@@ -57,7 +56,6 @@ describe('EventsCoreModule', () => {
     const forbiddenDomainImports = [
       AgentMessageDeliveryModule,
       AgentsModule,
-      ChatModule,
       CloudModule,
       EpicsModule,
       GuestsModule,

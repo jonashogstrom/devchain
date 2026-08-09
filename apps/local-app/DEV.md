@@ -1,178 +1,64 @@
-# Local App - Development Guide
+# Local App Development Guide
 
-## Development vs Production Serving
+This runbook covers Local App development modes and app-specific diagnostics. Repository-wide commands and architectural contracts live in root `docs/`.
 
-### Development Mode
+## Runtime modes
 
-In development, the Local App runs **two separate servers**:
+### Development
 
-1. **NestJS API Server** (port 3000)
-   - Serves the REST API endpoints
-   - WebSocket connections
-   - Health checks at `/health`
-   - API docs at `/api/docs`
-   - Binds to `127.0.0.1:3000` (localhost only)
+`pnpm --filter local-app dev` runs two loopback-bound processes:
 
-2. **Vite Dev Server** (port 5175)
-   - Serves the React SPA with HMR (Hot Module Replacement)
-   - Fast refresh for instant UI updates
-   - Binds to `127.0.0.1:5175` (localhost only)
-   - Proxies API requests to NestJS server
+| Process | Default | Role |
+|---|---|---|
+| NestJS API | `http://127.0.0.1:3000` | REST, MCP, WebSocket, worktree proxy, health, Swagger |
+| Vite | `http://127.0.0.1:5175` | React UI, HMR, and proxying to the API |
 
-**To start development:**
+Use `dev:api` or `dev:ui` when only one side is needed. `vite.config.ts` is canonical for the UI port, proxy routes, and build directory.
+
+### Built runtime
 
 ```bash
-# From the project root
-pnpm dev
-
-# Or from apps/local-app
-pnpm dev
+pnpm --filter local-app build
+pnpm --filter local-app start
 ```
 
-This runs both servers concurrently using `concurrently`. You'll see two colored outputs:
-- **Blue**: NestJS API server logs
-- **Magenta**: Vite dev server logs
+Nest compiles the backend into `dist/`; Vite writes the SPA to `dist/ui`; templates are copied into `dist/templates`. The production process serves API and built UI from the Nest app.
 
-**Access points:**
-- UI: `http://127.0.0.1:5175/` (main app)
-- API: `http://127.0.0.1:3000/api/*`
-- Health: `http://127.0.0.1:3000/health`
-- API Docs: `http://127.0.0.1:3000/api/docs`
+## Loopback security
 
-### Production Mode
+The default `HOST` is `127.0.0.1`. Keep it for single-machine use. Binding to `0.0.0.0`, `::`, or a LAN address exposes the API, MCP, WebSocket, and terminal surfaces; follow [root Setup](../../docs/setup.md#remote-access) and [Risks](../../docs/risks.md) before doing so.
 
-In production, the Local App runs **a single NestJS server** that serves both the API and the built SPA:
+## Commands
 
-1. **Build Process:**
-   ```bash
-   pnpm build
-   ```
-   This:
-   - Compiles NestJS TypeScript to JavaScript (`dist/`)
-   - Builds the React SPA with Vite (`dist/client/`)
+| Task | Command |
+|---|---|
+| API + UI development | `pnpm --filter local-app dev` |
+| API only | `pnpm --filter local-app dev:api` |
+| UI only | `pnpm --filter local-app dev:ui` |
+| Build | `pnpm --filter local-app build` |
+| Unit/integration/UI aggregate | `pnpm --filter local-app test` |
+| Browser UI | `pnpm --filter local-app test:ui` |
+| Low-memory tests | `pnpm --filter local-app test:lowmem` |
+| Lint | `pnpm --filter local-app lint` |
+| Dependency cycles | `pnpm --filter local-app madge:check` |
+| Migration journal | `pnpm --filter local-app check:journal` |
 
-2. **Single Server:**
-   - NestJS serves the API at `/api/*`
-   - NestJS serves the built SPA at `/` (root) with SPA fallback
-   - All requests for non-API routes serve `index.html` (SPA routing)
-   - Binds to `127.0.0.1:3000` (localhost only)
+The manifest is canonical for the complete command set. Use [root Testing](../../docs/testing.md) for suite selection and traps.
 
-**To start production:**
+## Configuration
 
-```bash
-pnpm start
-```
+`src/common/config/env.config.ts` defines runtime config and defaults. Important local values include `HOST`, `PORT`, `LOG_LEVEL`, and `DATABASE_PATH`. Storage is SQLite-only through `LocalStorageService`; no Remote API storage adapter is registered.
 
-**Access point:**
-- Everything: `http://127.0.0.1:3000/`
+## Diagnostics
 
-### Security: Localhost Binding
+- Port conflict: inspect with `lsof -nP -iTCP:3000 -sTCP:LISTEN` and `lsof -nP -iTCP:5175 -sTCP:LISTEN`; stop the identified process normally.
+- Blank UI: verify both processes, inspect the browser console, and confirm Vite is serving `127.0.0.1:5175`.
+- Proxy/CORS failure: check `vite.config.ts` proxy routes and the API log; browser API traffic in dev should pass through Vite.
+- Built UI missing: verify `dist/ui/index.html`; `dist/client` is not the current output.
 
-**Both development and production modes bind to `127.0.0.1` (localhost) only.**
+## Read next
 
-This means:
-- ✅ Accessible from the local machine
-- ❌ NOT accessible from the network
-- ❌ NOT accessible from other devices
-- ✅ Secure by default (no remote exposure)
-
-This is a core security principle of the Local App to prevent accidental network exposure.
-
-### Architecture Diagram
-
-```
-Development Mode:
-┌─────────────┐         ┌──────────────┐
-│  Browser    │────────▶│  Vite Dev    │
-│             │         │  :5175       │
-│             │         │  (UI + HMR)  │
-│             │         └──────┬───────┘
-│             │                │ Proxy API
-│             │         ┌──────▼───────┐
-│             │────────▶│  NestJS      │
-│             │         │  :3000       │
-│             │         │  (API + WS)  │
-└─────────────┘         └──────────────┘
-
-Production Mode:
-┌─────────────┐         ┌──────────────┐
-│  Browser    │────────▶│  NestJS      │
-│             │         │  :3000       │
-│             │         │  (API + SPA) │
-└─────────────┘         └──────────────┘
-```
-
-### Common Commands
-
-```bash
-# Development
-pnpm dev              # Start both API and UI
-pnpm dev:api          # Start only NestJS API
-pnpm dev:ui           # Start only Vite dev server
-pnpm dev:debug        # Start API with debugger
-
-# Production
-pnpm build            # Build both API and UI
-pnpm start            # Start production server
-
-# Testing
-pnpm test             # Run unit tests
-pnpm test:e2e         # Run E2E tests
-pnpm test:watch       # Run tests in watch mode
-
-# Code Quality
-pnpm lint             # Check linting
-pnpm lint:fix         # Fix linting issues
-pnpm format           # Format code with Prettier
-
-# Database
-pnpm db:generate      # Generate Drizzle migrations
-pnpm db:migrate       # Run migrations
-pnpm db:push          # Push schema changes
-pnpm db:studio        # Open Drizzle Studio
-```
-
-### Environment Variables
-
-Create a `.env` file in `apps/local-app/` with:
-
-```env
-NODE_ENV=development
-PORT=3000
-HOST=127.0.0.1
-LOG_LEVEL=info
-INSTANCE_MODE=local
-```
-
-All variables have sensible defaults and are validated with Zod on startup.
-
-### Troubleshooting
-
-**Problem**: Port 3000 or 5175 is already in use
-
-**Solution**: Kill the process using the port or change the port in `.env`:
-```bash
-# Find and kill process
-lsof -ti:3000 | xargs kill -9
-lsof -ti:5175 | xargs kill -9
-```
-
-**Problem**: UI doesn't load or shows blank page
-
-**Solution**:
-1. Check that both servers are running (`pnpm dev`)
-2. Check browser console for errors
-3. Verify Vite dev server is at `http://127.0.0.1:5175/`
-
-**Problem**: API requests fail with CORS errors
-
-**Solution**: Ensure Vite is proxying requests correctly. In dev mode, API calls should go through Vite's proxy.
-
-### Next Steps
-
-See the main project README for:
-- Overall architecture
-- Data models
-- Terminal integration
-- MCP server design
-- Roadmap
+- [Local App README](README.md)
+- [Root Operations](../../docs/operations.md)
+- [Root Architecture](../../docs/architecture.md)
+- [Migration scripts](scripts/README.md)

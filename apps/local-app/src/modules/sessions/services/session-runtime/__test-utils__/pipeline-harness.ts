@@ -177,6 +177,7 @@ export function createLaunchPipelineHarness() {
   const terminalIO = {
     createEmptySession: jest.fn().mockResolvedValue(undefined),
     destroySession: jest.fn().mockResolvedValue(undefined),
+    destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
     setAlternateScreen: jest.fn().mockResolvedValue(undefined),
     typeCommand: jest.fn().mockResolvedValue(undefined),
     waitForOutput: jest.fn().mockResolvedValue(undefined),
@@ -336,6 +337,7 @@ export function createRestorePipelineHarness(opts?: { streamService?: unknown })
   const terminalIO = {
     createEmptySession: jest.fn().mockResolvedValue(undefined),
     destroySession: jest.fn().mockResolvedValue(undefined),
+    destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
     setAlternateScreen: jest.fn().mockResolvedValue(undefined),
     typeCommand: jest.fn().mockResolvedValue(undefined),
     sessionExists: jest.fn().mockResolvedValue(false),

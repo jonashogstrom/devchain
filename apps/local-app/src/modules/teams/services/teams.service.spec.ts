@@ -2127,8 +2127,14 @@ describe('TeamsService', () => {
         PROJECT_ID,
         new Set([AGENT_B]),
       );
-      expect(sessionsService.terminateSession).toHaveBeenCalledWith('sess-1');
-      expect(sessionsService.terminateSession).toHaveBeenCalledWith('sess-2');
+      expect(sessionsService.terminateSession).toHaveBeenCalledWith('sess-1', {
+        source: 'team-management',
+        reason: 'agent-deletion',
+      });
+      expect(sessionsService.terminateSession).toHaveBeenCalledWith('sess-2', {
+        source: 'team-management',
+        reason: 'agent-deletion',
+      });
       expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B);
     });
 

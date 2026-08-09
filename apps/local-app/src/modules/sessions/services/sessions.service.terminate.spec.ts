@@ -40,6 +40,7 @@ const mockStat = stat as jest.MockedFunction<typeof stat>;
 
 const SESSION_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TRANSCRIPT_PATH = '/tmp/test-session.jsonl';
+const TEST_TERMINATION = { source: 'web-api' as const, reason: 'user-requested' as const };
 
 /** A minimal running SessionDto row as returned by getSession() */
 const RUNNING_SESSION_ROW = {
@@ -69,12 +70,12 @@ describe('SessionsService.terminateSession — size_bytes', () => {
     updateRunMock = jest.fn();
     selectGetMock = jest.fn();
 
-    // First prepare() call in terminateSession is getSession() SELECT → returns a row
-    // Subsequent prepare() calls are UPDATE → returns run mock
-    const sqlitePrepare = jest
-      .fn()
-      .mockReturnValueOnce({ get: selectGetMock })
-      .mockReturnValue({ run: updateRunMock, get: jest.fn(), all: jest.fn().mockReturnValue([]) });
+    const sqlitePrepare = jest.fn().mockImplementation((sql: string) => {
+      if (sql.trim().toUpperCase().startsWith('SELECT')) {
+        return { get: selectGetMock, all: jest.fn().mockReturnValue([]) };
+      }
+      return { run: updateRunMock, get: jest.fn(), all: jest.fn().mockReturnValue([]) };
+    });
 
     selectGetMock.mockReturnValue(RUNNING_SESSION_ROW);
 
@@ -99,9 +100,15 @@ describe('SessionsService.terminateSession — size_bytes', () => {
     const preflightService = { runChecks: jest.fn() };
     const mcpEnsureService = { ensureMcp: jest.fn() };
     const terminalIO = {
-      sessionExists: jest.fn(),
+      sessionExists: jest.fn().mockResolvedValue(false),
+      destroySession: jest.fn().mockResolvedValue(undefined),
+      destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
     } as unknown as TerminalIOService;
-    const sessionCoordinator = { withAgentLock: jest.fn() } as unknown as SessionCoordinatorService;
+    const sessionCoordinator = {
+      withAgentLock: jest
+        .fn()
+        .mockImplementation((_id: string, fn: () => Promise<unknown>) => fn()),
+    } as unknown as SessionCoordinatorService;
     const hooksConfigService = { ensureHooksConfig: jest.fn() };
 
     const eventsService: { publish: jest.Mock } = { publish: jest.fn().mockResolvedValue('evt') };
@@ -139,7 +146,7 @@ describe('SessionsService.terminateSession — size_bytes', () => {
   it('writes the file size to size_bytes when transcript_path is set and stat succeeds', async () => {
     mockStat.mockResolvedValue({ size: 4096 } as Awaited<ReturnType<typeof stat>>);
 
-    await service.terminateSession(SESSION_ID);
+    await service.terminateSession(SESSION_ID, TEST_TERMINATION);
 
     expect(mockStat).toHaveBeenCalledWith(TRANSCRIPT_PATH);
     expect(updateRunMock).toHaveBeenCalledWith(
@@ -154,7 +161,7 @@ describe('SessionsService.terminateSession — size_bytes', () => {
   it('writes NULL to size_bytes when stat throws (best-effort)', async () => {
     mockStat.mockRejectedValue(new Error('ENOENT: no such file'));
 
-    await service.terminateSession(SESSION_ID);
+    await service.terminateSession(SESSION_ID, TEST_TERMINATION);
 
     expect(updateRunMock).toHaveBeenCalledWith(
       'stopped',
@@ -169,7 +176,7 @@ describe('SessionsService.terminateSession — size_bytes', () => {
     // Override selectGetMock to return a session without transcript_path
     selectGetMock.mockReturnValue({ ...RUNNING_SESSION_ROW, transcript_path: null });
 
-    await service.terminateSession(SESSION_ID);
+    await service.terminateSession(SESSION_ID, TEST_TERMINATION);
 
     expect(mockStat).not.toHaveBeenCalled();
     expect(updateRunMock).toHaveBeenCalledWith(

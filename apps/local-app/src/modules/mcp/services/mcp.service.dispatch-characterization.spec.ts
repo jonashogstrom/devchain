@@ -63,7 +63,7 @@ describe('McpService dispatch-boundary SERVICE_UNAVAILABLE', () => {
       const result = await service.handleToolCall('devchain_send_message', {
         sessionId: SESSION_ID,
         message: 'hello',
-        recipient: 'agents',
+        recipientAgentNames: ['Agent'],
       });
       assertServiceUnavailable(result);
     });
@@ -117,7 +117,7 @@ describe('McpService dispatch-boundary SERVICE_UNAVAILABLE', () => {
       const result = await service.handleToolCall('devchain_send_message', {
         sessionId: SESSION_ID,
         message: 'hello',
-        recipient: 'agents',
+        recipientAgentNames: ['Agent'],
       });
 
       expect(result.error!.code).not.toBe('INTERNAL_ERROR');

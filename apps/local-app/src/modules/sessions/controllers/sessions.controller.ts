@@ -196,7 +196,10 @@ export class SessionsController {
   @Delete(':id')
   async terminateSession(@Param('id') id: string): Promise<{ message: string }> {
     logger.info({ sessionId: id }, 'DELETE /api/sessions/:id');
-    await this.sessionsService.terminateSession(id);
+    await this.sessionsService.terminateSession(id, {
+      source: 'web-api',
+      reason: 'user-requested',
+    });
     return { message: 'Session terminated successfully' };
   }
 

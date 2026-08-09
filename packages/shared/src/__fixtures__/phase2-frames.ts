@@ -16,7 +16,6 @@ export const PHASE2_FIXTURE_IDS = Object.freeze({
   agentId: 'agent-fixture-1',
   projectId: 'proj-fixture-1',
   toolUseId: 'tool-use-fixture-1',
-  threadId: 'thread-fixture-1',
 });
 
 /** A transcript-updated push ENVELOPE (no `eventId` — bridge assigns it). */
@@ -115,8 +114,7 @@ export const ALLOWLISTED_TOPIC_PAIRS: ReadonlyArray<readonly [string, string]> =
   [`session/${PHASE2_FIXTURE_IDS.sessionId}`, 'ask_user_question.resolved'],
   [`session/${PHASE2_FIXTURE_IDS.sessionId}`, 'activity'],
   [`agent/${PHASE2_FIXTURE_IDS.agentId}`, 'presence'],
-  // Phase 1 / Task 3 additions (RC4 + RC3):
+  // Phase 1 / Task 3 addition (RC4):
   [`project/${PHASE2_FIXTURE_IDS.projectId}/state`, 'agent.created'],
   [`project/${PHASE2_FIXTURE_IDS.projectId}/state`, 'agent.deleted'],
-  [`chat/${PHASE2_FIXTURE_IDS.threadId}`, 'message.created'],
 ]);

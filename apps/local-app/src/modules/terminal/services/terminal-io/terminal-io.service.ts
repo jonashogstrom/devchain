@@ -11,6 +11,8 @@ import type {
   WaitForOutputOptions,
   DeliveryOptions,
   DeliveryResult,
+  ExpectedSessionDestroyPolicy,
+  ExpectedSessionDestroyResult,
 } from './types';
 import * as lifecycle from './lifecycle';
 import * as capture from './capture';
@@ -22,10 +24,29 @@ import { quoteShellArg } from './quote-shell-arg';
 
 const logger = createLogger('TerminalIOService');
 
+interface HealthMonitorRecord {
+  readonly token: number;
+  readonly sessionName: string;
+  readonly sessionId: string;
+  readonly intervalMs: number;
+  readonly fence: number;
+  readonly interval: NodeJS.Timeout;
+}
+
+interface SessionLifecycleState {
+  fence: number;
+  tail: Promise<void>;
+  pendingOperations: number;
+  observers: number;
+}
+
 @Injectable()
 export class TerminalIOService implements OnModuleDestroy {
   private readonly gap: SendGap;
-  private readonly healthCheckIntervals = new Map<string, NodeJS.Timeout>();
+  private readonly healthMonitors = new Map<string, HealthMonitorRecord>();
+  private readonly lifecycleStates = new Map<string, SessionLifecycleState>();
+  private nextMonitorToken = 0;
+  private destroyed = false;
 
   constructor(
     private readonly executor: ProcessExecutor,
@@ -35,10 +56,12 @@ export class TerminalIOService implements OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
-    for (const interval of this.healthCheckIntervals.values()) {
-      clearInterval(interval);
+    this.destroyed = true;
+    for (const monitor of this.healthMonitors.values()) {
+      clearInterval(monitor.interval);
     }
-    this.healthCheckIntervals.clear();
+    this.healthMonitors.clear();
+    this.lifecycleStates.clear();
     this.gap.clear();
   }
 
@@ -54,6 +77,33 @@ export class TerminalIOService implements OnModuleDestroy {
 
   async destroySession(target: SessionTarget): Promise<void> {
     return lifecycle.destroySession(this.executor, target);
+  }
+
+  async destroyExpectedSession(
+    target: SessionTarget,
+    policy: ExpectedSessionDestroyPolicy,
+  ): Promise<ExpectedSessionDestroyResult> {
+    return this.runSerializedLifecycle(target.name, async (state) => {
+      const retiredMonitor = this.healthMonitors.get(target.name);
+      state.fence += 1;
+      if (retiredMonitor) this.retireMonitor(retiredMonitor);
+
+      const result = await lifecycle.destroyExpectedSession(this.executor, target);
+      if (
+        result.outcome === 'unknown-error' &&
+        policy.onUnknownError === 'rearm' &&
+        !this.destroyed &&
+        !this.healthMonitors.has(target.name)
+      ) {
+        this.armHealthCheck(
+          target.name,
+          policy.sessionId,
+          policy.intervalMs ?? retiredMonitor?.intervalMs ?? 5000,
+          state,
+        );
+      }
+      return result;
+    });
   }
 
   async listSessions(): Promise<SessionTarget[]> {
@@ -184,31 +234,158 @@ export class TerminalIOService implements OnModuleDestroy {
   }
 
   startHealthCheck(sessionName: string, sessionId: string, intervalMs = 5000): void {
-    this.stopHealthCheck(sessionName);
-
-    const interval = setInterval(async () => {
-      try {
-        const result = await this.healthCheck({ name: sessionName });
-        if (!result.alive) {
-          logger.warn({ sessionName, sessionId }, 'Tmux session lost - emitting crashed event');
-          await this.eventsService.publish('session.crashed', { sessionId, sessionName });
-          this.stopHealthCheck(sessionName);
-        }
-      } catch (error) {
-        logger.error({ sessionName, sessionId, error: String(error) }, 'Health check failed');
-      }
-    }, intervalMs);
-
-    this.healthCheckIntervals.set(sessionName, interval);
-    logger.info({ sessionName, intervalMs }, 'Started health check');
+    const existing = this.healthMonitors.get(sessionName);
+    if (existing) this.retireMonitor(existing);
+    this.armHealthCheck(sessionName, sessionId, intervalMs, this.getLifecycleState(sessionName));
   }
 
   stopHealthCheck(sessionName: string): void {
-    const interval = this.healthCheckIntervals.get(sessionName);
-    if (interval) {
-      clearInterval(interval);
-      this.healthCheckIntervals.delete(sessionName);
-      logger.info({ sessionName }, 'Stopped health check');
+    const monitor = this.healthMonitors.get(sessionName);
+    if (monitor) this.retireMonitor(monitor);
+    const state = this.lifecycleStates.get(sessionName);
+    if (state) this.maybeDeleteLifecycleState(sessionName, state);
+  }
+
+  private armHealthCheck(
+    sessionName: string,
+    sessionId: string,
+    intervalMs: number,
+    state: SessionLifecycleState,
+  ): void {
+    const token = ++this.nextMonitorToken;
+    const monitor: HealthMonitorRecord = {
+      token,
+      sessionName,
+      sessionId,
+      intervalMs,
+      fence: state.fence,
+      interval: setInterval(() => {
+        void this.runHealthCheck(monitor).catch((error) => {
+          logger.error(
+            { sessionName, sessionId, token, fence: monitor.fence, error: String(error) },
+            'Health check or crash publication failed',
+          );
+        });
+      }, intervalMs),
+    };
+    monitor.interval.unref?.();
+    this.healthMonitors.set(sessionName, monitor);
+    logger.info(
+      { sessionName, sessionId, token, fence: state.fence, intervalMs },
+      'Started health check',
+    );
+  }
+
+  private async runHealthCheck(monitor: HealthMonitorRecord): Promise<void> {
+    const state = this.lifecycleStates.get(monitor.sessionName);
+    if (!state || !this.isActiveMonitor(monitor, state)) return;
+
+    state.observers += 1;
+    try {
+      const result = await this.healthCheck({ name: monitor.sessionName });
+      if (result.alive || !this.isActiveMonitor(monitor, state)) return;
+
+      await this.runSerializedLifecycle(monitor.sessionName, async (serializedState) => {
+        if (!this.isActiveMonitor(monitor, serializedState)) return;
+
+        this.retireMonitor(monitor);
+        logger.warn(
+          {
+            sessionName: monitor.sessionName,
+            sessionId: monitor.sessionId,
+            token: monitor.token,
+            fence: monitor.fence,
+          },
+          'Tmux session lost - publishing crashed event',
+        );
+        try {
+          await this.eventsService.publish('session.crashed', {
+            sessionId: monitor.sessionId,
+            sessionName: monitor.sessionName,
+          });
+        } catch (error) {
+          if (
+            !this.destroyed &&
+            serializedState.fence === monitor.fence &&
+            !this.healthMonitors.has(monitor.sessionName)
+          ) {
+            this.armHealthCheck(
+              monitor.sessionName,
+              monitor.sessionId,
+              monitor.intervalMs,
+              serializedState,
+            );
+          }
+          throw error;
+        }
+      });
+    } finally {
+      state.observers -= 1;
+      this.maybeDeleteLifecycleState(monitor.sessionName, state);
+    }
+  }
+
+  private isActiveMonitor(monitor: HealthMonitorRecord, state: SessionLifecycleState): boolean {
+    return (
+      this.healthMonitors.get(monitor.sessionName) === monitor && state.fence === monitor.fence
+    );
+  }
+
+  private retireMonitor(monitor: HealthMonitorRecord): void {
+    clearInterval(monitor.interval);
+    if (this.healthMonitors.get(monitor.sessionName) !== monitor) return;
+    this.healthMonitors.delete(monitor.sessionName);
+    logger.info(
+      {
+        sessionName: monitor.sessionName,
+        sessionId: monitor.sessionId,
+        token: monitor.token,
+        fence: monitor.fence,
+      },
+      'Stopped health check',
+    );
+  }
+
+  private getLifecycleState(sessionName: string): SessionLifecycleState {
+    const existing = this.lifecycleStates.get(sessionName);
+    if (existing) return existing;
+    const state: SessionLifecycleState = {
+      fence: 0,
+      tail: Promise.resolve(),
+      pendingOperations: 0,
+      observers: 0,
+    };
+    this.lifecycleStates.set(sessionName, state);
+    return state;
+  }
+
+  private async runSerializedLifecycle<T>(
+    sessionName: string,
+    operation: (state: SessionLifecycleState) => Promise<T>,
+  ): Promise<T> {
+    const state = this.getLifecycleState(sessionName);
+    state.pendingOperations += 1;
+    const result = state.tail.then(() => operation(state));
+    state.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await result;
+    } finally {
+      state.pendingOperations -= 1;
+      this.maybeDeleteLifecycleState(sessionName, state);
+    }
+  }
+
+  private maybeDeleteLifecycleState(sessionName: string, state: SessionLifecycleState): void {
+    if (
+      this.lifecycleStates.get(sessionName) === state &&
+      state.pendingOperations === 0 &&
+      state.observers === 0 &&
+      !this.healthMonitors.has(sessionName)
+    ) {
+      this.lifecycleStates.delete(sessionName);
     }
   }
 

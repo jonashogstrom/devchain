@@ -55,10 +55,13 @@ describe('SessionLifecycleFacade', () => {
   it('terminate delegates to SessionsService.terminateSession', async () => {
     const { facade, sessionsService } = build();
     await facade.terminate('s1');
-    expect(sessionsService.terminateSession).toHaveBeenCalledWith('s1');
+    expect(sessionsService.terminateSession).toHaveBeenCalledWith('s1', {
+      source: 'mobile-rpc',
+      reason: 'user-requested',
+    });
   });
 
-  describe('restart (atomic terminate + launch)', () => {
+  describe('restart (sequential terminate + launch)', () => {
     it('terminates the agent existing session then launches a new one', async () => {
       const { facade, sessionRuntime, sessionsService } = build();
       (sessionsService.listActiveSessions as jest.Mock).mockResolvedValue([
@@ -68,7 +71,10 @@ describe('SessionLifecycleFacade', () => {
 
       const result = await facade.restart('a1', 'p1');
 
-      expect(sessionsService.terminateSession).toHaveBeenCalledWith('old-session');
+      expect(sessionsService.terminateSession).toHaveBeenCalledWith('old-session', {
+        source: 'mobile-rpc',
+        reason: 'restart',
+      });
       expect(sessionRuntime.launch).toHaveBeenCalledWith({ agentId: 'a1', projectId: 'p1' });
       expect(result).toEqual({ id: 'new-session' });
     });

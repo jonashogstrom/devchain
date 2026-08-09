@@ -1294,7 +1294,7 @@ export const automationSubscribers = sqliteTable(
     eventName: text('event_name').notNull(), // Must match a watcher's eventName
 
     // Optional filter (JSON)
-    // Schema: { field: string, operator: 'equals' | 'contains' | 'regex', value: string } | null
+    // Schema: EventFilterCondition | { combinator: 'and' | 'or', filters: [EventFilterCondition, ...EventFilterCondition[]] } | null
     eventFilter: text('event_filter', { mode: 'json' }),
 
     // Action configuration

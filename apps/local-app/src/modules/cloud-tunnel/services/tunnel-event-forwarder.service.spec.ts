@@ -74,7 +74,7 @@ describe('TunnelEventForwarderService', () => {
 
   afterEach(() => service.onModuleDestroy());
 
-  it('only registers the 8 allowlisted events', () => {
+  it('only registers the 7 allowlisted events', () => {
     expect(TUNNEL_FORWARDED_EVENTS).toEqual([
       'session.transcript.updated',
       'claude.hooks.ask_user_question.pending',
@@ -83,7 +83,6 @@ describe('TunnelEventForwarderService', () => {
       'session.activity.changed',
       'agent.created',
       'agent.deleted',
-      'chat.message.created',
     ]);
     for (const event of TUNNEL_FORWARDED_EVENTS) {
       expect(emitter.listeners(event)).toHaveLength(1);
@@ -376,45 +375,13 @@ describe('TunnelEventForwarderService', () => {
     expect(tunnelClient.sendPush).not.toHaveBeenCalled();
   });
 
-  it('forwards chat.message.created as a chat/<threadId> frame SEALED when the lane is encrypted', async () => {
-    channelMode = 'encrypted';
-    emitter.emit('chat.message.created', {
-      threadId: 't1',
-      message: { id: 'm1', role: 'user', content: 'hi' },
-    });
-    await flush();
+  // ── E2EE push payload sealing + content-bearing guard ──
 
-    expect(tunnelClient.sendPush).toHaveBeenCalledTimes(1);
-    const frame = tunnelClient.sendPush.mock.calls[0][0];
-    expect(frame).toMatchObject({
-      type: 'push',
-      v: 2,
-      topic: 'chat/t1',
-      eventType: 'message.created',
-    });
-    expect(frame.payload).toMatchObject({
-      alg: 'XC20P',
-      __plain: { id: 'm1', role: 'user', content: 'hi' },
-    });
-    expect(frame).not.toHaveProperty('eventId');
-  });
-
-  it('drops a chat.message.created frame with a missing threadId (scope check fail-closed)', async () => {
-    emitter.emit('chat.message.created', { message: { id: 'm1' } });
-    await flush();
-
-    expect(activeSessions.getSessionProjectScope).not.toHaveBeenCalled();
-    expect(tunnelClient.sendPush).not.toHaveBeenCalled();
-  });
-
-  // ── Phase 3: E2EE push payload sealing + content-bearing guard ──
-
-  it('declares exactly the content-bearing events (AUQ pending + chat + transcript deltas + agent names)', () => {
+  it('declares exactly the content-bearing events (AUQ pending + transcript deltas + agent names)', () => {
     expect([...CONTENT_BEARING_PUSH_EVENTS].sort()).toEqual(
       [
         'agent.created',
         'agent.deleted',
-        'chat.message.created',
         'claude.hooks.ask_user_question.pending',
         'session.transcript.updated',
       ].sort(),
@@ -443,17 +410,6 @@ describe('TunnelEventForwarderService', () => {
     await flush();
 
     // Plaintext content must NEVER ship over push to a non-capable peer.
-    expect(tunnelClient.sendPush).not.toHaveBeenCalled();
-  });
-
-  it('WITHHOLDS chat.message.created (message body) when the peer is not E2EE-capable', async () => {
-    channelMode = 'plaintext';
-    emitter.emit('chat.message.created', {
-      threadId: 't1',
-      message: { id: 'm1', content: 'secret' },
-    });
-    await flush();
-
     expect(tunnelClient.sendPush).not.toHaveBeenCalled();
   });
 

@@ -27,7 +27,6 @@ const TEST_AGENT: Agent = {
 describe('McpService', () => {
   let service: McpService;
   let storage: jest.Mocked<StorageService>;
-  let chatService: jest.Mocked<unknown>;
   let sessionsService: jest.Mocked<unknown>;
   let terminalGateway: jest.Mocked<unknown>;
   let terminalIO: jest.Mocked<unknown>;
@@ -75,14 +74,6 @@ describe('McpService', () => {
       getGuestsByIdPrefix: jest.fn().mockResolvedValue([]),
       getEpicsByIdPrefix: jest.fn().mockResolvedValue([]),
     } as unknown as jest.Mocked<StorageService>;
-
-    chatService = {
-      createGroupThread: jest.fn(),
-      getThread: jest.fn(),
-      createMessage: jest.fn(),
-      listMessages: jest.fn(),
-      createDirectThread: jest.fn(),
-    };
 
     sessionsService = {
       getAgentSession: jest.fn(),
@@ -171,7 +162,6 @@ describe('McpService', () => {
 
     service = new McpService(
       storage,
-      chatService as never,
       sessionsService as never,
       terminalGateway as never,
       epicsService as never,
@@ -428,7 +418,6 @@ describe('McpService', () => {
       // Create service without guestsService
       const serviceNoGuests = new McpService(
         storage,
-        chatService as never,
         sessionsService as never,
         terminalGateway as never,
         epicsService as never,
@@ -508,29 +497,25 @@ describe('McpService', () => {
       (terminalIO as { sessionExists: jest.Mock }).sessionExists.mockResolvedValue(true);
     });
 
-    it('blocks guest from using threadId in send_message', async () => {
+    it.each([
+      ['threadId', '00000000-0000-0000-0000-000000000001'],
+      ['recipient', 'user'],
+    ])('rejects retired send_message field %s before guest routing', async (field, value) => {
       const response = await service.handleToolCall('devchain_send_message', {
         sessionId: GUEST_ID,
-        threadId: '00000000-0000-0000-0000-000000000001',
+        [field]: value,
         message: 'Hello',
       });
 
       expect(response.success).toBe(false);
-      expect(response.error?.code).toBe('GUEST_THREAD_NOT_ALLOWED');
-      expect(response.error?.message).toContain('Guests cannot use threaded messaging');
-      expect(response.error?.message).toContain('recipientAgentNames');
-    });
-
-    it('blocks guest from sending DM to user (recipient=user)', async () => {
-      const response = await service.handleToolCall('devchain_send_message', {
-        sessionId: GUEST_ID,
-        recipient: 'user',
-        message: 'Hello user',
-      });
-
-      expect(response.success).toBe(false);
-      expect(response.error?.code).toBe('GUEST_USER_DM_NOT_ALLOWED');
-      expect(response.error?.message).toContain('Guests cannot send direct messages to users');
+      expect(response.error?.code).toBe('VALIDATION_ERROR');
+      expect(response.error?.data).toEqual(
+        expect.objectContaining({
+          issues: expect.arrayContaining([
+            expect.objectContaining({ code: 'unrecognized_keys', keys: [field] }),
+          ]),
+        }),
+      );
     });
 
     it('self-team fallback: guest sender returns NO_SELF_TEAM', async () => {
@@ -543,29 +528,15 @@ describe('McpService', () => {
       expect(response.error?.code).toBe('NO_SELF_TEAM');
     });
 
-    it('blocks guest from using devchain_activity_start', async () => {
-      const response = await service.handleToolCall('devchain_activity_start', {
-        sessionId: GUEST_ID,
-        title: 'Working on task',
-      });
+    it.each(['devchain_activity_start', 'devchain_activity_finish'])(
+      'returns UNKNOWN_TOOL for retired %s',
+      async (toolName) => {
+        const response = await service.handleToolCall(toolName, { sessionId: GUEST_ID });
 
-      expect(response.success).toBe(false);
-      expect(response.error?.code).toBe('GUEST_ACTIVITY_NOT_ALLOWED');
-      expect(response.error?.message).toContain('Guests cannot use activity tools');
-    });
-
-    it('blocks guest from using devchain_activity_finish', async () => {
-      // Use valid params for ActivityFinishParamsSchema (sessionId, threadId?, message?, status?)
-      const response = await service.handleToolCall('devchain_activity_finish', {
-        sessionId: GUEST_ID,
-        message: 'Done',
-        status: 'success',
-      });
-
-      expect(response.success).toBe(false);
-      expect(response.error?.code).toBe('GUEST_ACTIVITY_NOT_ALLOWED');
-      expect(response.error?.message).toContain('Guests cannot use activity tools');
-    });
+        expect(response.success).toBe(false);
+        expect(response.error?.code).toBe('UNKNOWN_TOOL');
+      },
+    );
 
     it('allows guest to use pooled messaging with recipientAgentNames', async () => {
       // Mock agent lookup for recipient

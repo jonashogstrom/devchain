@@ -9,12 +9,7 @@
  * Run: pnpm --filter local-app test -- --testPathPatterns service-unavailable.characterization
  */
 
-import {
-  handleSendMessage,
-  handleChatAck,
-  handleChatListMembers,
-  handleChatReadHistory,
-} from './chat-tools';
+import { handleSendMessage } from './chat-tools';
 import {
   handleListReviews,
   handleGetReview,
@@ -40,12 +35,9 @@ import {
 import { handleGetAgentByName } from './agent-tools';
 import { handleListSessions, handleRegisterGuest } from './session-tools';
 import { handleListSkills, handleGetSkill } from './skill-tools';
-import { handleActivityStart, handleActivityFinish } from './activity-tools';
 import type { McpResponse } from '../../dtos/mcp.dto';
 import { missingSessionResolver } from '../utils/session-context-helpers';
 import { createNullAdapter } from './null-adapter';
-import type { ChatService } from '../../../chat/services/chat.service';
-import type { SessionsService } from '../../../sessions/services/sessions.service';
 import type { TeamsService } from '../../../teams/services/teams.service';
 import type { SettingsService } from '../../../settings/services/settings.service';
 import type { AgentMessageDeliveryService } from '../../../agent-message-delivery/agent-message-delivery.service';
@@ -55,9 +47,16 @@ import type { ReviewSuggestionApplier } from '../../../reviews/services/review-s
 import type { SkillsService } from '../../../skills/services/skills.service';
 import type { SessionsService } from '../../../sessions/services/sessions.service';
 import type { GuestsService } from '../../../guests/services/guests.service';
-import type { ChatService } from '../../../chat/services/chat.service';
 import type { TerminalIOService } from '../../../terminal/services/terminal-io/terminal-io.service';
 import type { InstructionsResolver } from '../instructions-resolver';
+import type { ProjectCommunicationService } from '../../../project-communication/project-communication.service';
+import type { ChatToolContext } from './chat-context';
+import type { ReviewToolContext } from './review-context';
+import type { EpicToolContext } from './epic-context';
+import type { TeamsToolContext } from './teams-context';
+import type { AgentToolContext } from './agent-context';
+import type { SessionToolContext } from './session-context';
+import type { SkillToolContext } from './skill-context';
 
 jest.mock('../../../../common/logging/logger', () => ({
   createLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() }),
@@ -136,13 +135,14 @@ function storageWithAgent(): Record<string, jest.Mock> {
 function createNullChatContext(overrides: Partial<ChatToolContext> = {}): ChatToolContext {
   return {
     storage: createNullAdapter('StorageService'),
-    chatService: createNullAdapter<ChatService>('ChatService'),
-    sessionsService: createNullAdapter<SessionsService>('SessionsService'),
     teamsService: createNullAdapter<TeamsService>('TeamsService'),
     agentMessageDelivery: createNullAdapter<AgentMessageDeliveryService>(
       'AgentMessageDeliveryService',
     ),
     settingsService: createNullAdapter<SettingsService>('SettingsService'),
+    projectCommunicationService: createNullAdapter<ProjectCommunicationService>(
+      'ProjectCommunicationService',
+    ),
     resolveSessionContext: () => Promise.resolve(missingSessionResolver()),
     ...overrides,
   };
@@ -170,27 +170,12 @@ describe('session-context-helpers: missingSessionResolver', () => {
 });
 
 // ---------------------------------------------------------------------------
-// §2  chat-tools.ts — 8 SERVICE_UNAVAILABLE sites
+// §2  chat-tools.ts — retained terminal-routing SERVICE_UNAVAILABLE sites
 // ---------------------------------------------------------------------------
 describe('chat-tools SERVICE_UNAVAILABLE', () => {
-  it('handleSendMessage: sessionsService missing', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      sessionsService: createNullAdapter<SessionsService>('SessionsService'),
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleSendMessage(ctx, {
-      sessionId: SESSION_ID,
-      message: 'hi',
-      recipient: 'agents',
-    });
-    assertServiceUnavailable(result, 'full app context');
-  });
-
   it('handleSendMessage: teamsService missing (team routing path)', async () => {
     const ctx: ChatToolContext = createNullChatContext({
       storage: storageWithAgent() as never,
-      sessionsService: { listActiveSessions: jest.fn().mockResolvedValue([]) } as never,
       resolveSessionContext: resolveToAgent(),
     });
     const result = await handleSendMessage(ctx, {
@@ -206,7 +191,6 @@ describe('chat-tools SERVICE_UNAVAILABLE', () => {
     storage.getAgentByName.mockResolvedValue({ id: 'r1', name: 'Agent-B', projectId: PROJECT_ID });
     const ctx: ChatToolContext = createNullChatContext({
       storage: storage as never,
-      sessionsService: { listActiveSessions: jest.fn().mockResolvedValue([]) } as never,
       resolveSessionContext: resolveToAgent(),
     });
     const result = await handleSendMessage(ctx, {
@@ -215,71 +199,6 @@ describe('chat-tools SERVICE_UNAVAILABLE', () => {
       recipientAgentNames: ['Agent-B'],
     });
     assertServiceUnavailable(result, 'standalone MCP mode');
-  });
-
-  it('handleSendMessage: chatService missing (thread/user path)', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      sessionsService: { listActiveSessions: jest.fn().mockResolvedValue([]) } as never,
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleSendMessage(ctx, {
-      sessionId: SESSION_ID,
-      message: 'hi',
-      threadId: 'thread-1',
-    });
-    assertServiceUnavailable(result, 'full app context');
-  });
-
-  it('handleSendMessage: agentMessageDelivery missing (thread delivery path)', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      sessionsService: { listActiveSessions: jest.fn().mockResolvedValue([]) } as never,
-      chatService: {
-        getThread: jest
-          .fn()
-          .mockResolvedValue({ id: 'thread-1', members: [AGENT_ID, 'other-agent'] }),
-        createMessage: jest.fn().mockResolvedValue({ id: 'msg-1' }),
-      } as never,
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleSendMessage(ctx, {
-      sessionId: SESSION_ID,
-      message: 'hi',
-      threadId: 'thread-1',
-    });
-    assertServiceUnavailable(result, 'standalone MCP mode');
-  });
-
-  it('handleChatAck: chatService missing', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleChatAck(ctx, {
-      sessionId: SESSION_ID,
-      thread_id: 'tid',
-      message_id: 'mid',
-    });
-    assertServiceUnavailable(result, 'full app context');
-  });
-
-  it('handleChatListMembers: chatService missing', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleChatListMembers(ctx, { thread_id: 'tid' });
-    assertServiceUnavailable(result, 'full app context');
-  });
-
-  it('handleChatReadHistory: chatService missing', async () => {
-    const ctx: ChatToolContext = createNullChatContext({
-      storage: storageWithAgent() as never,
-      resolveSessionContext: resolveToAgent(),
-    });
-    const result = await handleChatReadHistory(ctx, { thread_id: 'tid' });
-    assertServiceUnavailable(result, 'full app context');
   });
 });
 
@@ -566,29 +485,6 @@ describe('skill-tools SERVICE_UNAVAILABLE', () => {
       resolveSessionContext: resolveToAgent(),
     };
     const result = await handleGetSkill(ctx, { sessionId: SESSION_ID, slug: 'test/skill' });
-    assertServiceUnavailable(result);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// §9  activity-tools.ts — 2 SERVICE_UNAVAILABLE sites
-// ---------------------------------------------------------------------------
-describe('activity-tools SERVICE_UNAVAILABLE', () => {
-  it('handleActivityStart: chatService is null adapter', async () => {
-    const ctx: ActivityToolContext = {
-      chatService: createNullAdapter<ChatService>('ChatService'),
-      resolveSessionContext: resolveToAgent(),
-    };
-    const result = await handleActivityStart(ctx, { sessionId: SESSION_ID, title: 'Working' });
-    assertServiceUnavailable(result);
-  });
-
-  it('handleActivityFinish: chatService is null adapter', async () => {
-    const ctx: ActivityToolContext = {
-      chatService: createNullAdapter<ChatService>('ChatService'),
-      resolveSessionContext: resolveToAgent(),
-    };
-    const result = await handleActivityFinish(ctx, { sessionId: SESSION_ID });
     assertServiceUnavailable(result);
   });
 });

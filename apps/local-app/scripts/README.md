@@ -1,114 +1,44 @@
-# Migration Helper Scripts
+# Local App Scripts
 
-This directory contains helper scripts for database migrations and verification.
+This index explains maintained migration and diagnostic scripts. Script source and `package.json` are canonical; historical scripts are not templates for new migrations.
 
-The opt-in memory integration harness is documented in [`memory-soak/README.md`](memory-soak/README.md). Run a named scenario with `pnpm --filter local-app memory-soak -- --scenario host-burst-plateau`; it is intentionally outside the default test gate.
+## Migration commands
 
-## 🎯 Quick Reference
+| Task | Command |
+|---|---|
+| Validate journal | `pnpm --filter local-app check:journal` |
+| Generate migration | `pnpm --filter local-app db:generate` |
+| Apply migrations | `pnpm --filter local-app db:migrate` |
+| Inspect with Drizzle Studio | `pnpm --filter local-app db:studio` |
+| Verify current schema | `pnpm --filter local-app exec ts-node scripts/verify-schema.ts` |
+| Inspect applied migrations | `pnpm --filter local-app exec ts-node scripts/check-migrations.ts` |
 
-### Run Migrations
-```bash
-npx tsx scripts/migrate.ts
-```
+The schema source is `src/modules/storage/db/schema.ts`; committed migrations and journal metadata live in `drizzle/`. Use `scripts/migrate.ts` only when its explicit SQLite path/control is required. Do not use one-time repair scripts as the normal migration path.
 
-### Verify Database State
-```bash
-npx tsx scripts/verify-schema.ts
-npx tsx scripts/check-migrations.ts
-```
+## Pre-change checks
 
-## 📋 Available Scripts
+1. Stop Local App processes and active sessions that can write the database.
+2. Back up the actual database path reported by current config.
+3. Run `check:journal` before generating or applying a migration.
+4. Review generated SQL and journal changes.
+5. Apply against a disposable copy before the operator database.
+6. Run schema verification and the relevant storage integration tests.
 
-### Core Migration Scripts
+## Diagnostic and maintenance scripts
 
-- **`migrate.ts`**
-  Runs Drizzle migrations from `/drizzle` folder
-  ```bash
-  npx tsx scripts/migrate.ts
-  ```
+| Script | Role |
+|---|---|
+| `check-cycles.ts` | Dependency-cycle validation used by `madge:check` |
+| `fetch-pricing-data.ts` | Build-time provider pricing data refresh |
+| `test-health-report.ts` | Render test-health evidence from generated Jest output |
+| `terminal-window-heap-evidence.mjs` | Focused terminal heap evidence |
+| `xterm6-browser-smoke.mjs` | Browser smoke contract for xterm compatibility |
+| `memory-soak/` | Protected memory-soak harness and evidence runbooks |
 
-- **`manual-migration.ts`**
-  Example of manual migration for complex schema changes
-  Used for migration 0001 to create providers table
+## Historical repair scripts
 
-- **`cleanup-and-fix.ts`**
-  Fixed agent_profiles schema (removed old provider column)
-  **Note:** This was a one-time fix, kept as reference
+`manual-migration.ts`, `cleanup-and-fix.ts`, `fix-migrations.ts`, `apply-migration-0001.ts`, and the `fix-agent-profiles-schema*.ts` files record earlier recovery work. Do not run them against a current database without a code-backed incident procedure.
 
-### Verification Scripts
+## Memory soak
 
-- **`verify-schema.ts`**
-  Comprehensive schema verification:
-  - Checks for old/new columns
-  - Verifies constraints (NOT NULL, FK, etc.)
-  - Lists applied migrations
-  ```bash
-  npx tsx scripts/verify-schema.ts
-  ```
-
-- **`check-migrations.ts`**
-  Shows database tables and applied migrations
-  ```bash
-  npx tsx scripts/check-migrations.ts
-  ```
-
-- **`check-providers-table.ts`**
-  Provider-specific verification:
-  - Table schema
-  - Row count
-  - Provider list
-  ```bash
-  npx tsx scripts/check-providers-table.ts
-  ```
-
-### One-Time Fix Scripts (Historical)
-
-These were used to fix the initial migration issues:
-
-- `fix-migrations.ts` - Fixed migration tracking
-- `apply-migration-0001.ts` - Attempted automatic migration
-- `fix-agent-profiles-schema.ts` - First attempt at schema fix
-- `fix-agent-profiles-schema-safe.ts` - Second attempt with FK handling
-
-**You don't need to run these again** - they're kept for reference.
-
-## ✅ Current Database State
-
-**Schema Status:** ✅ Correct
-- `providers` table exists with proper schema
-- `agent_profiles.provider_id` is NOT NULL and references providers
-- Old `provider` column removed
-- All foreign keys working
-
-**Migration Status:** ✅ Tracked
-- Migration 0000: ✅ Applied & tracked
-- Migration 0001: ✅ Applied & tracked
-
-**API Status:** ✅ Working
-- `/api/providers` - Returns providers with providerId
-- `/api/profiles` - Returns profiles with providerId
-
-## 🚀 Future Migrations
-
-For future schema changes:
-
-1. Modify `/src/modules/storage/db/schema.ts`
-2. Generate migration: `pnpm db:generate`
-3. Apply migration: `npx tsx scripts/migrate.ts`
-4. Verify: `npx tsx scripts/verify-schema.ts`
-
-See `/apps/local-app/MIGRATIONS.md` for detailed guide.
-
-## 🐛 Troubleshooting
-
-If migrations fail:
-1. Run `npx tsx scripts/check-migrations.ts` to see current state
-2. Run `npx tsx scripts/verify-schema.ts` to check schema
-3. Check `/apps/local-app/MIGRATIONS.md` for common issues
-4. For complex fixes, use the one-time scripts as templates
-
-## 📚 Learn More
-
-- Full migration guide: `/apps/local-app/MIGRATIONS.md`
-- Schema definition: `/src/modules/storage/db/schema.ts`
-- Migration folder: `/drizzle`
+The opt-in harness is documented in [Memory Soak](memory-soak/README.md). Its artifact hashes, fixtures, evidence language, and comparison authority are correctness-bearing; do not simplify that runbook as ordinary conceptual documentation.

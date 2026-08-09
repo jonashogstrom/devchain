@@ -582,6 +582,36 @@ describe('template round-trip contract safety net (real storage)', () => {
       expect(normalizeExport(exportC)).toEqual(normalizeExport(exportA));
     });
 
+    it('preserves a compound subscriber filter through two real import/export cycles', async () => {
+      await seedClaudeProvider(h);
+      const template = allSectionsTemplate();
+      const compoundFilter = {
+        combinator: 'or',
+        filters: [
+          { field: 'agentName', operator: 'equals', value: 'Coder' },
+          { field: 'title', operator: 'contains', value: 'urgent' },
+        ],
+      };
+      (template.subscribers as AnyRec[])[0].eventFilter = compoundFilter;
+
+      const projectA = await freshProject(h, 'Compound A');
+      await importProjectWithHelper(
+        { projectId: projectA, payload: template },
+        importDeps(h) as never,
+      );
+      const exportA = (await exportProjectWithHelper(projectA, undefined, exportDeps(h))) as AnyRec;
+
+      const projectB = await freshProject(h, 'Compound B');
+      await importProjectWithHelper(
+        { projectId: projectB, payload: exportA },
+        importDeps(h) as never,
+      );
+      const exportB = (await exportProjectWithHelper(projectB, undefined, exportDeps(h))) as AnyRec;
+
+      expect((exportA.subscribers as AnyRec[])[0].eventFilter).toEqual(compoundFilter);
+      expect((exportB.subscribers as AnyRec[])[0].eventFilter).toEqual(compoundFilter);
+    });
+
     it('replace-import preserves agent effortOverride and config model/effort (import path is correct)', async () => {
       await seedClaudeProvider(h);
       const projectA = await freshProject(h, 'Fidelity A');

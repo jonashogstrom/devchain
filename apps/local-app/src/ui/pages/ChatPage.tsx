@@ -1,7 +1,6 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
-import { Loader2, AlertCircle, MessageSquare } from 'lucide-react';
+import { Loader2, AlertCircle, Terminal as TerminalIcon } from 'lucide-react';
 import type { Preset } from '@/ui/lib/preset-types';
 import { restartKeyForMain } from '@/ui/lib/restart-keys';
 import {
@@ -9,11 +8,8 @@ import {
   useTerminalWindows,
   useWorktreeTerminalWindowManager,
 } from '@/ui/terminal-windows';
-import { parseMentions } from '@/ui/lib/chat';
-import { useChatLauncher } from '@/ui/components/chat/ChatLauncher';
 import { useToastHelpers } from '@/ui/lib/toast-helpers';
 import { useSelectedProject } from '@/ui/hooks/useProjectSelection';
-import { usePointerCoarse } from '@/ui/hooks/usePointerCoarse';
 import { useActiveSessionConfirm } from '@/ui/hooks/useActiveSessionConfirm';
 import { ConfirmDialog } from '@/ui/components/shared/ConfirmDialog';
 import { useWorktreeAgents, type WorktreeAgentGroup } from '@/ui/hooks/useWorktreeAgents';
@@ -56,7 +52,7 @@ import {
 } from '@/ui/components/ui/dialog';
 import { useChatSocket } from '@/ui/hooks/useChatSocket';
 import { useChatSessionControls } from '@/ui/hooks/useChatSessionControls';
-import { useChatThreadUiState } from '@/ui/hooks/useChatThreadUiState';
+import { useAgentConsoleUiState } from '@/ui/hooks/useAgentConsoleUiState';
 import { useFetchFactory } from '@/ui/hooks/useFetchFactory';
 import type { TerminalHandle } from '@/ui/components/Terminal';
 import { useInlineTerminalPromptShortcut } from '@/ui/hooks/chat/useInlineTerminalPromptShortcut';
@@ -68,15 +64,9 @@ import {
   type ChatSidebarSessionController,
   type ChatSidebarAdminActions,
 } from '@/ui/components/chat/ChatSidebar';
-import { ChatThreadHeader } from '@/ui/components/chat/ChatThreadHeader';
-import { ChatMessageList } from '@/ui/components/chat/ChatMessageList';
-import { ChatComposer } from '@/ui/components/chat/ChatComposer';
-import { ChatModals } from '@/ui/components/chat/ChatModals';
+import { SessionLifecycleModals } from '@/ui/components/chat/SessionLifecycleModals';
 import { PreviousSessionsTable } from '@/ui/components/chat/PreviousSessionsTable';
 import { SessionReadSlideOver } from '@/ui/components/chat/SessionReadSlideOver';
-
-// Feature flags
-const CHAT_INLINE_TERMINAL_ENABLED = true;
 
 /** Create a worktree-aware fetch function for provider configs. */
 export function createWorktreeProviderConfigFetcher(
@@ -100,6 +90,7 @@ interface SelectedWorktreeAgent {
   worktreeName: string;
   agentId: string;
   group: WorktreeAgentGroup;
+  mainAgentIdAtSelection: string | null;
 }
 
 interface WorktreeInlineTerminalProps {
@@ -152,18 +143,13 @@ export function ChatPage() {
   const { selectedProjectId, selectedProject, projectsLoading } = useSelectedProject();
   const projectId = selectedProjectId ?? null;
   const hasSelectedProject = Boolean(projectId);
-  const isCoarsePointer = usePointerCoarse();
   const openTerminalWindow = useTerminalWindowManager();
   const openWorktreeTerminalWindow = useWorktreeTerminalWindowManager();
   const apiFetch = useFetchFactory();
-  const { windows: terminalWindows, closeWindow, focusedWindowId } = useTerminalWindows();
+  const { windows: terminalWindows, focusedWindowId } = useTerminalWindows();
   const [mainTerminalHandle, setMainTerminalHandle] = useState<TerminalHandle | null>(null);
   const [worktreeTerminalHandle, setWorktreeTerminalHandle] = useState<TerminalHandle | null>(null);
   const [customPromptPickerOpen, setCustomPromptPickerOpen] = useState(false);
-
-  // Derive selectedThreadId from URL params FIRST (before hooks that depend on it)
-  const [searchParams] = useSearchParams();
-  const selectedThreadIdFromUrl = searchParams.get('thread');
 
   // Tick for relative durations (busy badge)
   const [, setNowTick] = useState(0);
@@ -172,10 +158,6 @@ export function ChatPage() {
     return () => clearInterval(id);
   }, []);
 
-  // Chat launcher for direct thread creation
-  const { launchChat, isLaunching: isLaunchingChat } = useChatLauncher({
-    projectId,
-  });
   const { worktreeAgentGroups, worktreeAgentGroupsLoading } = useWorktreeAgents(projectId);
   const [selectedWorktreeAgent, setSelectedWorktreeAgent] = useState<SelectedWorktreeAgent | null>(
     null,
@@ -185,50 +167,34 @@ export function ChatPage() {
   // Initialize Hooks
   // ============================================
 
-  // Queries and mutations (use URL-derived selectedThreadId)
   const queries = useChatQueries({
     projectId,
-    selectedThreadId: selectedThreadIdFromUrl,
     projectRootPath: selectedProject?.rootPath,
   });
 
-  // Thread UI state - called ONCE with real data
-  const threadUiState = useChatThreadUiState({
+  const agentUiState = useAgentConsoleUiState({
     projectId,
     agentPresence: queries.agentPresence,
-    allThreads: queries.allThreads,
     agents: queries.agents,
+    agentsQuerySuccess: queries.agentsQuerySuccess,
   });
 
   // Inline terminal attach handler
   const handleInlineTerminalAttach = useCallback(
     (agentId: string, sessionId: string | null) => {
-      threadUiState.attachInlineTerminalForSelectedThread(agentId, sessionId);
+      agentUiState.attachInlineTerminalForAgent(agentId, sessionId);
     },
-    [threadUiState],
-  );
-
-  // Caller-side predicate for useChatSessionControls
-  const canAttachInlineTerminal = useCallback(
-    (agentId: string): boolean => {
-      const threadId = threadUiState.selectedThreadId;
-      if (!threadId) return false;
-      const thread = queries.allThreads.find((t) => t.id === threadId);
-      return Boolean(thread && !thread.isGroup && thread.members?.[0] === agentId);
-    },
-    [threadUiState.selectedThreadId, queries.allThreads],
+    [agentUiState],
   );
 
   // Session controls
   const sessionControls = useChatSessionControls({
     projectId,
-    selectedThreadId: threadUiState.selectedThreadId,
+    selectedAgentId: agentUiState.selectedAgentId,
     agentPresence: queries.agentPresence,
     agents: queries.agents,
     presenceReady: queries.presenceReady,
-    canAttachInlineTerminal,
     onInlineTerminalAttach: handleInlineTerminalAttach,
-    onTerminalMenuClose: () => threadUiState.setTerminalMenuOpen(false),
   });
 
   // ============================================
@@ -394,70 +360,29 @@ export function ChatPage() {
   // ── Quick-edit team modal (domain hook) ──
   const quickEdit = useTeamQuickEdit({ projectId });
 
-  // Get latest selected thread ID for socket callbacks
-  const getLatestSelectedThreadId = useCallback(
-    () => threadUiState.latestSelectedThreadRef.current,
-    [threadUiState.latestSelectedThreadRef],
-  );
-
-  // Check if inline terminal is active
-  const inlineActiveRef = useRef(threadUiState.showInlineTerminal);
-  useEffect(() => {
-    inlineActiveRef.current = threadUiState.showInlineTerminal;
-  }, [threadUiState.showInlineTerminal]);
-  const isInlineActive = useCallback(() => inlineActiveRef.current, []);
-
   // Socket handling - capture socketRef for ESC key interception
-  const { socketRef } = useChatSocket({
-    projectId,
-    selectedThreadId: threadUiState.selectedThreadId,
-    agents: queries.agents,
-    onInlineUnread: threadUiState.incrementInlineUnread,
-    getLatestSelectedThreadId,
-    isInlineActive,
-  });
+  const { socketRef } = useChatSocket({ projectId });
 
   // ============================================
   // Derived State
   // ============================================
 
-  const {
-    currentThread,
-    currentThreadMembers,
-    selectedAgent,
-    threadDisplayName,
-    isDirectMessage,
-    inlineTerminalState,
-    showInlineTerminal,
-    inlineTerminalSessionId,
-    inlineUnreadCount,
-  } = threadUiState;
+  const { selectedAgent, inlineTerminalState, showInlineTerminal, inlineTerminalSessionId } =
+    agentUiState;
 
   const selectedAgentPresence = selectedAgent ? queries.agentPresence[selectedAgent.id] : undefined;
-  const isSelectedAgentOnline = Boolean(selectedAgentPresence?.online);
-
-  const offlineGroupMembers = useMemo(() => {
-    if (!currentThread?.isGroup) return [];
-    return currentThreadMembers.filter((member) => !member.online);
-  }, [currentThread, currentThreadMembers]);
-
-  const canInviteMembers = Boolean(
-    currentThread && currentThread.isGroup && currentThread.createdByType === 'user',
+  const isSelectedAgentOnline = Boolean(
+    selectedAgentPresence?.online && selectedAgentPresence.sessionId,
   );
-
-  const inviteableAgents = useMemo(() => {
-    if (!currentThread?.members) {
-      return queries.agents;
-    }
-    return queries.agents.filter((agent) => !currentThread.members!.includes(agent.id));
-  }, [queries.agents, currentThread]);
 
   const inlineTerminalAgentName = inlineTerminalState
     ? (queries.agents.find((a) => a.id === inlineTerminalState.agentId)?.name ?? null)
     : null;
   const inlineTerminalAgentId = inlineTerminalState?.agentId ?? null;
   const inlineTerminalSession = inlineTerminalSessionId
-    ? queries.activeSessions.find((session) => session.id === inlineTerminalSessionId)
+    ? Array.isArray(queries.activeSessions)
+      ? queries.activeSessions.find((session) => session.id === inlineTerminalSessionId)
+      : undefined
     : undefined;
   const inlineTerminalSessionName = inlineTerminalSession?.name ?? null;
   const isInlineTerminalSessionRunning = inlineTerminalSession?.status === 'running';
@@ -481,27 +406,17 @@ export function ChatPage() {
   );
 
   // Session transcript for Session tab
-  const sessionTranscript = useSessionTranscript(inlineTerminalSessionId, {
-    enableTranscript: !isPagedTranscriptEnabled() && inlineActiveTab === 'session',
-    isSessionRunning: isInlineTerminalSessionRunning,
-  });
+  const sessionTranscript = useSessionTranscript(
+    inlineTerminalSession ? inlineTerminalSessionId : null,
+    {
+      enableTranscript: !isPagedTranscriptEnabled() && inlineActiveTab === 'session',
+      isSessionRunning: isInlineTerminalSessionRunning,
+    },
+  );
 
   // ============================================
   // Handlers
   // ============================================
-
-  const handleSendMessage = useCallback(
-    (content: string, targets?: string[]) => {
-      if (!threadUiState.selectedThreadId) return;
-      queries.sendMessageMutation.mutate({
-        threadId: threadUiState.selectedThreadId,
-        content,
-        targets,
-      });
-      threadUiState.setMessageInput('');
-    },
-    [threadUiState, queries.sendMessageMutation],
-  );
 
   const handleLaunchWorktreeAgentChat = useCallback(
     (group: WorktreeAgentGroup, agentId: string) => {
@@ -515,23 +430,44 @@ export function ChatPage() {
         return;
       }
 
-      threadUiState.handleSelectThread(null);
       setSelectedWorktreeAgent({
         worktreeName: group.name,
         agentId,
         group,
+        mainAgentIdAtSelection: agentUiState.selectedAgentId,
       });
     },
-    [threadUiState, toast],
+    [agentUiState.selectedAgentId, toast],
   );
 
-  const handleSelectThread = useCallback(
-    (threadId: string) => {
+  const handleSelectMainAgent = useCallback(
+    (agentId: string) => {
       setSelectedWorktreeAgent(null);
-      threadUiState.handleSelectThread(threadId);
+      agentUiState.handleSelectAgent(agentId);
     },
-    [threadUiState],
+    [agentUiState],
   );
+
+  useEffect(() => {
+    if (!selectedWorktreeAgent) {
+      return;
+    }
+
+    if (
+      selectedWorktreeAgent.mainAgentIdAtSelection === null &&
+      agentUiState.selectedAgentId !== null
+    ) {
+      setSelectedWorktreeAgent({
+        ...selectedWorktreeAgent,
+        mainAgentIdAtSelection: agentUiState.selectedAgentId,
+      });
+      return;
+    }
+
+    if (agentUiState.selectedAgentId !== selectedWorktreeAgent.mainAgentIdAtSelection) {
+      setSelectedWorktreeAgent(null);
+    }
+  }, [agentUiState.selectedAgentId, selectedWorktreeAgent]);
 
   useEffect(() => {
     if (!selectedWorktreeAgent) {
@@ -559,12 +495,6 @@ export function ChatPage() {
       });
     }
   }, [selectedWorktreeAgent, worktreeAgentGroups]);
-
-  useEffect(() => {
-    if (threadUiState.selectedThreadId) {
-      setSelectedWorktreeAgent(null);
-    }
-  }, [threadUiState.selectedThreadId]);
 
   const selectedWorktreeAgentDetails = useMemo(() => {
     if (!selectedWorktreeAgent) {
@@ -790,107 +720,18 @@ export function ChatPage() {
     setSelectedWorktreeAgent(null);
   }, []);
 
-  const handleCreateGroup = useCallback(
-    async (agentIds: string[], title?: string) => {
-      if (!projectId) {
-        toast({
-          title: 'Select a project',
-          description: 'Choose a project before creating a group chat.',
-          variant: 'destructive',
-        });
-        return;
-      }
-      const thread = await queries.createGroupMutation.mutateAsync({ agentIds, title });
-      setSelectedWorktreeAgent(null);
-      threadUiState.handleSelectThread(thread.id);
-      toast({
-        title: 'Group created',
-        description: `Group "${thread.title || 'Untitled'}" has been created.`,
-      });
-    },
-    [projectId, queries.createGroupMutation, threadUiState, toast],
-  );
-
-  const handleInviteMembers = useCallback(
-    async (agentIds: string[], inviterName?: string) => {
-      if (!threadUiState.selectedThreadId || !projectId) return;
-      await queries.inviteMembersMutation.mutateAsync({
-        threadId: threadUiState.selectedThreadId,
-        agentIds,
-        inviterName,
-      });
-      queries.refetchMessages();
-      toast({
-        title: 'Agents invited',
-        description: 'Invite messages have been posted to the thread.',
-      });
-    },
-    [threadUiState.selectedThreadId, projectId, queries, toast],
-  );
-
-  const handleClearHistory = useCallback(async () => {
-    if (!threadUiState.selectedThreadId) return;
-    threadUiState.setClearHistoryDialogOpen(false);
-    await queries.clearHistoryMutation.mutateAsync(threadUiState.selectedThreadId);
-  }, [threadUiState, queries.clearHistoryMutation]);
-
-  const handlePurgeHistory = useCallback(async () => {
-    if (!threadUiState.selectedThreadId) return;
-    threadUiState.setClearHistoryDialogOpen(false);
-    await queries.purgeHistoryMutation.mutateAsync(threadUiState.selectedThreadId);
-  }, [threadUiState, queries.purgeHistoryMutation]);
-
   const handleOpenTerminal = useCallback(
     (agentId: string) => {
       const presence = queries.agentPresence[agentId];
-      if (!threadUiState.selectedThreadId) return;
-
-      if (!presence?.online || !presence.sessionId) {
-        threadUiState.attachInlineTerminalForSelectedThread(agentId, null);
-        return;
-      }
+      if (!presence?.online || !presence.sessionId) return;
 
       const session = queries.activeSessions.find((s) => s.id === presence.sessionId);
       if (session) {
-        threadUiState.setTerminalMenuOpen(false);
         openTerminalWindow(session);
       }
     },
-    [queries.agentPresence, queries.activeSessions, threadUiState, openTerminalWindow],
+    [queries.agentPresence, queries.activeSessions, openTerminalWindow],
   );
-
-  const handleOpenInlineTerminal = useCallback(
-    (agentId: string) => {
-      if (!threadUiState.selectedThreadId) return;
-      const presence = queries.agentPresence[agentId];
-      const session = presence?.sessionId
-        ? queries.activeSessions.find((s) => s.id === presence.sessionId)
-        : null;
-
-      if (session) {
-        try {
-          closeWindow(session.id);
-        } catch {
-          // no-op if not open
-        }
-      }
-
-      threadUiState.attachInlineTerminalForSelectedThread(agentId, session ? session.id : null);
-    },
-    [queries.agentPresence, queries.activeSessions, threadUiState, closeWindow],
-  );
-
-  const handleDetachInlineTerminal = useCallback(() => {
-    if (!threadUiState.selectedThreadId || !inlineTerminalState) return;
-    threadUiState.setInlineTerminalsByThread((prev) => {
-      if (!prev[threadUiState.selectedThreadId!]) return prev;
-      const next = { ...prev };
-      delete next[threadUiState.selectedThreadId!];
-      return next;
-    });
-    threadUiState.setTerminalMenuOpen(false);
-    threadUiState.setInlineUnreadCount(0);
-  }, [threadUiState, inlineTerminalState]);
 
   const handleVerifyMcp = useCallback(async (): Promise<boolean> => {
     queryClient.invalidateQueries({ queryKey: ['preflight'] });
@@ -909,13 +750,7 @@ export function ChatPage() {
   useEffect(() => {
     const handleGlobalEscape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (
-        threadUiState.groupDialogOpen ||
-        threadUiState.inviteDialogOpen ||
-        threadUiState.settingsDialogOpen ||
-        threadUiState.clearHistoryDialogOpen ||
-        customPromptPickerOpen
-      ) {
+      if (customPromptPickerOpen) {
         return;
       }
 
@@ -943,26 +778,14 @@ export function ChatPage() {
 
     document.addEventListener('keydown', handleGlobalEscape, { capture: true });
     return () => document.removeEventListener('keydown', handleGlobalEscape, { capture: true });
-  }, [
-    threadUiState.groupDialogOpen,
-    threadUiState.inviteDialogOpen,
-    threadUiState.settingsDialogOpen,
-    threadUiState.clearHistoryDialogOpen,
-    customPromptPickerOpen,
-    showInlineTerminal,
-    inlineTerminalSessionId,
-    focusedWindowId,
-  ]);
+  }, [customPromptPickerOpen, showInlineTerminal, inlineTerminalSessionId, focusedWindowId]);
 
   // ============================================
   // Render CTAs
   // ============================================
 
   const shouldShowDirectLaunchCta = Boolean(
-    queries.presenceReady && isDirectMessage && selectedAgent && !isSelectedAgentOnline,
-  );
-  const shouldShowGroupLaunchCta = Boolean(
-    queries.presenceReady && currentThread?.isGroup && offlineGroupMembers.length > 0,
+    queries.presenceReady && selectedAgent && !isSelectedAgentOnline,
   );
   const launchingSelectedAgent =
     selectedAgent && sessionControls.launchingAgentIds[selectedAgent.id];
@@ -974,7 +797,7 @@ export function ChatPage() {
           <div>
             <p className="text-sm font-semibold text-foreground">Agent is not active.</p>
             <p className="text-xs text-muted-foreground">
-              Launch a session to collaborate inline inside this conversation.
+              Launch a session to open this agent&apos;s terminal.
             </p>
           </div>
           <Button
@@ -989,7 +812,7 @@ export function ChatPage() {
                 Launching…
               </>
             ) : (
-              'Launch session'
+              'Launch Session'
             )}
           </Button>
         </div>
@@ -1008,37 +831,6 @@ export function ChatPage() {
       </div>
     ) : null;
 
-  const groupLaunchCta = shouldShowGroupLaunchCta ? (
-    <div className="space-y-3 rounded-lg border border-dashed border-border bg-muted/30 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-foreground">Agents aren&apos;t active.</p>
-          <p className="text-xs text-muted-foreground">
-            Launch sessions for offline agents to collaborate inline.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={sessionControls.handleStartAllAgents}
-          disabled={sessionControls.startingAll || offlineGroupMembers.length === 0}
-        >
-          {sessionControls.startingAll ? (
-            <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Launching…
-            </>
-          ) : (
-            'Launch all'
-          )}
-        </Button>
-      </div>
-    </div>
-  ) : null;
-
-  const composerBlockedContent = directLaunchCta ?? groupLaunchCta ?? null;
-
   // ============================================
   // ChatSidebar prop bundles (memoized for referential stability)
   // ============================================
@@ -1051,16 +843,12 @@ export function ChatPage() {
       worktreeAgentGroups,
       worktreeAgentGroupsLoading,
       agentPresence: queries.agentPresence,
-      userThreads: queries.userThreads,
-      agentThreads: queries.agentThreads,
       presenceReady: queries.presenceReady,
       offlineAgents: sessionControls.offlineAgents,
       agentsWithSessions: sessionControls.agentsWithSessions,
       agentsLoading: queries.agentsLoading,
       agentsError: queries.agentsError,
-      userThreadsLoading: queries.userThreadsLoading,
-      agentThreadsLoading: queries.agentThreadsLoading,
-      selectedThreadId: threadUiState.selectedThreadId,
+      selectedAgentId: agentUiState.selectedAgentId,
       selectedWorktreeAgent: selectedWorktreeAgent
         ? {
             worktreeName: selectedWorktreeAgent.worktreeName,
@@ -1080,16 +868,12 @@ export function ChatPage() {
       worktreeAgentGroups,
       worktreeAgentGroupsLoading,
       queries.agentPresence,
-      queries.userThreads,
-      queries.agentThreads,
       queries.presenceReady,
       sessionControls.offlineAgents,
       sessionControls.agentsWithSessions,
       queries.agentsLoading,
       queries.agentsError,
-      queries.userThreadsLoading,
-      queries.agentThreadsLoading,
-      threadUiState.selectedThreadId,
+      agentUiState.selectedAgentId,
       selectedWorktreeAgent,
       hasSelectedProject,
       queries.getProviderForAgent,
@@ -1105,14 +889,11 @@ export function ChatPage() {
       restartingAgentId: sessionControls.restartingAgentId,
       startingAll: sessionControls.startingAll,
       terminatingAll: sessionControls.terminatingAll,
-      isLaunchingChat,
-      onSelectThread: handleSelectThread,
-      onLaunchChat: launchChat,
+      onSelectAgent: handleSelectMainAgent,
       onLaunchWorktreeAgentChat: handleLaunchWorktreeAgentChat,
       onLaunchWorktreeSession: handleLaunchWorktreeSession,
       onRestartWorktreeSession: handleRestartWorktreeSession,
       onTerminateWorktreeSession: handleTerminateWorktreeSession,
-      onCreateGroup: () => threadUiState.setGroupDialogOpen(true),
       onStartAllAgents: sessionControls.handleStartAllAgents,
       onTerminateAllConfirm: () => sessionControls.setTerminateAllConfirm(true),
       onLaunchSession: sessionControls.handleLaunchSession,
@@ -1129,21 +910,17 @@ export function ChatPage() {
       updatingConfigAgentIds,
       onSwitchWorktreeConfig: handleSwitchWorktreeConfig,
       updatingWorktreeConfigKey,
-      createGroupPending: queries.createGroupMutation.isPending,
     }),
     [
       sessionControls.launchingAgentIds,
       sessionControls.restartingAgentId,
       sessionControls.startingAll,
       sessionControls.terminatingAll,
-      isLaunchingChat,
-      handleSelectThread,
-      launchChat,
+      handleSelectMainAgent,
       handleLaunchWorktreeAgentChat,
       handleLaunchWorktreeSession,
       handleRestartWorktreeSession,
       handleTerminateWorktreeSession,
-      threadUiState.setGroupDialogOpen,
       sessionControls.handleStartAllAgents,
       sessionControls.setTerminateAllConfirm,
       sessionControls.handleLaunchSession,
@@ -1159,7 +936,6 @@ export function ChatPage() {
       updatingConfigAgentIds,
       handleSwitchWorktreeConfig,
       updatingWorktreeConfigKey,
-      queries.createGroupMutation.isPending,
     ],
   );
 
@@ -1207,9 +983,123 @@ export function ChatPage() {
         <AlertCircle className="mb-4 h-12 w-12" />
         <h2 className="text-xl font-semibold text-foreground">Select a project to open Chat</h2>
         <p className="mt-2 max-w-md">
-          Use the project selector in the header to choose a project. Chat lists agents, threads,
-          and messages for the selected project only.
+          Use the project selector in the header to choose a project and open an agent terminal.
         </p>
+      </div>
+    );
+  }
+
+  function renderConsoleContent(): React.ReactNode {
+    if (selectedWorktreeAgent) {
+      return (
+        <div className="flex flex-1 min-h-0 flex-col p-4">
+          <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-terminal text-terminal-foreground shadow-sm">
+            <InlineTerminalHeader
+              agentName={selectedWorktreeAgentDetails?.agentName ?? null}
+              onBackToChat={handleClearSelectedWorktreeAgent}
+              onOpenWindow={
+                selectedWorktreeSessionId ? handleOpenSelectedWorktreeWindow : undefined
+              }
+              onOpenPrompts={canOpenWorktreeCustomPrompts ? handleOpenCustomPrompts : undefined}
+            />
+            {selectedWorktreeSessionId ? (
+              <WorktreeInlineTerminal
+                worktreeName={selectedWorktreeAgent.worktreeName}
+                sessionId={selectedWorktreeSessionId}
+                agentName={selectedWorktreeAgentDetails?.agentName ?? null}
+                isWindowOpen={isSelectedWorktreeSessionWindowOpen}
+                windowId={selectedWorktreeWindowId}
+                terminalRef={setWorktreeTerminalHandle}
+              />
+            ) : (
+              <InlineTerminalPanel
+                sessionId={null}
+                agentName={selectedWorktreeAgentDetails?.agentName ?? null}
+                isWindowOpen={false}
+                emptyState={selectedWorktreeAgentEmptyState}
+              />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (!selectedAgent) {
+      return (
+        <div className="flex flex-1 items-center justify-center text-center">
+          <div>
+            <TerminalIcon className="mx-auto mb-4 h-16 w-16 text-muted-foreground" />
+            <h2 className="text-xl font-semibold">No agent selected</h2>
+            <p className="text-muted-foreground">Select an agent to open its terminal.</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (isSelectedAgentOnline && inlineTerminalSessionId) {
+      return (
+        <div className="flex flex-1 min-h-0 flex-col p-4">
+          <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-terminal text-terminal-foreground shadow-sm">
+            <InlineTerminalHeader
+              agentName={inlineTerminalAgentName}
+              showChatToggle={false}
+              onOpenWindow={
+                inlineTerminalAgentId ? () => handleOpenTerminal(inlineTerminalAgentId) : undefined
+              }
+              onOpenPrompts={canOpenMainCustomPrompts ? handleOpenCustomPrompts : undefined}
+              activeTab={inlineActiveTab}
+              onTabChange={handleInlineTabChange}
+              hasTranscript={Boolean(inlineTerminalSession)}
+              sessionId={inlineTerminalSessionId}
+              sessionName={inlineTerminalSessionName}
+              projectId={projectId}
+              sessionChip={
+                sessionTranscript.metrics
+                  ? {
+                      metrics: sessionTranscript.metrics,
+                      activeTab: inlineActiveTab,
+                      onSwitchToSession: () => handleInlineTabChange('session'),
+                    }
+                  : undefined
+              }
+            />
+            <InlineTerminalPanel
+              sessionId={inlineTerminalSessionId}
+              agentName={inlineTerminalAgentName}
+              isWindowOpen={isInlineSessionWindowOpen}
+              activeTab={inlineActiveTab}
+              sessionContent={
+                <SessionViewerPanel
+                  sessionId={inlineTerminalSessionId}
+                  messages={sessionTranscript.messages}
+                  chunks={sessionTranscript.chunks}
+                  metrics={sessionTranscript.metrics}
+                  isLive={sessionTranscript.isLive}
+                  isLoading={sessionTranscript.isLoading}
+                  error={sessionTranscript.error}
+                  warnings={sessionTranscript.session?.warnings}
+                />
+              }
+              terminalRef={setMainTerminalHandle}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        className="flex flex-1 items-start justify-center overflow-y-auto p-6"
+        aria-live="polite"
+      >
+        <div className="w-full max-w-4xl">
+          {directLaunchCta ?? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading session state…
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -1228,202 +1118,25 @@ export function ChatPage() {
       />
 
       {/* Right Content Area */}
-      <div className="flex flex-1 flex-col">
-        {selectedWorktreeAgent ? (
-          <div className="flex flex-1 min-h-0 flex-col p-4">
-            <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-terminal text-terminal-foreground shadow-sm">
-              <InlineTerminalHeader
-                agentName={selectedWorktreeAgentDetails?.agentName ?? null}
-                onBackToChat={handleClearSelectedWorktreeAgent}
-                onOpenWindow={
-                  selectedWorktreeSessionId ? handleOpenSelectedWorktreeWindow : undefined
-                }
-                onOpenPrompts={canOpenWorktreeCustomPrompts ? handleOpenCustomPrompts : undefined}
-              />
-              {selectedWorktreeSessionId ? (
-                <WorktreeInlineTerminal
-                  worktreeName={selectedWorktreeAgent.worktreeName}
-                  sessionId={selectedWorktreeSessionId}
-                  agentName={selectedWorktreeAgentDetails?.agentName ?? null}
-                  isWindowOpen={isSelectedWorktreeSessionWindowOpen}
-                  windowId={selectedWorktreeWindowId}
-                  terminalRef={setWorktreeTerminalHandle}
-                />
-              ) : (
-                <InlineTerminalPanel
-                  sessionId={null}
-                  agentName={selectedWorktreeAgentDetails?.agentName ?? null}
-                  isWindowOpen={false}
-                  emptyState={selectedWorktreeAgentEmptyState}
-                />
-              )}
-            </div>
-          </div>
-        ) : threadUiState.selectedThreadId ? (
-          <>
-            {/* Thread Header — hidden when inline terminal is active to avoid duplication */}
-            {!(showInlineTerminal && CHAT_INLINE_TERMINAL_ENABLED) && (
-              <ChatThreadHeader
-                currentThread={currentThread}
-                currentThreadMembers={currentThreadMembers}
-                selectedAgent={selectedAgent}
-                threadDisplayName={threadDisplayName}
-                agentPresence={queries.agentPresence}
-                inlineUnreadCount={inlineUnreadCount}
-                terminalMenuOpen={threadUiState.terminalMenuOpen}
-                hasSelectedProject={hasSelectedProject}
-                canInviteMembers={canInviteMembers}
-                isCoarsePointer={isCoarsePointer}
-                setTerminalMenuOpen={threadUiState.setTerminalMenuOpen}
-                onOpenTerminal={handleOpenTerminal}
-                onOpenInlineTerminal={handleOpenInlineTerminal}
-                onDetachInlineTerminal={handleDetachInlineTerminal}
-                onOpenInviteDialog={() => threadUiState.setInviteDialogOpen(true)}
-                onOpenSettingsDialog={() => threadUiState.setSettingsDialogOpen(true)}
-                onOpenClearHistoryDialog={() => threadUiState.setClearHistoryDialogOpen(true)}
-                inlineTerminalAgentId={inlineTerminalAgentId}
-                clearHistoryPending={queries.clearHistoryMutation.isPending}
-              />
-            )}
+      <div className="flex flex-1 flex-col">{renderConsoleContent()}</div>
 
-            {showInlineTerminal && CHAT_INLINE_TERMINAL_ENABLED ? (
-              <div className="flex flex-1 min-h-0 flex-col p-4">
-                <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-terminal text-terminal-foreground shadow-sm">
-                  <InlineTerminalHeader
-                    agentName={inlineTerminalAgentName}
-                    onBackToChat={handleDetachInlineTerminal}
-                    showChatToggle={false}
-                    onOpenWindow={
-                      inlineTerminalAgentId
-                        ? () => handleOpenTerminal(inlineTerminalAgentId)
-                        : undefined
-                    }
-                    onOpenPrompts={canOpenMainCustomPrompts ? handleOpenCustomPrompts : undefined}
-                    activeTab={inlineActiveTab}
-                    onTabChange={handleInlineTabChange}
-                    hasTranscript={Boolean(inlineTerminalSessionId)}
-                    sessionId={inlineTerminalSessionId}
-                    sessionName={inlineTerminalSessionName}
-                    projectId={projectId}
-                    sessionChip={
-                      sessionTranscript.metrics
-                        ? {
-                            metrics: sessionTranscript.metrics,
-                            activeTab: inlineActiveTab,
-                            onSwitchToSession: () => handleInlineTabChange('session'),
-                          }
-                        : undefined
-                    }
-                  />
-                  <InlineTerminalPanel
-                    sessionId={inlineTerminalSessionId}
-                    agentName={inlineTerminalAgentName}
-                    isWindowOpen={isInlineSessionWindowOpen}
-                    activeTab={inlineActiveTab}
-                    emptyState={
-                      directLaunchCta ?? (
-                        <p>Agent must be online before the terminal is available.</p>
-                      )
-                    }
-                    sessionContent={
-                      <SessionViewerPanel
-                        sessionId={inlineTerminalSessionId}
-                        messages={sessionTranscript.messages}
-                        chunks={sessionTranscript.chunks}
-                        metrics={sessionTranscript.metrics}
-                        isLive={sessionTranscript.isLive}
-                        isLoading={sessionTranscript.isLoading}
-                        error={sessionTranscript.error}
-                        warnings={sessionTranscript.session?.warnings}
-                      />
-                    }
-                    terminalRef={setMainTerminalHandle}
-                  />
-                </div>
-              </div>
-            ) : (
-              <>
-                {/* Message List */}
-                <ChatMessageList
-                  messages={queries.messages}
-                  getAgentName={(agentId) =>
-                    agentId ? (queries.agents.find((a) => a.id === agentId)?.name ?? null) : null
-                  }
-                  getProviderForAgent={queries.getProviderForAgent}
-                />
-
-                {/* Message Composer */}
-                {composerBlockedContent ? (
-                  <div className="border-t p-4" aria-live="polite">
-                    {composerBlockedContent}
-                  </div>
-                ) : (
-                  <ChatComposer
-                    messageInput={threadUiState.messageInput}
-                    setMessageInput={threadUiState.setMessageInput}
-                    agents={queries.agents}
-                    agentPresence={queries.agentPresence}
-                    onSendMessage={handleSendMessage}
-                    parseMentions={parseMentions}
-                    isSending={queries.sendMessageMutation.isPending}
-                  />
-                )}
-              </>
-            )}
-          </>
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-center">
-            <div>
-              <MessageSquare className="mx-auto mb-4 h-16 w-16 text-muted-foreground" />
-              <h2 className="text-xl font-semibold">No conversation selected</h2>
-              <p className="text-muted-foreground">
-                Select an agent, group, or thread from the sidebar to start chatting
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Modals */}
-      <ChatModals
-        groupDialogOpen={threadUiState.groupDialogOpen}
-        setGroupDialogOpen={threadUiState.setGroupDialogOpen}
-        inviteDialogOpen={threadUiState.inviteDialogOpen}
-        setInviteDialogOpen={threadUiState.setInviteDialogOpen}
-        settingsDialogOpen={threadUiState.settingsDialogOpen}
-        setSettingsDialogOpen={threadUiState.setSettingsDialogOpen}
-        clearHistoryDialogOpen={threadUiState.clearHistoryDialogOpen}
-        setClearHistoryDialogOpen={threadUiState.setClearHistoryDialogOpen}
+      <SessionLifecycleModals
         terminateConfirm={sessionControls.terminateConfirm}
         setTerminateConfirm={sessionControls.setTerminateConfirm}
         terminateAllConfirm={sessionControls.terminateAllConfirm}
         setTerminateAllConfirm={sessionControls.setTerminateAllConfirm}
         mcpModalOpen={sessionControls.mcpModalOpen}
         setMcpModalOpen={sessionControls.setMcpModalOpen}
-        agents={queries.agents}
-        inviteableAgents={inviteableAgents}
-        currentThread={currentThread}
-        currentThreadMembers={currentThreadMembers}
         agentsWithSessions={sessionControls.agentsWithSessions}
         pendingLaunchAgent={sessionControls.pendingLaunchAgent}
         setPendingLaunchAgent={sessionControls.setPendingLaunchAgent}
-        projectId={projectId}
         projectRootPath={selectedProject?.rootPath}
         hasSelectedProject={hasSelectedProject}
-        selectedThreadId={threadUiState.selectedThreadId}
-        threadDisplayName={threadDisplayName}
-        onCreateGroup={handleCreateGroup}
-        onInviteMembers={handleInviteMembers}
-        onClearHistory={handleClearHistory}
-        onPurgeHistory={handlePurgeHistory}
         onTerminateSession={handleTerminateSessionWithClear}
         onTerminateAllAgents={handleTerminateAllAgentsWithClear}
         onMcpConfigured={sessionControls.handleMcpConfigured}
         onVerifyMcp={handleVerifyMcp}
         launchingAgentIds={sessionControls.launchingAgentIds}
-        clearHistoryPending={queries.clearHistoryMutation.isPending}
-        purgeHistoryPending={queries.purgeHistoryMutation.isPending}
-        invitePending={queries.inviteMembersMutation.isPending}
         terminatingAll={sessionControls.terminatingAll}
       />
 

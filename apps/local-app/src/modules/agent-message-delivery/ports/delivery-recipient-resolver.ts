@@ -3,8 +3,5 @@ export interface ResolvedRecipients {
 }
 
 export abstract class DeliveryRecipientResolver {
-  abstract resolve(
-    recipients: string[],
-    options?: { threadId?: string },
-  ): Promise<ResolvedRecipients>;
+  abstract resolve(recipients: string[]): Promise<ResolvedRecipients>;
 }

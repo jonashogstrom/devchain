@@ -132,9 +132,9 @@ describe('mobile push topic allowlist', () => {
 
   it('uses :id as the variable-segment sentinel in the exported allowlist', () => {
     expect(MOBILE_PUSH_TOPIC_ID_SEGMENT).toBe(':id');
-    // 5 rules: 3 Phase-2 (session transcript, session/AUQ+activity, agent presence) +
-    // 2 Phase-1/Task-3 additions (project/<id>/state agent lifecycle, chat/<id> messages).
-    expect(MOBILE_PUSH_TOPIC_ALLOWLIST.length).toBe(5);
+    // 4 rules: 3 Phase-2 (session transcript, session/AUQ+activity, agent presence) +
+    // 1 Phase-1/Task-3 addition (project/<id>/state agent lifecycle).
+    expect(MOBILE_PUSH_TOPIC_ALLOWLIST.length).toBe(4);
     expect(
       MOBILE_PUSH_TOPIC_ALLOWLIST.some((r) => r.segments.includes(MOBILE_PUSH_TOPIC_ID_SEGMENT)),
     ).toBe(true);

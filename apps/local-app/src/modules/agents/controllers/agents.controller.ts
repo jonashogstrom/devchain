@@ -67,7 +67,7 @@ export interface AgentOrGuestItem {
   } | null;
 }
 
-/** Response shape for the atomic restart endpoint */
+/** Response shape for the restart endpoint */
 export interface RestartAgentResponse {
   session: SessionDto;
   terminateStatus: 'success' | 'not_found' | 'error';
@@ -352,9 +352,8 @@ export class AgentsController {
   }
 
   /**
-   * Atomically restart an agent session.
-   * Terminates any existing session and launches a new one within a per-agent lock.
-   * This prevents race conditions and ensures atomic terminate+launch operations.
+   * Restart an agent session through sequential terminate and launch operations.
+   * Each operation owns its per-agent lock acquisition.
    */
   @Post(':id/restart')
   async restartAgent(
@@ -376,8 +375,9 @@ export class AgentsController {
       throw new BadRequestException(`Agent ${agentId} does not belong to project ${projectId}`);
     }
 
-    // Note: launchSession() has internal withAgentLock for serialization.
-    // No outer lock needed here - it would cause deadlock (nested non-reentrant locks).
+    // Terminate and launch each acquire the per-agent lock internally and in
+    // sequence. Never wrap this restart in an outer/composite lock: the
+    // coordinator is non-reentrant.
     let terminateStatus: 'success' | 'not_found' | 'error' = 'not_found';
     let terminateWarning: string | undefined;
 
@@ -391,7 +391,10 @@ export class AgentsController {
           { sessionId: existingSession.id, agentId },
           'Terminating existing session before restart',
         );
-        await this.sessionsService.terminateSession(existingSession.id);
+        await this.sessionsService.terminateSession(existingSession.id, {
+          source: 'web-api',
+          reason: 'restart',
+        });
         terminateStatus = 'success';
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -455,11 +455,18 @@ export interface ActionInput {
   customValue?: string;
 }
 
-export interface EventFilter {
+export interface EventFilterCondition {
   field: string;
-  operator: 'equals' | 'contains' | 'regex';
+  operator: 'equals' | 'contains' | 'regex' | 'is_null' | 'is_not_null';
   value: string;
 }
+
+export interface EventFilterGroup {
+  combinator: 'and' | 'or';
+  filters: [EventFilterCondition, ...EventFilterCondition[]];
+}
+
+export type EventFilter = EventFilterCondition | EventFilterGroup;
 
 export interface Subscriber {
   id: string;

@@ -23,7 +23,6 @@ import { ScheduledEpicsModule } from './modules/scheduled-epics/scheduled-epics.
 import { RecordsModule } from './modules/records/records.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { FsModule } from './modules/fs/fs.module';
-import { ChatModule } from './modules/chat/chat.module';
 import { WatchersModule } from './modules/watchers/watchers.module';
 import { SubscribersModule } from './modules/subscribers/subscribers.module';
 import { RegistryModule } from './modules/registry/registry.module';
@@ -75,7 +74,6 @@ import { MetricsModule } from './modules/metrics/metrics.module';
     RecordsModule,
     DocumentsModule,
     FsModule,
-    ChatModule,
     WatchersModule,
     DataSeederModule,
     SubscribersModule,

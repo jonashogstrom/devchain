@@ -588,7 +588,6 @@ export interface ReviewStorage {
   addReviewCommentTargets(commentId: string, agentIds: string[]): Promise<ReviewCommentTarget[]>;
   getReviewCommentTargets(commentId: string): Promise<ReviewCommentTarget[]>;
   deleteNonResolvedComments(reviewId: string): Promise<number>;
-  markMessageAsRead(messageId: string, agentId: string, readAt: string): Promise<void>;
 }
 
 export interface SessionStorage {

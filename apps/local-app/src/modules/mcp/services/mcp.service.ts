@@ -1,6 +1,5 @@
 import { Injectable, Inject, Optional, forwardRef } from '@nestjs/common';
 import { StorageService, STORAGE_SERVICE } from '../../storage/interfaces/storage.interface';
-import { ChatService } from '../../chat/services/chat.service';
 import { SessionsService } from '../../sessions/services/sessions.service';
 import {
   REALTIME_BROADCASTER,
@@ -31,7 +30,6 @@ import type { DocumentToolContext } from './handlers/document-context';
 import type { PromptToolContext } from './handlers/prompt-context';
 import type { SkillToolContext } from './handlers/skill-context';
 import type { SessionToolContext } from './handlers/session-context';
-import type { ActivityToolContext } from './handlers/activity-context';
 import type { AgentToolContext } from './handlers/agent-context';
 import type { ProjectToolContext } from './handlers/project-context';
 import { allBindings, allMetadata, type ToolMetadataEntry } from '../tool-descriptors';
@@ -44,12 +42,7 @@ import { ProjectCommunicationService } from '../../project-communication/project
 
 const logger = createLogger('McpService');
 
-const CHAT_TOOLS = new Set([
-  'devchain_send_message',
-  'devchain_chat_ack',
-  'devchain_chat_read_history',
-  'devchain_chat_list_members',
-]);
+const CHAT_TOOLS = new Set(['devchain_send_message']);
 
 const PROJECT_TOOLS = new Set(['devchain_projects_list']);
 
@@ -103,8 +96,6 @@ const SKILL_TOOLS = new Set(['devchain_list_skills', 'devchain_get_skill']);
 
 const SESSION_TOOLS = new Set(['devchain_list_sessions', 'devchain_register_guest']);
 
-const ACTIVITY_TOOLS = new Set(['devchain_activity_start', 'devchain_activity_finish']);
-
 const AGENT_TOOLS = new Set([
   'devchain_list_agents',
   'devchain_get_agent_by_name',
@@ -123,7 +114,6 @@ export class McpService {
 
   constructor(
     @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
-    @Optional() @Inject(forwardRef(() => ChatService)) private readonly chatService?: ChatService,
     @Optional()
     @Inject(forwardRef(() => SessionsService))
     private readonly sessionsService?: SessionsService,
@@ -177,9 +167,6 @@ export class McpService {
   private buildChatToolContext(): ChatToolContext {
     return {
       storage: this.storage,
-      chatService: this.chatService ?? createNullAdapter<ChatService>('ChatService'),
-      sessionsService:
-        this.sessionsService ?? createNullAdapter<SessionsService>('SessionsService'),
       teamsService: this.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
       agentMessageDelivery:
         this.agentMessageDelivery ??
@@ -267,13 +254,6 @@ export class McpService {
     };
   }
 
-  private buildActivityToolContext(): ActivityToolContext {
-    return {
-      chatService: this.chatService ?? createNullAdapter<ChatService>('ChatService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
   private buildAgentToolContext(): AgentToolContext {
     return {
       storage: this.storage,
@@ -343,17 +323,15 @@ export class McpService {
                           ? this.buildSkillToolContext()
                           : SESSION_TOOLS.has(normalizedTool)
                             ? this.buildSessionToolContext()
-                            : ACTIVITY_TOOLS.has(normalizedTool)
-                              ? this.buildActivityToolContext()
-                              : AGENT_TOOLS.has(normalizedTool)
-                                ? this.buildAgentToolContext()
-                                : {
-                                    success: false,
-                                    error: {
-                                      code: 'UNKNOWN_TOOL',
-                                      message: `Unknown tool: ${tool}`,
-                                    },
+                            : AGENT_TOOLS.has(normalizedTool)
+                              ? this.buildAgentToolContext()
+                              : {
+                                  success: false,
+                                  error: {
+                                    code: 'UNKNOWN_TOOL',
+                                    message: `Unknown tool: ${tool}`,
                                   },
+                                },
         parsed,
       );
     } catch (error) {

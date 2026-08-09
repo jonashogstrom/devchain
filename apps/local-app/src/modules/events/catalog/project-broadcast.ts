@@ -12,7 +12,7 @@ export interface ProjectedBroadcast {
  * SINGLE source of truth for the event→{topic,type,payload} mapping, shared by the
  * socket.io `CatalogBroadcasterService` and the tunnel `TunnelEventForwarderService`
  * so the two transports can never drift in how an event is projected. Per
- * ADR-005:143-170 catalog projection stays in events infrastructure; this only
+ * The canonical architecture keeps catalog projection in events infrastructure; this only
  * factors the per-entry application out of `CatalogBroadcasterService` (behaviour
  * is identical) so a second transport can reuse it instead of reimplementing it.
  */

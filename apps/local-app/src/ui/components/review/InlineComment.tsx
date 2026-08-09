@@ -14,7 +14,7 @@ import {
 import { MessageSquare, Plus, ChevronDown, ChevronRight, Bot, User, X, Search } from 'lucide-react';
 import { cn } from '@/ui/lib/utils';
 import { useMentionAutocomplete } from '@/ui/hooks/useMentionAutocomplete';
-import { parseMentions } from '@/ui/lib/chat';
+import { parseMentions } from '@/ui/lib/mentions';
 import type { ReviewComment, CommentType } from '@/ui/lib/reviews';
 import type { ActiveSession } from '@/ui/lib/sessions';
 

@@ -7,7 +7,7 @@ import type {
 import type { AgentOrGuest } from '@/ui/hooks/useChatQueries';
 
 /**
- * The 55 individual sidebar inputs as one flat object — the shape existing specs
+ * The sidebar inputs as one flat object — the shape existing specs
  * author fixtures and overrides in. `packChatSidebarProps` groups them into the
  * three bundles the component now receives. The flat object is a structural
  * superset of each bundle, so passing it as all three is type-safe; the component
@@ -38,16 +38,12 @@ export function makeFlatChatSidebarProps(
     worktreeAgentGroups: [],
     worktreeAgentGroupsLoading: false,
     agentPresence: {},
-    userThreads: [],
-    agentThreads: [],
     presenceReady: true,
     offlineAgents: [agent],
     agentsWithSessions: [],
     agentsLoading: false,
     agentsError: false,
-    userThreadsLoading: false,
-    agentThreadsLoading: false,
-    selectedThreadId: null,
+    selectedAgentId: null,
     selectedWorktreeAgent: null,
     hasSelectedProject: true,
     getProviderForAgent: () => null,
@@ -58,14 +54,11 @@ export function makeFlatChatSidebarProps(
     restartingAgentId: null,
     startingAll: false,
     terminatingAll: false,
-    isLaunchingChat: false,
-    onSelectThread: jest.fn(),
-    onLaunchChat: jest.fn(),
+    onSelectAgent: jest.fn(),
     onLaunchWorktreeAgentChat: jest.fn(),
     onLaunchWorktreeSession: jest.fn(async () => {}),
     onRestartWorktreeSession: jest.fn(async () => {}),
     onTerminateWorktreeSession: jest.fn(async () => {}),
-    onCreateGroup: jest.fn(),
     onStartAllAgents: jest.fn(),
     onTerminateAllConfirm: jest.fn(),
     onLaunchSession: jest.fn(async () => ({ id: 'session-1' })),
@@ -81,7 +74,6 @@ export function makeFlatChatSidebarProps(
     updatingConfigAgentIds: {},
     onSwitchWorktreeConfig: jest.fn(),
     updatingWorktreeConfigKey: null,
-    createGroupPending: false,
     onCloneAgent: jest.fn(),
     onDeleteAgent: jest.fn(),
     pendingDeleteAgentId: null,

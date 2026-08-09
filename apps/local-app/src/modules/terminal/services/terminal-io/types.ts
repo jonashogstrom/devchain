@@ -2,6 +2,19 @@ export interface SessionTarget {
   readonly name: string;
 }
 
+export type ExpectedSessionDestroyResult =
+  | { readonly outcome: 'destroyed' }
+  | { readonly outcome: 'known-absent' }
+  | { readonly outcome: 'unknown-error'; readonly error: Error };
+
+export type ExpectedSessionDestroyPolicy =
+  | {
+      readonly onUnknownError: 'rearm';
+      readonly sessionId: string;
+      readonly intervalMs?: number;
+    }
+  | { readonly onUnknownError: 'retire' };
+
 export interface CreateSessionOptions {
   readonly cwd: string;
   readonly env?: Readonly<Record<string, string>>;

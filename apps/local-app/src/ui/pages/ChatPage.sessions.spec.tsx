@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { TerminalWindowsProvider } from '@/ui/terminal-windows';
 
 // Polyfill DOMRect for floating-ui positioning used by the context menu
@@ -223,6 +223,11 @@ function renderWithClient(ui: React.ReactNode, initialEntries: string[] = ['/cha
   return { ...utils, queryClient };
 }
 
+function BrowserBackButton() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(-1)}>Browser back</button>;
+}
+
 beforeEach(() => {
   selectedProjectIdMock = 'project-1';
   selectedProjectRootPathMock = '/tmp/project-1';
@@ -275,7 +280,9 @@ describe('ChatPage agent grouping toggle', () => {
     const allTab = await screen.findByRole('tab', { name: 'All' });
     expect(allTab).toHaveAttribute('data-state', 'active');
     expect(screen.getByRole('tab', { name: 'Teams' })).toHaveAttribute('data-state', 'inactive');
-    expect(await screen.findByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(/Open terminal for Alpha \(offline\)/i),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/No teams configured/i)).not.toBeInTheDocument();
   });
 
@@ -294,7 +301,7 @@ describe('ChatPage agent grouping toggle', () => {
     expect(screen.getByText(/No teams configured/i)).toBeInTheDocument();
     expect(window.localStorage.getItem(LS_KEY)).toBe('teams');
     expect(screen.getByText('STANDALONE')).toBeInTheDocument();
-    expect(screen.getByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Open terminal for Alpha \(offline\)/i)).toBeInTheDocument();
   });
 
   it('restores teams mode from localStorage on mount', async () => {
@@ -307,7 +314,7 @@ describe('ChatPage agent grouping toggle', () => {
     );
     expect(await screen.findByText(/No teams configured/i)).toBeInTheDocument();
     expect(screen.getByText('STANDALONE')).toBeInTheDocument();
-    expect(screen.getByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Open terminal for Alpha \(offline\)/i)).toBeInTheDocument();
   });
 });
 
@@ -550,29 +557,33 @@ describe('ChatPage agent context menu', () => {
   it('shows launch when no session and terminate when running', async () => {
     renderWithClient(<ChatPage />);
 
-    const alphaButton = await screen.findByLabelText(/Chat with Alpha \(offline\)/i);
-    const betaButton = await screen.findByLabelText(/Chat with Beta \(online\)/i);
+    const alphaButton = await screen.findByLabelText(/Open terminal for Alpha \(offline\)/i);
+    const betaButton = await screen.findByLabelText(/Open terminal for Beta \(online\)/i);
 
     // Open context menu for offline agent (Alpha) -> should show Launch
     fireEvent.contextMenu(alphaButton);
-    await waitFor(() => expect(screen.getByText(/Launch session/i)).toBeInTheDocument());
-    expect(screen.queryByText(/Terminate session/i)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('menuitem', { name: /Launch session/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('menuitem', { name: /Terminate session/i })).not.toBeInTheDocument();
 
     // Close menu by clicking elsewhere
     fireEvent.click(document.body);
 
     // Open context menu for online agent with session (Beta) -> should show Terminate
     fireEvent.contextMenu(betaButton);
-    await waitFor(() => expect(screen.getByText(/Terminate session/i)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole('menuitem', { name: /Terminate session/i })).toBeInTheDocument(),
+    );
   });
 
   it('launches a session from agent context menu without a selected thread', async () => {
     renderWithClient(<ChatPage />);
 
-    const alphaButton = await screen.findByLabelText(/Chat with Alpha \(offline\)/i);
+    const alphaButton = await screen.findByLabelText(/Open terminal for Alpha \(offline\)/i);
 
     fireEvent.contextMenu(alphaButton);
-    const launchItem = await screen.findByText(/Launch session/i);
+    const launchItem = await screen.findByRole('menuitem', { name: /Launch session/i });
     fireEvent.click(launchItem);
 
     await waitFor(() => {
@@ -580,9 +591,26 @@ describe('ChatPage agent context menu', () => {
       expect(calls.some((u) => u === '/api/sessions/launch')).toBe(true);
     });
   });
+
+  it('renders Launch Session and previous sessions for the selected offline agent', async () => {
+    renderWithClient(<ChatPage />, ['/chat?agent=agent-1']);
+
+    expect(await screen.findByRole('button', { name: 'Launch Session' })).toBeInTheDocument();
+    expect(await screen.findByText('No previous sessions for this agent yet.')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /Inline terminal for Alpha/i })).toBeNull();
+  });
+
+  it('renders the inline terminal surface for the selected online agent', async () => {
+    renderWithClient(<ChatPage />, ['/chat?agent=agent-2']);
+
+    expect(
+      await screen.findByRole('region', { name: /Inline terminal for Beta/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Launch Session' })).toBeNull();
+  });
 });
 
-describe('ChatPage stale-thread fetch suppression', () => {
+describe('ChatPage agent selection transport invariant', () => {
   const originalFetch = global.fetch;
 
   afterEach(() => {
@@ -591,7 +619,7 @@ describe('ChatPage stale-thread fetch suppression', () => {
     }
   });
 
-  it('does not fetch stale thread messages when project switches and URL thread is still old', async () => {
+  it('updates selected agent state without calling the chat API', async () => {
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -599,14 +627,32 @@ describe('ChatPage stale-thread fetch suppression', () => {
         return {
           ok: true,
           json: async () => ({
-            items: [{ id: 'agent-1', name: 'Alpha', projectId: 'project-1', profileId: 'p1' }],
+            items: [
+              {
+                id: 'agent-1',
+                name: 'Alpha',
+                projectId: 'project-1',
+                profileId: 'p1',
+                isProjectOwner: false,
+              },
+              {
+                id: 'agent-2',
+                name: 'Beta',
+                projectId: 'project-1',
+                profileId: 'p1',
+                isProjectOwner: false,
+              },
+            ],
           }),
         } as Response;
       }
       if (url.startsWith('/api/sessions/agents/presence')) {
         return {
           ok: true,
-          json: async () => ({ 'agent-1': { online: false, sessionId: null } }),
+          json: async () => ({
+            'agent-1': { online: false, sessionId: null },
+            'agent-2': { online: false, sessionId: null },
+          }),
         } as Response;
       }
       if (url.startsWith('/api/sessions?projectId=')) {
@@ -616,11 +662,28 @@ describe('ChatPage stale-thread fetch suppression', () => {
         } as Response;
       }
       if (url.startsWith('/api/chat/threads?projectId=')) {
+        const isMainProjectUserThreads =
+          url.includes('projectId=project-1') && url.includes('createdByType=user');
         return {
           ok: true,
           json: async () => ({
-            items: [],
-            total: 0,
+            items: isMainProjectUserThreads
+              ? [
+                  {
+                    id: 'thread-main',
+                    projectId: 'project-1',
+                    title: 'Alpha',
+                    isGroup: false,
+                    createdByType: 'user',
+                    createdByUserId: 'user-1',
+                    createdByAgentId: null,
+                    members: ['agent-1'],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                  },
+                ]
+              : [],
+            total: isMainProjectUserThreads ? 1 : 0,
             limit: 50,
             offset: 0,
           }),
@@ -665,43 +728,23 @@ describe('ChatPage stale-thread fetch suppression', () => {
       return { ok: true, json: async () => ({ items: [] }) } as Response;
     }) as unknown as typeof fetch;
 
-    const { rerender, queryClient } = renderWithClient(<ChatPage />, ['/chat?thread=thread-main']);
+    renderWithClient(<ChatPage />, ['/chat?agent=agent-1']);
 
+    const betaButton = await screen.findByLabelText(/Open terminal for Beta \(offline\)/i);
     await waitFor(() => {
       const urls = (global.fetch as jest.Mock).mock.calls.map((call) => String(call[0]));
-      expect(urls).toContain(
-        '/api/chat/threads/thread-main/messages?projectId=project-1&limit=50&offset=0',
-      );
+      expect(urls.some((url) => url.startsWith('/api/chat'))).toBe(false);
     });
 
     (global.fetch as jest.Mock).mockClear();
+    fireEvent.click(betaButton);
 
-    selectedProjectIdMock = 'project-2';
-    selectedProjectRootPathMock = '/tmp/project-2';
-
-    rerender(
-      <MemoryRouter initialEntries={['/chat?thread=thread-main']}>
-        <QueryClientProvider client={queryClient}>
-          <TerminalWindowsProvider>
-            <ChatPage />
-          </TerminalWindowsProvider>
-        </QueryClientProvider>
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      const urls = (global.fetch as jest.Mock).mock.calls.map((call) => String(call[0]));
-      expect(urls).toContain('/api/agents?projectId=project-2&includeGuests=true');
-    });
-
-    const urls = (global.fetch as jest.Mock).mock.calls.map((call) => String(call[0]));
-    expect(urls).not.toContain(
-      '/api/chat/threads/thread-main/messages?projectId=project-2&limit=50&offset=0',
-    );
+    await waitFor(() => expect(betaButton).toHaveAttribute('aria-current', 'true'));
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    expect(calls.some(([input]) => String(input).startsWith('/api/chat'))).toBe(false);
     expect(
-      urls.some(
-        (url) =>
-          url.includes('/api/chat/threads/') && url.includes('/messages?projectId=project-2'),
+      calls.some(
+        ([input, init]) => String(input).startsWith('/api/chat') && init?.method === 'POST',
       ),
     ).toBe(false);
   });
@@ -868,7 +911,9 @@ describe('ChatPage worktree agent groups', () => {
 
     renderWithClient(<ChatPage />);
 
-    const mainAgentButton = await screen.findByLabelText(/Chat with Main Agent \(offline\)/i);
+    const mainAgentButton = await screen.findByLabelText(
+      /Open terminal for Main Agent \(offline\)/i,
+    );
     fireEvent.click(mainAgentButton);
     await waitFor(() => {
       expect(mainAgentButton).toHaveAttribute('aria-current', 'true');
@@ -984,6 +1029,105 @@ describe('ChatPage worktree agent groups', () => {
     expect(setActiveWorktreeMock).not.toHaveBeenCalled();
     const urls = (global.fetch as jest.Mock).mock.calls.map((call) => String(call[0]));
     expect(urls.some((url) => url.includes('/chat/threads/direct'))).toBe(false);
+  });
+
+  it('lets a browser-history agent selection replace the worktree terminal override', async () => {
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === '/api/runtime') {
+        return {
+          ok: true,
+          json: async () => ({ mode: 'main', version: '1.0.0' }),
+        } as Response;
+      }
+      if (url === '/api/worktrees' || url.startsWith('/api/worktrees?')) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: 'wt-1',
+              name: 'feature-auth',
+              branchName: 'feature/auth',
+              status: 'running',
+              containerPort: 4310,
+              devchainProjectId: 'project-wt-1',
+            },
+          ],
+        } as Response;
+      }
+      if (url.startsWith('/api/agents?projectId=')) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              { id: 'agent-main-1', name: 'Main One', projectId: 'project-1', profileId: 'p1' },
+              { id: 'agent-main-2', name: 'Main Two', projectId: 'project-1', profileId: 'p1' },
+            ],
+          }),
+        } as Response;
+      }
+      if (url.startsWith('/api/sessions/agents/presence')) {
+        return {
+          ok: true,
+          json: async () => ({
+            'agent-main-1': { online: false, sessionId: null },
+            'agent-main-2': { online: false, sessionId: null },
+          }),
+        } as Response;
+      }
+      if (url === '/wt/feature-auth/api/agents?projectId=project-wt-1&includeGuests=true') {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{ id: 'agent-wt-1', name: 'Worktree Agent', profileId: 'p1', type: 'agent' }],
+          }),
+        } as Response;
+      }
+      if (url === '/wt/feature-auth/api/sessions/agents/presence?projectId=project-wt-1') {
+        return {
+          ok: true,
+          json: async () => ({ 'agent-wt-1': { online: true, sessionId: 'session-wt-1' } }),
+        } as Response;
+      }
+      if (url.includes('/api/profiles/') && url.endsWith('/provider-configs')) {
+        return { ok: true, json: async () => [] } as Response;
+      }
+      return { ok: true, json: async () => ({ items: [] }) } as Response;
+    }) as unknown as typeof fetch;
+
+    // Component integration is the narrowest layer that covers router history,
+    // ChatPage's local worktree override, and the terminal selected for rendering.
+    renderWithClient(
+      <>
+        <ChatPage />
+        <BrowserBackButton />
+      </>,
+      ['/chat?agent=agent-main-2', '/chat?agent=agent-main-1'],
+    );
+
+    const mainOneButton = await screen.findByLabelText(/Open terminal for Main One \(offline\)/i);
+    await waitFor(() => expect(mainOneButton).toHaveAttribute('aria-current', 'true'));
+
+    const worktreeAgentButton = await screen.findByLabelText(
+      /Open terminal for Worktree Agent in feature-auth \(online\)/i,
+    );
+    fireEvent.click(worktreeAgentButton);
+
+    expect(
+      await screen.findByRole('region', { name: /Inline terminal for Worktree Agent/i }),
+    ).toBeInTheDocument();
+    expect(worktreeAgentButton).toHaveAttribute('aria-current', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+
+    const mainTwoButton = await screen.findByLabelText(/Open terminal for Main Two \(offline\)/i);
+    await waitFor(() => {
+      expect(mainTwoButton).toHaveAttribute('aria-current', 'true');
+      expect(
+        screen.queryByRole('region', { name: /Inline terminal for Worktree Agent/i }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it('detects window-open state via worktree window id scheme', async () => {
@@ -1401,7 +1545,7 @@ describe('ChatPage custom prompt Escape handling', () => {
   it('closes the prompt picker on Escape without forwarding Escape to the terminal', async () => {
     renderWithClient(<ChatPage />);
 
-    fireEvent.click(await screen.findByLabelText(/Chat with Main Agent \(online\)/i));
+    fireEvent.click(await screen.findByLabelText(/Open terminal for Main Agent \(online\)/i));
     await screen.findByRole('region', { name: /Inline terminal for Main Agent/i });
 
     fireEvent.click(await screen.findByRole('button', { name: /Open custom prompts/i }));
@@ -1700,15 +1844,21 @@ describe('ChatPage agent Overrides dialog', () => {
     });
     renderWithClient(<ChatPage />);
 
-    const modelOnly = await screen.findByLabelText(/Chat with Model Only Agent \(online\)/i);
+    const modelOnly = await screen.findByLabelText(
+      /Open terminal for Model Only Agent \(online\)/i,
+    );
     expect(within(modelOnly).getByText('glm-5')).toBeInTheDocument();
 
-    const modelEffort = await screen.findByLabelText(/Chat with Model Effort Agent \(online\)/i);
+    const modelEffort = await screen.findByLabelText(
+      /Open terminal for Model Effort Agent \(online\)/i,
+    );
     const modelEffortLabel = within(modelEffort).getByText('opus · high');
     expect(modelEffortLabel).toBeInTheDocument();
     expect(modelEffortLabel).toHaveAttribute('title', 'model: anthropic/opus · effort: high');
 
-    const defaultAgent = await screen.findByLabelText(/Chat with Default Agent \(online\)/i);
+    const defaultAgent = await screen.findByLabelText(
+      /Open terminal for Default Agent \(online\)/i,
+    );
     expect(within(defaultAgent).getByText('Config A')).toBeInTheDocument();
   });
 
@@ -1716,7 +1866,7 @@ describe('ChatPage agent Overrides dialog', () => {
     setupFetch();
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Main Agent \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Main Agent \(online\)/i);
     fireEvent.contextMenu(agentButton);
 
     fireEvent.click(await screen.findByText('Overrides…'));
@@ -1863,7 +2013,7 @@ describe('Mass agent controls', () => {
 
     // Wait for presence to load (agents show offline state)
     await waitFor(() => {
-      expect(screen.getByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Open terminal for Alpha \(offline\)/i)).toBeInTheDocument();
     });
 
     // Start button should be enabled when there are offline agents
@@ -1904,7 +2054,7 @@ describe('Mass agent controls', () => {
 
     // Wait for presence to load (agents show online state)
     await waitFor(() => {
-      expect(screen.getByLabelText(/Chat with Alpha \(online\)/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Open terminal for Alpha \(online\)/i)).toBeInTheDocument();
     });
 
     // Start button should be disabled when no offline agents
@@ -1945,7 +2095,7 @@ describe('Mass agent controls', () => {
 
     // Wait for presence to load
     await waitFor(() => {
-      expect(screen.getByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Open terminal for Alpha \(offline\)/i)).toBeInTheDocument();
     });
 
     // Stop button should be disabled when no agents have sessions
@@ -2048,7 +2198,7 @@ describe('ChatPage context bar integration', () => {
     renderWithClient(<ChatPage />);
 
     // Wait for agents to render
-    await screen.findByLabelText(/Chat with Beta \(online\)/i);
+    await screen.findByLabelText(/Open terminal for Beta \(online\)/i);
 
     // Context bar should appear for the online agent with a session
     await waitFor(() => {
@@ -2088,7 +2238,7 @@ describe('ChatPage context bar integration', () => {
 
     renderWithClient(<ChatPage />);
 
-    await screen.findByLabelText(/Chat with Alpha \(offline\)/i);
+    await screen.findByLabelText(/Open terminal for Alpha \(offline\)/i);
 
     // No context bar for offline agents (no session → no metrics query)
     expect(screen.queryAllByRole('progressbar')).toHaveLength(0);
@@ -2164,7 +2314,7 @@ describe('ChatPage context bar integration', () => {
 
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
 
     // Wait for context bar to appear
     await waitFor(() => {
@@ -2249,7 +2399,7 @@ describe('ChatPage context bar integration', () => {
 
     renderWithClient(<ChatPage />);
 
-    await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
 
     // Wait for summary query to settle
     await waitFor(() => {
@@ -2474,7 +2624,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     renderWithClient(<ChatPage />);
 
-    await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
     await waitFor(() => {
       expect(screen.getAllByRole('progressbar').length).toBeGreaterThanOrEqual(1);
     });
@@ -2518,7 +2668,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
     expect(
       (global.fetch as jest.Mock).mock.calls.some(([url]) =>
         String(url).includes('/transcript/summary'),
@@ -2546,7 +2696,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
 
     // Wait for context bar to render
     await waitFor(() => {
@@ -2573,7 +2723,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
 
     const urlsBeforeToggle = (global.fetch as jest.Mock).mock.calls.map((c) => String(c[0]));
     expect(urlsBeforeToggle.some((url: string) => url.includes('/transcript/summary'))).toBe(false);
@@ -2595,7 +2745,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     const { unmount } = renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
     await waitFor(() => {
       expect(screen.getAllByRole('progressbar').length).toBeGreaterThanOrEqual(1);
     });
@@ -2618,7 +2768,7 @@ describe('ChatPage context bar toggle', () => {
     (global.fetch as jest.Mock).mockClear();
     renderWithClient(<ChatPage />);
 
-    await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
     const remountUrls = (global.fetch as jest.Mock).mock.calls.map((c) => String(c[0]));
     expect(remountUrls.some((url: string) => url.includes('/transcript/summary'))).toBe(false);
 
@@ -2732,7 +2882,7 @@ describe('ChatPage context bar toggle', () => {
 
     renderWithClient(<ChatPage />);
 
-    const mainButton = await screen.findByLabelText(/Chat with Main Agent \(online\)/i);
+    const mainButton = await screen.findByLabelText(/Open terminal for Main Agent \(online\)/i);
     await screen.findByLabelText(/Open terminal for Worktree Agent in feature-auth \(online\)/i);
 
     // Both agents have context bars
@@ -2762,7 +2912,7 @@ describe('ChatPage context bar toggle', () => {
     });
     renderWithClient(<ChatPage />);
 
-    const agentButton = await screen.findByLabelText(/Chat with Alpha \(offline\)/i);
+    const agentButton = await screen.findByLabelText(/Open terminal for Alpha \(offline\)/i);
     fireEvent.contextMenu(agentButton);
 
     const checkbox = await screen.findByRole('menuitemcheckbox', { name: /Context tracking/i });
@@ -2775,7 +2925,7 @@ describe('ChatPage context bar toggle', () => {
     setupContextBarFetch();
     const { container } = renderWithClient(<ChatPage />);
 
-    await screen.findByLabelText(/Chat with Alpha \(online\)/i);
+    await screen.findByLabelText(/Open terminal for Alpha \(online\)/i);
 
     const urls = (global.fetch as jest.Mock).mock.calls.map((c) => String(c[0]));
     expect(urls.some((url: string) => url.includes('/transcript/summary'))).toBe(false);

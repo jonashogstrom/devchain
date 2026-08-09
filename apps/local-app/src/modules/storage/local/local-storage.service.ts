@@ -869,11 +869,6 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     return this.recordDelegate.deleteRecord(id);
   }
 
-  // Chat message reads
-  async markMessageAsRead(messageId: string, agentId: string, readAt: string): Promise<void> {
-    return this.reviewDelegate.markMessageAsRead(messageId, agentId, readAt);
-  }
-
   private async generateDocumentSlug(
     projectId: string | null,
     desired: string,

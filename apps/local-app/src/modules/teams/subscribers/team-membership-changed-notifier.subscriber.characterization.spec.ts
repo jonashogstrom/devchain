@@ -74,7 +74,7 @@ describe('TeamMembershipChangedNotifierSubscriber characterization', () => {
           projectId: 'project-1',
           senderName: 'System',
         },
-        { submitKeys: ['Enter'] },
+        { submitKeys: ['Enter'], requireActiveSession: true },
       ],
       [
         ['lead-1'],

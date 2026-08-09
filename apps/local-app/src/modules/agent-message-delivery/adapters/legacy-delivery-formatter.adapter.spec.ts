@@ -133,39 +133,7 @@ describe('LegacyDeliveryFormatterAdapter', () => {
     });
   });
 
-  describe('other kinds ignore framing', () => {
-    it("formats 'mcp.thread' as the thread turn with the [ACK] tool call (framing ignored)", () => {
-      const out = formatter.format(
-        msg({
-          kind: 'mcp.thread',
-          senderName: 'Carol',
-          body: 'threaded hello',
-          threadId: 'thr-9',
-          messageId: 'msg-1',
-          framing: 'plain', // must be ignored outside mcp.direct
-        }),
-      );
-      expect(out).toBe(
-        '\n[CHAT] From: Carol • Thread: thr-9\nthreaded hello\n[ACK] tools/call { name: "devchain_chat_ack", arguments: { thread_id: "thr-9", message_id: "msg-1" } }\n',
-      );
-    });
-
-    it("formats 'chat.user' as the thread turn with the [ACK] tool call (framing ignored)", () => {
-      const out = formatter.format(
-        msg({
-          kind: 'chat.user',
-          senderName: 'Dan',
-          body: 'chat hello',
-          threadId: 'thr-1',
-          messageId: 'msg-2',
-          framing: 'plain', // must be ignored outside mcp.direct
-        }),
-      );
-      expect(out).toBe(
-        '\n[CHAT] From: Dan • Thread: thr-1\nchat hello\n[ACK] tools/call { name: "devchain_chat_ack", arguments: { thread_id: "thr-1", message_id: "msg-2" } }\n',
-      );
-    });
-
+  describe('pooled framing', () => {
     it("passes 'pooled' body through raw (framing ignored)", () => {
       const out = formatter.format(
         msg({ kind: 'pooled', senderName: 'Pool', body: 'pooled body', framing: 'plain' }),

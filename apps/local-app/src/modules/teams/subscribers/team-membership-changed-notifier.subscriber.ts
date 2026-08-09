@@ -64,7 +64,9 @@ export class TeamMembershipChangedNotifierSubscriber {
           projectId: payload.projectId,
           senderName: 'System',
         },
-        { submitKeys: ['Enter'] },
+        source === 'team.member.added'
+          ? { submitKeys: ['Enter'], requireActiveSession: true }
+          : { submitKeys: ['Enter'] },
       );
 
       this.logger.log(

@@ -38,11 +38,6 @@ export class LegacyDeliveryFormatterAdapter extends DeliveryFormatter {
         );
         return `\n[This project message is sent from Project Owner ${ownerLabel} in project ${projectLabel}. To reply, use devchain_send_message with recipientProjectId: ${sourceProjectId}.]\n${message.body}\n`;
       }
-      case 'mcp.thread':
-      case 'chat.user': {
-        const fromLabel = message.senderName ?? 'User';
-        return `\n[CHAT] From: ${fromLabel} • Thread: ${message.threadId}\n${message.body}\n[ACK] tools/call { name: "devchain_chat_ack", arguments: { thread_id: "${message.threadId}", message_id: "${message.messageId}" } }\n`;
-      }
       case 'pooled':
         return message.body;
     }

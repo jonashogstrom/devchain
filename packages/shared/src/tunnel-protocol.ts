@@ -121,9 +121,8 @@ export const MOBILE_PUSH_TOPIC_ID_SEGMENT = ':id';
  * This MIRRORS the mobile-chat subset of the local-app `broadcast-registry` (the
  * producer / source of truth): `session.transcript.updated`, the two AskUserQuestion
  * hooks, `session.presence.changed`, `session.activity.changed`, plus the Phase-1 /
- * Task-3 additions `agent.created`/`agent.deleted` (RC4 — agent list add/remove) and
- * `chat.message.created` (RC3 — thread/group chat, forwarded for completeness; no
- * mobile consumer is wired yet). The bridge cannot runtime-import this ESM-only
+ * Task-3 additions `agent.created`/`agent.deleted` (RC4 — agent list add/remove). The
+ * bridge cannot runtime-import this ESM-only
  * package, so it re-implements {@link isAllowlistedTunnelPushTopic} locally; a sync
  * test in the local-app drives the real registry through this allowlist so the two
  * cannot drift without turning a test red.
@@ -145,13 +144,6 @@ export const MOBILE_PUSH_TOPIC_ALLOWLIST: readonly MobilePushTopicRule[] = [
     segments: ['project', MOBILE_PUSH_TOPIC_ID_SEGMENT, 'state'],
     eventTypes: ['agent.created', 'agent.deleted'],
   },
-  // chat.message.created (RC3) → `chat/<id>` + `message.created`. Thread/group-chat
-  // messages — forwarded + allowlisted for completeness, but NO mobile consumer is
-  // wired in Phase 1 (single-agent open-chat rides `session.transcript.updated`).
-  // The topic is admitted so a future thread surface can ride the same firehose; it
-  // is NOT consumed today, which is acceptable for a low-cadence lifecycle topic but
-  // would need a re-review if thread chat becomes high-frequency.
-  { segments: ['chat', MOBILE_PUSH_TOPIC_ID_SEGMENT], eventTypes: ['message.created'] },
 ];
 
 /**

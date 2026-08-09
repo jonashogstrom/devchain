@@ -208,7 +208,10 @@ describe('RestartAgentAction', () => {
 
       const result = await restartAgentAction.execute(mockContext, inputs);
 
-      expect(mockSessionsService.terminateSession).toHaveBeenCalledWith('existing-session');
+      expect(mockSessionsService.terminateSession).toHaveBeenCalledWith('existing-session', {
+        source: 'subscriber',
+        reason: 'restart',
+      });
       expect(result.success).toBe(true);
       const data = result.data as RestartAgentResultData;
       expect(data.previousSessionId).toBe('existing-session');
@@ -372,7 +375,10 @@ describe('RestartAgentAction', () => {
       await restartAgentAction.execute(mockContext, inputs);
 
       expect(mockSessionsService.terminateSession).toHaveBeenCalledTimes(1);
-      expect(mockSessionsService.terminateSession).toHaveBeenCalledWith('session-target');
+      expect(mockSessionsService.terminateSession).toHaveBeenCalledWith('session-target', {
+        source: 'subscriber',
+        reason: 'restart',
+      });
     });
 
     it('should handle empty agentName input', async () => {

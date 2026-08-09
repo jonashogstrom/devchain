@@ -829,30 +829,6 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
     logger.debug({ clientId: client.id }, 'Subscribed to events');
   }
 
-  @SubscribeMessage('chat:subscribe')
-  handleChatSubscribe(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { threadId: string },
-  ) {
-    const cs = this.clientSessions.get(client.id);
-    if (!cs) return;
-    const topic = `chat/${payload.threadId}`;
-    cs.subscriptions.add(topic);
-    client.join(`chat:${payload.threadId}`);
-    logger.debug({ clientId: client.id, threadId: payload.threadId }, 'Joined chat room');
-  }
-
-  @SubscribeMessage('chat:unsubscribe')
-  handleChatUnsubscribe(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { threadId: string },
-  ) {
-    const cs = this.clientSessions.get(client.id);
-    if (!cs) return;
-    cs.subscriptions.delete(`chat/${payload.threadId}`);
-    client.leave(`chat:${payload.threadId}`);
-  }
-
   @SubscribeMessage('terminal:unsubscribe')
   handleUnsubscribe(
     @ConnectedSocket() client: Socket,
@@ -1426,8 +1402,11 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
       this.clientSessions.forEach((cs, clientId) => {
         if (now.getTime() - cs.lastHeartbeat.getTime() > HEARTBEAT_TIMEOUT) {
           logger.warn({ clientId }, 'Client heartbeat timeout');
-          this.server.sockets.sockets.get(clientId)?.disconnect(true);
-          // Same authority sweep as handleDisconnect — disconnect(true) may not route through it,
+          // Close the transport so Socket.IO reports `transport close` and automatically reconnects.
+          // `disconnect(true)` reports `io server disconnect`, which permanently disables client
+          // reconnection and strands every realtime UI consumer until a full page reload.
+          this.server.sockets.sockets.get(clientId)?.conn.close();
+          // Same authority sweep as handleDisconnect — the transport close may not route through it,
           // and a plain clientSessions.delete would leak authority on every latched session.
           this.releaseClientSession(clientId);
         } else {

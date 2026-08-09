@@ -18,7 +18,7 @@ import { createLogger } from '../../../common/logging/logger';
 const logger = createLogger('E2eeKeypair');
 
 // DEDICATED E2EE key namespace — NEVER the Ed25519 tunnel/attestation key
-// (separate blast radius; ADR-006). Distinct settings key + salt from
+// (separate blast radius). Distinct settings key + salt from
 // tunnel-keypair.service.ts and encrypted-token-store.service.ts, though all three
 // share the machine-binding secret file under ~/.devchain/cloud/.
 const SETTINGS_KEY = 'cloud.e2ee.keypair';

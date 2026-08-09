@@ -159,6 +159,7 @@ function createTerminalIOMock(): Record<string, jest.Mock> {
   return {
     createSession: jest.fn().mockResolvedValue({ name: 'test-session' }),
     destroySession: jest.fn().mockResolvedValue(undefined),
+    destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
     listSessions: jest.fn().mockResolvedValue([]),
     sessionExists: jest.fn().mockResolvedValue(false),
     createEmptySession: jest.fn().mockResolvedValue({ name: 'test-session' }),

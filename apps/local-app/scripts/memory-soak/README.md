@@ -194,5 +194,5 @@ current manifest entry by path, byte count, and SHA-256; when the matrix names a
 verify that historical manifest too instead of copying its prior verification claim. An
 environmental sentinel such as unavailable PSI remains a failed strict check with `actual: null`;
 the prose may describe an approved environmental deviation but must never rewrite it as a pass.
-The published verdict must equal the matrix verdict recorded by the manifest. See
-`docs/mem-relief-v1-final-validation.md` for the currently authoritative manifest and report.
+The published verdict must equal the matrix verdict recorded by the manifest. See the
+[final validation report](../../../../docs/mem-relief-v1-final-validation.md) for the currently authoritative manifest and report.

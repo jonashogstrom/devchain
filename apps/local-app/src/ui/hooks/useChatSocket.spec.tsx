@@ -4,11 +4,8 @@ import type { ReactNode } from 'react';
 import type { Socket } from 'socket.io-client';
 import { useChatSocket, type UseChatSocketOptions } from './useChatSocket';
 import { useAppSocket } from '@/ui/hooks/useAppSocket';
+import { useRealtimeDispatch } from '@/ui/hooks/useRealtimeDispatch';
 import type { WsEnvelope } from '@/ui/lib/socket';
-
-jest.mock('@/ui/hooks/use-toast', () => ({
-  useToast: () => ({ toast: jest.fn() }),
-}));
 
 jest.mock('@/ui/hooks/useAppSocket', () => ({
   useAppSocket: jest.fn(),
@@ -30,10 +27,6 @@ function createMockSocket(): Socket {
 function buildOptions(overrides: Partial<UseChatSocketOptions> = {}): UseChatSocketOptions {
   return {
     projectId: 'project-1',
-    selectedThreadId: null,
-    agents: [],
-    getLatestSelectedThreadId: () => null,
-    isInlineActive: () => false,
     ...overrides,
   };
 }
@@ -50,6 +43,9 @@ function createWrapper() {
 
 describe('useChatSocket', () => {
   const useAppSocketMock = useAppSocket as jest.MockedFunction<typeof useAppSocket>;
+  const useRealtimeDispatchMock = useRealtimeDispatch as jest.MockedFunction<
+    typeof useRealtimeDispatch
+  >;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -67,7 +63,7 @@ describe('useChatSocket', () => {
     expect(result.current.socketRef.current).toBe(socket);
   });
 
-  it('passes event handlers for connect, disconnect, and message to useAppSocket', () => {
+  it('binds only the retained project-state message handler', () => {
     const socket = createMockSocket();
     useAppSocketMock.mockReturnValue(socket);
 
@@ -77,9 +73,38 @@ describe('useChatSocket', () => {
 
     const lastCall = useAppSocketMock.mock.calls[useAppSocketMock.mock.calls.length - 1];
     const handlers = lastCall[0];
-    expect(typeof handlers.connect).toBe('function');
-    expect(typeof handlers.disconnect).toBe('function');
     expect(typeof handlers.message).toBe('function');
+    expect(handlers.connect).toBeUndefined();
+    expect(handlers.disconnect).toBeUndefined();
+    expect(socket.emit).not.toHaveBeenCalled();
+  });
+
+  it('retains agent, team, presence, and session invalidations without thread entries', () => {
+    useAppSocketMock.mockReturnValue(createMockSocket());
+
+    renderHook(() => useChatSocket(buildOptions()), { wrapper: createWrapper() });
+
+    const registry = useRealtimeDispatchMock.mock.calls.at(-1)?.[0] ?? [];
+    expect(registry.map((entry) => entry.type)).toEqual(
+      expect.arrayContaining([
+        'agent.created',
+        'agent.deleted',
+        'team.member.added',
+        'team.member.removed',
+        'team.config.updated',
+        'presence',
+        'activity',
+      ]),
+    );
+    expect(
+      registry
+        .flatMap((entry) => entry.entries)
+        .some((entry) =>
+          entry.kind === 'invalidate'
+            ? entry.queryKey.some((segment) => String(segment).includes('thread'))
+            : false,
+        ),
+    ).toBe(false);
   });
 
   it('exposes socketRef pointing to the socket returned by useAppSocket', () => {
@@ -165,7 +190,7 @@ describe('useChatSocket', () => {
       expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
     });
 
-    it('does not break existing chat message handling', () => {
+    it('ignores removed chat message topics', () => {
       setup();
       messageHandler({
         topic: 'chat/thread-1',
@@ -173,9 +198,7 @@ describe('useChatSocket', () => {
         payload: { authorType: 'user', authorAgentId: null, content: 'hi' },
       });
 
-      expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
-        queryKey: ['messages', 'thread-1'],
-      });
+      expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
     });
   });
 });

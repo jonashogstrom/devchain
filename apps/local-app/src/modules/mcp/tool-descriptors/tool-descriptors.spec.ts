@@ -11,8 +11,8 @@ function unwrapZodSchema(schema: ZodSchema): ZodSchema {
 
 describe('tool-descriptors', () => {
   describe('metadata', () => {
-    it('has exactly 45 tool metadata entries', () => {
-      expect(allMetadata.length).toBe(45);
+    it('has exactly 40 tool metadata entries', () => {
+      expect(allMetadata.length).toBe(40);
     });
 
     it('all entries have required shape', () => {
@@ -50,8 +50,8 @@ describe('tool-descriptors', () => {
   });
 
   describe('bindings', () => {
-    it('has exactly 45 tool binding entries', () => {
-      expect(allBindings.length).toBe(45);
+    it('has exactly 40 tool binding entries', () => {
+      expect(allBindings.length).toBe(40);
     });
 
     it('all bindings have name and handler function', () => {
@@ -82,11 +82,11 @@ describe('tool-descriptors', () => {
       expect(orphans.map(([name]) => name)).toEqual([]);
     });
 
-    it('counts match: metadata == bindings == 45', () => {
-      expect(allMetadata.length).toBe(45);
-      expect(allBindings.length).toBe(45);
-      expect(metadataNames.size).toBe(45);
-      expect(bindingNames.size).toBe(45);
+    it('counts match: metadata == bindings == 40', () => {
+      expect(allMetadata.length).toBe(40);
+      expect(allBindings.length).toBe(40);
+      expect(metadataNames.size).toBe(40);
+      expect(bindingNames.size).toBe(40);
     });
   });
 
@@ -157,10 +157,12 @@ describe('tool-descriptors', () => {
       expect(schema?.properties?.recipientProjectId?.description).toContain('8+ character');
     });
 
-    it('includes threadId in schema properties', () => {
+    it('omits retired thread and internal-recipient fields', () => {
       const entry = allMetadata.find((m) => m.name === 'devchain_send_message');
       const schema = entry?.inputSchema as { properties?: Record<string, unknown> };
-      expect(schema?.properties).toHaveProperty('threadId');
+      expect(schema?.properties).not.toHaveProperty('threadId');
+      expect(schema?.properties).not.toHaveProperty('recipient');
+      expect(schema?.additionalProperties).toBe(false);
     });
 
     it('includes recipientAgentNames with minItems: 1', () => {
@@ -169,21 +171,17 @@ describe('tool-descriptors', () => {
       expect(schema?.properties?.recipientAgentNames?.minItems).toBe(1);
     });
 
-    it('documents explicit recipients as pooled delivery without thread creation', () => {
+    it('documents explicit recipients as terminal delivery', () => {
       const entry = allMetadata.find((m) => m.name === 'devchain_send_message');
       const schema = entry?.inputSchema as {
         properties?: Record<string, { description?: string }>;
       };
 
-      expect(entry?.description).toContain(
-        'pooled delivery to one or more explicit recipients without creating a thread',
-      );
+      expect(entry?.description).toContain('terminal-routed message');
       expect(schema?.properties?.recipientAgentNames?.description).toContain(
         'Accepts one or more recipients',
       );
-      expect(schema?.properties?.recipientAgentNames?.description).toContain(
-        'does not create a thread',
-      );
+      expect(entry?.description).not.toContain('thread');
     });
 
     it('includes teamName with self-team hint', () => {
@@ -192,6 +190,21 @@ describe('tool-descriptors', () => {
         properties?: Record<string, { description?: string }>;
       };
       expect(schema?.properties?.teamName?.description).toContain('Routes to team lead');
+    });
+  });
+
+  describe('retired terminal-unrelated tools', () => {
+    const retiredNames = [
+      'devchain_chat_ack',
+      'devchain_chat_read_history',
+      'devchain_chat_list_members',
+      'devchain_activity_start',
+      'devchain_activity_finish',
+    ];
+
+    it.each(retiredNames)('%s is absent from metadata and bindings', (name) => {
+      expect(allMetadata.some((entry) => entry.name === name)).toBe(false);
+      expect(allBindings.some(([bindingName]) => bindingName === name)).toBe(false);
     });
   });
 
@@ -316,14 +329,8 @@ describe('tool-descriptors', () => {
         'devchain_add_tags',
         'devchain_remove_tags',
       ],
-      chat: [
-        'devchain_send_message',
-        'devchain_chat_ack',
-        'devchain_chat_read_history',
-        'devchain_chat_list_members',
-      ],
+      chat: ['devchain_send_message'],
       projects: ['devchain_projects_list'],
-      activity: ['devchain_activity_start', 'devchain_activity_finish'],
       team: [
         'devchain_teams_list',
         'devchain_teams_members_list',
@@ -342,9 +349,9 @@ describe('tool-descriptors', () => {
       ],
     };
 
-    it('all categorized tools sum to 45', () => {
+    it('all categorized tools sum to 40', () => {
       const total = Object.values(categories).reduce((sum, tools) => sum + tools.length, 0);
-      expect(total).toBe(45);
+      expect(total).toBe(40);
     });
 
     Object.entries(categories).forEach(([category, tools]) => {

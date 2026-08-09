@@ -31,7 +31,7 @@ Each candidate is one `###` section containing, in order:
 - **Solution** — one sentence. What changes.
 - **Wins** — bullets, ≤6 words each, named in vocabulary terms: *"locality: bugs concentrate in one module"*, *"leverage: one interface, N call sites"*, *"interface shrinks; implementation absorbs the wrappers"*, *"delete 4 shallow wrappers"*. Never *"easier to maintain"* or *"cleaner code"* — those terms aren't in the glossary and don't earn their place.
 - **Before / After** — two diagrams, labelled `**Before**` and `**After**` (see patterns below).
-- **ADR callout** (only if applicable) — one line as a blockquote: `> ⚠️ Contradicts ADR-0007 — but worth reopening because …`. Only surface a conflict when the friction is real enough to warrant revisiting the decision.
+- **Standing-decision callout** (only if applicable) — one line as a blockquote: `> ⚠️ Contradicts <decision, cited where it's recorded> — but worth reopening because …`. Only surface a conflict when the friction is real enough to warrant revisiting. A past decision is context, not a veto: the callout informs the user's choice, it doesn't disqualify the candidate.
 
 If a diagram needs a paragraph to be understood, redraw the diagram.
 

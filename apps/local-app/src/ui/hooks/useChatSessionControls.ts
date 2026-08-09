@@ -31,11 +31,10 @@ export interface PendingLaunchAgent {
 
 export interface UseChatSessionControlsOptions {
   projectId: string | null;
-  selectedThreadId: string | null;
+  selectedAgentId: string | null;
   agentPresence: AgentPresenceMap;
   agents: AgentOrGuest[];
   presenceReady: boolean;
-  canAttachInlineTerminal?: (agentId: string) => boolean;
   onInlineTerminalAttach?: (agentId: string, sessionId: string | null) => void;
   onTerminalMenuClose?: () => void;
 }
@@ -86,11 +85,10 @@ export interface UseChatSessionControlsResult {
 
 export function useChatSessionControls({
   projectId,
-  selectedThreadId,
+  selectedAgentId,
   agentPresence,
   agents,
   presenceReady,
-  canAttachInlineTerminal,
   onInlineTerminalAttach,
   onTerminalMenuClose,
 }: UseChatSessionControlsOptions): UseChatSessionControlsResult {
@@ -178,17 +176,6 @@ export function useChatSessionControls({
         }
         return null;
       }
-      if (attach && !selectedThreadId) {
-        if (!silent) {
-          toast({
-            title: 'Select a conversation',
-            description: 'Choose a chat thread before attaching an inline terminal.',
-            variant: 'destructive',
-          });
-        }
-        return null;
-      }
-
       setPendingAction(agentId, 'launching');
       try {
         const raw = await launchSession(agentId, projectId, { silent }, '', apiFetch);
@@ -217,7 +204,7 @@ export function useChatSessionControls({
 
         await primeRunningSessionCache(agentId, session);
 
-        if (attach && canAttachInlineTerminal?.(agentId)) {
+        if (attach && selectedAgentId === agentId) {
           onInlineTerminalAttach?.(session.agentId ?? agentId, session.id);
           onTerminalMenuClose?.();
         }
@@ -267,8 +254,7 @@ export function useChatSessionControls({
     },
     [
       projectId,
-      selectedThreadId,
-      canAttachInlineTerminal,
+      selectedAgentId,
       toast,
       queryClient,
       onInlineTerminalAttach,
@@ -324,7 +310,7 @@ export function useChatSessionControls({
         queryClient.invalidateQueries({ queryKey: chatQueryKeys.agentPresence(projectId) });
         queryClient.invalidateQueries({ queryKey: chatQueryKeys.activeSessions(projectId) });
 
-        if (canAttachInlineTerminal?.(agentId)) {
+        if (selectedAgentId === agentId) {
           onInlineTerminalAttach?.(agentId, session?.id ?? null);
         }
       } catch (error) {
@@ -341,7 +327,7 @@ export function useChatSessionControls({
       agentPresence,
       projectId,
       queryClient,
-      canAttachInlineTerminal,
+      selectedAgentId,
       onInlineTerminalAttach,
       toast,
       primeRunningSessionCache,
@@ -365,7 +351,7 @@ export function useChatSessionControls({
         queryClient.invalidateQueries({ queryKey: chatQueryKeys.agentPresence(projectId) });
         queryClient.invalidateQueries({ queryKey: chatQueryKeys.activeSessions(projectId) });
         queryClient.invalidateQueries({ queryKey: ['agentSessionHistory', agentId, projectId] });
-        if (canAttachInlineTerminal?.(agentId)) {
+        if (selectedAgentId === agentId) {
           onInlineTerminalAttach?.(agentId, session.id);
           onTerminalMenuClose?.();
         }
@@ -385,7 +371,7 @@ export function useChatSessionControls({
     [
       projectId,
       queryClient,
-      canAttachInlineTerminal,
+      selectedAgentId,
       onInlineTerminalAttach,
       onTerminalMenuClose,
       toast,

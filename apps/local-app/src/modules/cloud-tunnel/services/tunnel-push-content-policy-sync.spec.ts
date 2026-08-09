@@ -6,8 +6,9 @@ import {
 
 /**
  * Bridge B2 drift guard: the forwarder's push content policy
- * (`CONTENT_BEARING_PUSH_EVENTS`) must stay in lock-step with the SOURCE OF TRUTH —
- * each broadcast-registry entry's `contentBearing` flag.
+ * (`CONTENT_BEARING_PUSH_EVENTS`) must stay in lock-step with each active
+ * broadcast-registry entry's `contentBearing` flag. A forwarded event without a
+ * registry projection is inert because the forwarder has nothing to project.
  *
  * Layer: unit (contract sync). Same allowlist-in-two-places pattern as
  * `broadcast-allowlist-sync.spec` (registry ↔ shared push topic allowlist) and
@@ -29,12 +30,15 @@ describe('tunnel push content-policy ↔ broadcast-registry sync (B2 drift guard
   const registrySaysContentBearing = (event: string): boolean =>
     (broadcastRegistry[event] ?? []).some((entry) => entry.contentBearing === true);
 
-  it.each(TUNNEL_FORWARDED_EVENTS)(
+  const registryBackedForwardedEvents = TUNNEL_FORWARDED_EVENTS.filter(
+    (event) => (broadcastRegistry[event] ?? []).length > 0,
+  );
+
+  it.each(registryBackedForwardedEvents)(
     'forwarder content policy matches the registry contentBearing flag for %s',
     (event) => {
-      // Bidirectional drift guard: a content-bearing registry entry MUST be in the policy
-      // (else it leaks plaintext content), and a policy entry MUST be content-bearing in the
-      // registry (else the policy carries a stale entry that needlessly withholds a hint).
+      // Bidirectional drift guard for active projections: a content-bearing registry entry
+      // MUST be in the policy, and an active policy entry MUST be content-bearing.
       expect(CONTENT_BEARING_PUSH_EVENTS.has(event)).toBe(registrySaysContentBearing(event));
     },
   );
@@ -45,21 +49,21 @@ describe('tunnel push content-policy ↔ broadcast-registry sync (B2 drift guard
     }
   });
 
-  it('every forwarded content-bearing event has at least one registry entry', () => {
-    for (const event of CONTENT_BEARING_PUSH_EVENTS) {
-      expect((broadcastRegistry[event] ?? []).length).toBeGreaterThan(0);
+  it('every registry-backed content-bearing event is classified by the forwarder', () => {
+    for (const event of registryBackedForwardedEvents) {
+      if (registrySaysContentBearing(event)) {
+        expect(CONTENT_BEARING_PUSH_EVENTS.has(event)).toBe(true);
+      }
     }
   });
 
-  it('classifies the content-bearing forwarded events (transcript deltas, agent names, AUQ, chat)', () => {
-    // The fix this task delivers: transcript deltas + agent-lifecycle names join the
-    // pre-existing AUQ-pending + chat-message classification. Asserted explicitly so a
-    // revert of the registry flags fails here, not just in the generic %s table above.
+  it('classifies the content-bearing forwarded events (transcript deltas, agent names, AUQ)', () => {
+    // Keep the expected content-bearing set explicit so a registry-policy regression fails
+    // here with the missing event name, not only in the generic table above.
     expect([...CONTENT_BEARING_PUSH_EVENTS].sort()).toEqual(
       [
         'agent.created',
         'agent.deleted',
-        'chat.message.created',
         'claude.hooks.ask_user_question.pending',
         'session.transcript.updated',
       ].sort(),

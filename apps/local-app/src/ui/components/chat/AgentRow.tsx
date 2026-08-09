@@ -181,7 +181,7 @@ export function AgentRow({
             isLaunchingChat && 'cursor-not-allowed opacity-50',
           )}
           role="listitem"
-          aria-label={`Chat with ${agent.name}${isOnline ? ' (online)' : ' (offline)'}`}
+          aria-label={`Open terminal for ${agent.name}${isOnline ? ' (online)' : ' (offline)'}`}
           aria-current={isSelected ? 'true' : undefined}
           data-context-metrics-key={contextTrackingEnabled ? contextMetricsKey : undefined}
           data-agent-event-bus-key={eventBusAnchor?.key}

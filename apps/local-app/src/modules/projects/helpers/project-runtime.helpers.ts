@@ -1,6 +1,7 @@
 import { createLogger } from '../../../common/logging/logger';
 import type { SettingsService } from '../../settings/services/settings.service';
 import type { StorageService } from '../../storage/interfaces/storage.interface';
+import type { EventFilter } from '../../storage/models/domain.models';
 import type { WatchersService } from '../../watchers/services/watchers.service';
 import type { ProjectSettingsTemplateInput } from './profile-mapping.helpers';
 
@@ -32,11 +33,7 @@ export interface SubscriberTemplateInput {
   description?: string | null;
   enabled: boolean;
   eventName: string;
-  eventFilter?: {
-    field: string;
-    operator: 'equals' | 'contains' | 'regex';
-    value: string;
-  } | null;
+  eventFilter?: EventFilter | null;
   actionType: string;
   actionInputs: Record<
     string,

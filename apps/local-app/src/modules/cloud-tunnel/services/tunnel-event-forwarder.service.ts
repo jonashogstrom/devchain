@@ -19,14 +19,9 @@ const logger = createLogger('TunnelEventForwarder');
  * explicit allowlist, never an open pipe. Board / epic / review events are NOT
  * forwarded (they belong to the web socket.io fan-out only).
  *
- * Phase 1 / Task 3 additions:
+ * Phase 1 / Task 3 addition:
  *  - `agent.created` / `agent.deleted` (RC4): mobile list reflects agent add/remove live
  *    (topic `project/<id>/state`).
- *  - `chat.message.created` (RC3): forwarded for completeness so a future thread/group-chat
- *    mobile surface can ride the firehose; the existing single-agent open-chat already
- *    consumes `session.transcript.updated`, so no mobile consumer is wired here yet (the
- *    topic is allowlisted on both sides + sync-tested, but no mobile route subscribes —
- *    documented at the allowlist + in the Task 3 completion report).
  */
 export const TUNNEL_FORWARDED_EVENTS = [
   'session.transcript.updated',
@@ -36,7 +31,6 @@ export const TUNNEL_FORWARDED_EVENTS = [
   'session.activity.changed',
   'agent.created',
   'agent.deleted',
-  'chat.message.created',
 ] as const;
 
 type ForwardedEvent = (typeof TUNNEL_FORWARDED_EVENTS)[number];
@@ -45,7 +39,6 @@ type ForwardedEvent = (typeof TUNNEL_FORWARDED_EVENTS)[number];
  * The subset of forwarded events whose push `payload` carries real CONTENT (not just a
  * routing hint), so it must NEVER ship in plaintext to a non-E2EE-capable peer:
  *  - `claude.hooks.ask_user_question.pending` — the question text.
- *  - `chat.message.created` — the thread/group message body (latent; no mobile consumer yet).
  *  - `session.transcript.updated` — `deltaChunks`/`deltaMessages` carry transcript body text.
  *  - `agent.created` / `agent.deleted` — carry agent/team NAMES.
  *
@@ -62,7 +55,6 @@ type ForwardedEvent = (typeof TUNNEL_FORWARDED_EVENTS)[number];
  */
 export const CONTENT_BEARING_PUSH_EVENTS: ReadonlySet<ForwardedEvent> = new Set<ForwardedEvent>([
   'claude.hooks.ask_user_question.pending',
-  'chat.message.created',
   'session.transcript.updated',
   'agent.created',
   'agent.deleted',
@@ -77,7 +69,7 @@ function isNonEmptyString(value: unknown): value is string {
  * `{type:'push', v:2, …}` frames, IN ADDITION to (and fully independent of) the
  * socket.io fan-out — the web path is untouched.
  *
- * ADR-005:143-170 keeps catalog projection in events infrastructure behind a single
+ * The canonical architecture keeps catalog projection in events infrastructure behind a single
  * `REALTIME_BROADCASTER`. Rather than refactor that boundary, this is a standalone
  * EventEmitter2 subscriber (decision (b)); to avoid the projection-duplication risk
  * (b) warns about, it reuses the SAME `broadcast-registry` projection via
@@ -248,17 +240,6 @@ export class TunnelEventForwarderService implements OnModuleInit, OnModuleDestro
         // disproportionate — the in-process emitter is the authority here.
         const projectId = payload.projectId;
         if (!isNonEmptyString(projectId)) return false;
-        return true;
-      }
-
-      case 'chat.message.created': {
-        // Thread/group-chat message (topic `chat/<threadId>`). Same shape-only scope check
-        // as agent lifecycle: a non-empty `threadId` is required. There is no active-thread
-        // ownership lookup analogous to `getSessionProjectScope`; the in-process emitter is
-        // the authority. Forwarded for firehose completeness — no mobile consumer is wired
-        // yet (thread/group chat is a future mobile surface).
-        const threadId = payload.threadId;
-        if (!isNonEmptyString(threadId)) return false;
         return true;
       }
 

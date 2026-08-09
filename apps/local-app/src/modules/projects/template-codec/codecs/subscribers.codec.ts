@@ -7,6 +7,7 @@
  */
 import { createSubscribersFromPayloadWithHelper } from '../../helpers/project-runtime.helpers';
 import type { SubscriberTemplateInput } from '../../helpers/project-runtime.helpers';
+import type { EventFilter } from '../../../storage/models/domain.models';
 import type { ImportContext } from '../import-context';
 import type {
   CodecApplyResult,
@@ -25,11 +26,7 @@ interface ExportSubscriberRow {
   description: string | null;
   enabled: boolean;
   eventName: string;
-  eventFilter: {
-    field: string;
-    operator: 'equals' | 'contains' | 'regex';
-    value: string;
-  } | null;
+  eventFilter: EventFilter | null;
   actionType: string;
   actionInputs: Record<
     string,

@@ -24,6 +24,8 @@ import { SessionCoordinatorService } from './session-coordinator.service';
 import { TerminalSessionRegistry } from '../../terminal/services/terminal-session/terminal-session-registry';
 import type { RuntimeContextCaptureService } from '../../runtime-context-capture/runtime-context-capture.service';
 
+const TEST_TERMINATION = { source: 'web-api' as const, reason: 'user-requested' as const };
+
 describe('SessionsService', () => {
   let storage: {
     getAgent: jest.Mock;
@@ -45,6 +47,7 @@ describe('SessionsService', () => {
     createEmptySession: jest.Mock;
     setAlternateScreen: jest.Mock;
     destroySession: jest.Mock;
+    destroyExpectedSession: jest.Mock;
     typeCommand: jest.Mock;
     waitForOutput: jest.Mock;
     deliver: jest.Mock;
@@ -63,6 +66,7 @@ describe('SessionsService', () => {
   };
   let runtimeContextCapture: { clear: jest.Mock };
   let claudeLaunchSettings: { cleanupSessionSync: jest.Mock };
+  let codexPluginProfiles: { cleanupSession: jest.Mock; reconcileStartup: jest.Mock };
   let service: SessionsService;
 
   beforeEach(() => {
@@ -96,6 +100,7 @@ describe('SessionsService', () => {
       createEmptySession: jest.fn().mockResolvedValue({ name: 'tmux-session' }),
       setAlternateScreen: jest.fn().mockResolvedValue(undefined),
       destroySession: jest.fn().mockResolvedValue(undefined),
+      destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
       typeCommand: jest.fn().mockResolvedValue(undefined),
       waitForOutput: jest.fn().mockResolvedValue(true),
       deliver: jest.fn().mockResolvedValue({ confirmed: true, nonce: 'abc1234', retryCount: 0 }),
@@ -133,6 +138,10 @@ describe('SessionsService', () => {
     };
     runtimeContextCapture = { clear: jest.fn() };
     claudeLaunchSettings = { cleanupSessionSync: jest.fn() };
+    codexPluginProfiles = {
+      cleanupSession: jest.fn().mockResolvedValue(undefined),
+      reconcileStartup: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new SessionsService(
       dbMock,
@@ -150,10 +159,7 @@ describe('SessionsService', () => {
       terminalSessionRegistry as unknown as TerminalSessionRegistry,
       runtimeContextCapture as unknown as RuntimeContextCaptureService,
       claudeLaunchSettings as never,
-      {
-        cleanupSession: jest.fn().mockResolvedValue(undefined),
-        reconcileStartup: jest.fn().mockResolvedValue(undefined),
-      } as never,
+      codexPluginProfiles as never,
     );
   });
 
@@ -186,17 +192,20 @@ describe('SessionsService', () => {
         all: jest.fn().mockReturnValue([]),
       });
 
-      mockTerminalIO.sessionExists.mockResolvedValue(true);
-
-      await service.terminateSession('session-1');
+      await service.terminateSession('session-1', TEST_TERMINATION);
 
       expect(ptyService.stopStreaming).toHaveBeenCalledWith('session-1');
       expect(terminalSessionRegistry.dispose).toHaveBeenCalledWith('session-1');
       expect(runtimeContextCapture.clear).toHaveBeenCalledWith('session-1');
       expect(claudeLaunchSettings.cleanupSessionSync).toHaveBeenCalledWith('session-1');
-      expect(mockTerminalIO.destroySession).toHaveBeenCalledWith({ name: 'tmux-session' });
+      expect(mockTerminalIO.destroyExpectedSession).toHaveBeenCalledWith(
+        { name: 'tmux-session' },
+        { onUnknownError: 'rearm', sessionId: 'session-1' },
+      );
+      expect(mockTerminalIO.sessionExists).not.toHaveBeenCalled();
       expect(eventsService.publish).toHaveBeenCalledWith('session.stopped', {
         sessionId: 'session-1',
+        ...TEST_TERMINATION,
       });
       expect(eventsService.publish).toHaveBeenCalledWith(
         'session.presence.changed',
@@ -211,9 +220,9 @@ describe('SessionsService', () => {
         all: jest.fn().mockReturnValue([]),
       });
 
-      await service.terminateSession('nonexistent');
+      await service.terminateSession('nonexistent', TEST_TERMINATION);
       expect(mockTerminalIO.destroySession).not.toHaveBeenCalled();
-      expect(runtimeContextCapture.clear).toHaveBeenCalledWith('nonexistent');
+      expect(runtimeContextCapture.clear).not.toHaveBeenCalled();
     });
 
     it('treats stopped session as success but still disposes stale in-memory state', async () => {
@@ -228,16 +237,73 @@ describe('SessionsService', () => {
         all: jest.fn().mockReturnValue([]),
       });
 
-      await service.terminateSession('session-1');
+      await service.terminateSession('session-1', TEST_TERMINATION);
 
-      // No tmux side effects on the early return…
-      expect(mockTerminalIO.destroySession).not.toHaveBeenCalled();
-      // …but any surviving registry entry / streaming is cleaned up so it
-      // cannot block a later restore with "TerminalSession already exists".
+      expect(mockTerminalIO.destroyExpectedSession).not.toHaveBeenCalled();
       expect(ptyService.stopStreaming).toHaveBeenCalledWith('session-1');
       expect(terminalSessionRegistry.dispose).toHaveBeenCalledWith('session-1');
       expect(runtimeContextCapture.clear).toHaveBeenCalledWith('session-1');
       expect(claudeLaunchSettings.cleanupSessionSync).toHaveBeenCalledWith('session-1');
+    });
+
+    it('does not dismantle a terminal row when its exact tmux destroy is unknown', async () => {
+      sqlitePrepare.mockReturnValue({
+        run: insertRunMock,
+        get: jest.fn().mockReturnValue({
+          id: 'session-terminal',
+          status: 'failed',
+          agent_id: 'agent-1',
+          tmux_session_id: 'tmux-survivor',
+        }),
+        all: jest.fn().mockReturnValue([]),
+      });
+      mockTerminalIO.destroyExpectedSession.mockResolvedValue({
+        outcome: 'unknown-error',
+        error: new Error('permission denied'),
+      });
+
+      await expect(service.terminateSession('session-terminal', TEST_TERMINATION)).rejects.toThrow(
+        'permission denied',
+      );
+
+      expect(mockTerminalIO.destroyExpectedSession).toHaveBeenCalledWith(
+        { name: 'tmux-survivor' },
+        { onUnknownError: 'retire' },
+      );
+      expect(ptyService.stopStreaming).not.toHaveBeenCalled();
+      expect(terminalSessionRegistry.dispose).not.toHaveBeenCalled();
+      expect(runtimeContextCapture.clear).not.toHaveBeenCalled();
+      expect(codexPluginProfiles.cleanupSession).not.toHaveBeenCalled();
+    });
+
+    it('completes running termination when exact tmux absence is authoritative', async () => {
+      sqlitePrepare.mockReturnValue({
+        run: insertRunMock,
+        get: jest.fn().mockReturnValue({
+          id: 'session-absent',
+          status: 'running',
+          agent_id: 'agent-1',
+          tmux_session_id: 'tmux-absent',
+          transcript_path: null,
+        }),
+        all: jest.fn().mockReturnValue([]),
+      });
+      mockTerminalIO.destroyExpectedSession.mockResolvedValue({ outcome: 'known-absent' });
+
+      await service.terminateSession('session-absent', TEST_TERMINATION);
+
+      expect(insertRunMock).toHaveBeenCalledWith(
+        'stopped',
+        expect.any(String),
+        null,
+        expect.any(String),
+        'session-absent',
+      );
+      expect(eventsService.publish).toHaveBeenCalledWith('session.stopped', {
+        sessionId: 'session-absent',
+        ...TEST_TERMINATION,
+      });
+      expect(mockTerminalIO.sessionExists).not.toHaveBeenCalled();
     });
 
     it('disposes registry entry in terminateSession', async () => {
@@ -263,9 +329,7 @@ describe('SessionsService', () => {
         all: jest.fn().mockReturnValue([]),
       });
 
-      mockTerminalIO.sessionExists.mockResolvedValue(false);
-
-      await service.terminateSession('session-x');
+      await service.terminateSession('session-x', TEST_TERMINATION);
 
       expect(ptyService.stopStreaming).toHaveBeenCalledWith('session-x');
       expect(terminalSessionRegistry.dispose).toHaveBeenCalledWith('session-x');
@@ -302,9 +366,107 @@ describe('SessionsService', () => {
         callOrder.push('dispose');
       });
 
-      await service.terminateSession('session-y');
+      await service.terminateSession('session-y', TEST_TERMINATION);
 
       expect(callOrder).toEqual(['stopStreaming', 'dispose']);
+    });
+
+    it('leaves the running row and all runtime artifacts intact when destroy fails', async () => {
+      const runningRow = {
+        id: 'session-failure',
+        epic_id: null,
+        agent_id: 'agent-1',
+        tmux_session_id: 'tmux-session',
+        status: 'running',
+        started_at: '2024-01-01T00:00:00.000Z',
+        ended_at: null,
+        last_activity_at: null,
+        activity_state: null,
+        busy_since: null,
+        transcript_path: null,
+        created_at: '2024-01-01T00:00:00.000Z',
+        updated_at: '2024-01-01T00:00:00.000Z',
+      };
+      sqlitePrepare.mockReturnValue({
+        run: insertRunMock,
+        get: jest.fn().mockReturnValue(runningRow),
+        all: jest.fn().mockReturnValue([]),
+      });
+      mockTerminalIO.destroyExpectedSession.mockResolvedValue({
+        outcome: 'unknown-error',
+        error: new Error('unclassified tmux failure'),
+      });
+
+      await expect(service.terminateSession('session-failure', TEST_TERMINATION)).rejects.toThrow(
+        'unclassified tmux failure',
+      );
+
+      expect(insertRunMock).not.toHaveBeenCalled();
+      expect(ptyService.stopStreaming).not.toHaveBeenCalled();
+      expect(terminalSessionRegistry.dispose).not.toHaveBeenCalled();
+      expect(runtimeContextCapture.clear).not.toHaveBeenCalled();
+      expect(claudeLaunchSettings.cleanupSessionSync).not.toHaveBeenCalled();
+      expect(codexPluginProfiles.cleanupSession).not.toHaveBeenCalled();
+      expect(eventsService.publish).not.toHaveBeenCalled();
+    });
+
+    it('persists stopped state when post-destroy Codex cleanup fails', async () => {
+      // Service-unit coverage is the cheapest layer: the regression is the
+      // ordering of one mocked artifact side effect before the durable UPDATE.
+      const sessionId = 'session-cleanup-failure';
+      const sensitivePath = '/private/machine/path/codex-lifecycle';
+      const runningRow = {
+        id: sessionId,
+        epic_id: null,
+        agent_id: 'agent-1',
+        tmux_session_id: 'tmux-session',
+        status: 'running',
+        started_at: '2024-01-01T00:00:00.000Z',
+        ended_at: null,
+        last_activity_at: null,
+        activity_state: null,
+        busy_since: null,
+        transcript_path: null,
+        created_at: '2024-01-01T00:00:00.000Z',
+        updated_at: '2024-01-01T00:00:00.000Z',
+      };
+      sqlitePrepare.mockReturnValue({
+        run: insertRunMock,
+        get: jest.fn().mockReturnValue(runningRow),
+        all: jest.fn().mockReturnValue([]),
+      });
+      codexPluginProfiles.cleanupSession.mockRejectedValue(
+        Object.assign(new Error('cleanup lock unavailable'), {
+          code: 'EACCES',
+          path: sensitivePath,
+        }),
+      );
+
+      await expect(service.terminateSession(sessionId, TEST_TERMINATION)).resolves.toBeUndefined();
+
+      expect(mockTerminalIO.destroyExpectedSession).toHaveBeenCalledWith(
+        { name: 'tmux-session' },
+        { onUnknownError: 'rearm', sessionId },
+      );
+      expect(insertRunMock).toHaveBeenCalledWith(
+        'stopped',
+        expect.any(String),
+        null,
+        expect.any(String),
+        sessionId,
+      );
+      expect(eventsService.publish).toHaveBeenCalledWith('session.stopped', {
+        sessionId,
+        ...TEST_TERMINATION,
+      });
+      expect(mockSessionsLogger.warn).toHaveBeenCalledWith(
+        {
+          sessionId,
+          errorCode: 'CODEX_PROFILE_CLEANUP_FAILED',
+        },
+        'Failed to clean Codex profile lifecycle after session termination',
+      );
+      expect(JSON.stringify(mockSessionsLogger.warn.mock.calls)).not.toContain(sensitivePath);
     });
   });
 
@@ -499,7 +661,12 @@ describe('SessionsService', () => {
         sessionId: 'session-1',
         activityState: 'idle',
         idleSince: null,
+        currentActivityTitle: null,
       });
+
+      const preparedSql = sqlitePrepare.mock.calls.map(([sql]) => String(sql));
+      expect(preparedSql).toHaveLength(1);
+      expect(preparedSql.join('\n')).not.toMatch(/chat_activities|chat_threads/);
     });
   });
 
@@ -515,7 +682,7 @@ describe('SessionsService', () => {
       expect(sessions).toEqual([]);
     });
 
-    it('marks orphaned sessions as stopped', async () => {
+    it('returns stored running rows without probing or mutating runtime state', async () => {
       const orphanedRow = {
         id: 'session-1',
         epic_id: null,
@@ -538,17 +705,43 @@ describe('SessionsService', () => {
         all: jest.fn().mockReturnValue([orphanedRow]),
       });
 
-      // tmux session doesn't exist
-      mockTerminalIO.sessionExists.mockResolvedValue(false);
+      const results = await Promise.all([
+        service.listActiveSessions(),
+        service.listActiveSessions(),
+        service.listActiveSessions(),
+      ]);
 
-      const sessions = await service.listActiveSessions();
-      expect(sessions).toEqual([]);
-      expect(insertRunMock).toHaveBeenCalled();
-      // In-memory terminal state must be dropped alongside the DB flip — a
-      // stale registry entry would block restoring the session later.
-      expect(ptyService.stopStreaming).toHaveBeenCalledWith('session-1');
-      expect(terminalSessionRegistry.dispose).toHaveBeenCalledWith('session-1');
-      expect(runtimeContextCapture.clear).toHaveBeenCalledWith('session-1');
+      expect(results).toEqual([
+        [
+          expect.objectContaining({
+            id: 'session-1',
+            status: 'running',
+            tmuxSessionId: 'tmux-gone',
+          }),
+        ],
+        [
+          expect.objectContaining({
+            id: 'session-1',
+            status: 'running',
+            tmuxSessionId: 'tmux-gone',
+          }),
+        ],
+        [
+          expect.objectContaining({
+            id: 'session-1',
+            status: 'running',
+            tmuxSessionId: 'tmux-gone',
+          }),
+        ],
+      ]);
+      expect(mockTerminalIO.sessionExists).not.toHaveBeenCalled();
+      expect(mockTerminalIO.destroySession).not.toHaveBeenCalled();
+      expect(insertRunMock).not.toHaveBeenCalled();
+      expect(ptyService.stopStreaming).not.toHaveBeenCalled();
+      expect(terminalSessionRegistry.dispose).not.toHaveBeenCalled();
+      expect(runtimeContextCapture.clear).not.toHaveBeenCalled();
+      expect(claudeLaunchSettings.cleanupSessionSync).not.toHaveBeenCalled();
+      expect(codexPluginProfiles.cleanupSession).not.toHaveBeenCalled();
     });
   });
 

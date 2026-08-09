@@ -8,7 +8,7 @@ This vocabulary is the language of *your architectural claims* during a review. 
 
 - **Concrete artifacts keep their real names.** A NestJS `FooService` is cited as `FooService`; a docs section titled "module boundaries" is quoted as written; a folder called `components/` stays `components/`. The substitution rules below apply to your analysis prose, not to quoting or citing project artifacts.
 - **Both layers can appear in one sentence**, and that's correct: "the `SessionsService` **module** is **shallow** — its **interface** nearly matches its **implementation**."
-- **When recording decisions into the project** (glossary entries, ADRs, epics), follow *that project's* documentation standards and conventions. Introduce these terms into a project's docs only if the project adopts them; otherwise they stay in the review conversation and report.
+- **When recording decisions into the project** (glossary entries, decision notes, epics), follow *that project's* documentation standards and conventions — write where it already keeps decisions; never introduce a decision-record format it doesn't use. Introduce these terms into a project's docs only if the project adopts them; otherwise they stay in the review conversation and report.
 
 ## Glossary
 

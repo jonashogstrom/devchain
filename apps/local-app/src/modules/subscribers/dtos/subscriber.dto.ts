@@ -39,14 +39,23 @@ export type ActionInput = z.infer<typeof ActionInputSchema>;
 // ============================================
 // Optional filter to match specific event payload fields
 
+export const EventFilterConditionSchema = z.object({
+  field: z.string().min(1),
+  operator: z.enum(['equals', 'contains', 'regex', 'is_null', 'is_not_null']),
+  value: z.string(),
+});
+
+export const EventFilterGroupSchema = z.object({
+  combinator: z.enum(['and', 'or']),
+  filters: z.array(EventFilterConditionSchema).nonempty(),
+});
+
 export const EventFilterSchema = z
-  .object({
-    field: z.string().min(1),
-    operator: z.enum(['equals', 'contains', 'regex']),
-    value: z.string(),
-  })
+  .union([EventFilterGroupSchema, EventFilterConditionSchema])
   .nullable();
 
+export type EventFilterCondition = z.infer<typeof EventFilterConditionSchema>;
+export type EventFilterGroup = z.infer<typeof EventFilterGroupSchema>;
 export type EventFilter = z.infer<typeof EventFilterSchema>;
 
 // ============================================

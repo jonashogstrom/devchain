@@ -300,11 +300,13 @@ export class SessionLaunchPipeline {
         // Phase 8: createTmuxSession
         await this.terminalIO.createEmptySession(tmuxSessionName, { cwd: project.rootPath });
         cleanup.push('createTmuxSession', async () => {
-          try {
-            await this.terminalIO.destroySession({ name: tmuxSessionName! });
-          } catch (e) {
+          const result = await this.terminalIO.destroyExpectedSession(
+            { name: tmuxSessionName! },
+            { onUnknownError: 'retire' },
+          );
+          if (result.outcome === 'unknown-error') {
             logger.warn(
-              { tmuxSessionName, error: e },
+              { tmuxSessionName, error: result.error },
               'Failed to destroy tmux session during rollback',
             );
           }

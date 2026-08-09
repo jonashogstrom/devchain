@@ -364,7 +364,11 @@ describe('TranscriptWatcherService', () => {
 
     it('should stop watching on session.stopped event', async () => {
       await service.startWatching(SESSION_ID, FILE_PATH, PROVIDER_NAME);
-      await service.handleSessionStopped({ sessionId: SESSION_ID });
+      await service.handleSessionStopped({
+        sessionId: SESSION_ID,
+        source: 'web-api',
+        reason: 'user-requested',
+      });
 
       expect(service.activeWatcherCount).toBe(0);
     });

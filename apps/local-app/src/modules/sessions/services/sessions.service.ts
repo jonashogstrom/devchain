@@ -27,6 +27,7 @@ import { ProviderAdapterFactory } from '../../providers/adapters/provider-adapte
 import { RuntimeContextCaptureService } from '../../runtime-context-capture/runtime-context-capture.service';
 import { ClaudeLaunchSettingsMaterializerService } from '../../runtime-context-capture/claude-launch-settings-materializer.service';
 import { CodexPluginProfileMaterializerService } from '../../runtime-context-capture/codex-plugin-profile-materializer.service';
+import type { SessionTerminationContext } from '../../events/catalog/session.stopped';
 
 const logger = createLogger('SessionsService');
 
@@ -100,103 +101,122 @@ export class SessionsService {
   /**
    * Terminate a session
    */
-  async terminateSession(sessionId: string): Promise<void> {
+  async terminateSession(sessionId: string, termination: SessionTerminationContext): Promise<void> {
     logger.info({ sessionId }, 'Terminating session');
-    this.runtimeContextCapture.clear(sessionId);
-    this.claudeLaunchSettings.cleanupSessionSync(sessionId);
 
-    // Get session from database
-    const session = this.getSession(sessionId);
-    if (!session) {
+    // Resolve the lock key without performing any lifecycle effects. Launch and
+    // restore use the same agent key, so their publication windows finish before
+    // termination can inspect or dismantle the session they are creating.
+    const source = this.sqlite
+      .prepare('SELECT id, agent_id FROM sessions WHERE id = ?')
+      .get(sessionId) as { id: string; agent_id: string | null } | undefined;
+    if (!source) {
       logger.warn({ sessionId }, 'Session not found, treating as already terminated');
       return;
     }
 
-    if (session.status !== 'running') {
-      logger.info(
-        { sessionId, status: session.status },
-        'Session already stopped, treating as success',
-      );
-      // The DB row may have been flipped by another path (orphan reconciler,
-      // crash handler) while in-memory terminal state survived — clean it up
-      // so a stale registry entry cannot block a later restore.
+    await this.sessionCoordinator.withAgentLock(source.agent_id ?? source.id, async () => {
+      const session = this.getSession(sessionId);
+      if (!session) {
+        logger.warn({ sessionId }, 'Session disappeared while waiting to terminate');
+        return;
+      }
+
+      if (session.status !== 'running') {
+        logger.info(
+          { sessionId, status: session.status },
+          'Session already stopped, treating as success',
+        );
+        if (session.tmuxSessionId) {
+          const destroyResult = await this.terminalIO.destroyExpectedSession(
+            { name: session.tmuxSessionId },
+            { onUnknownError: 'retire' },
+          );
+          if (destroyResult.outcome === 'unknown-error') throw destroyResult.error;
+        }
+        this.ptyService.stopStreaming(sessionId);
+        this.terminalSessionRegistry.dispose(sessionId);
+        this.runtimeContextCapture.clear(sessionId);
+        this.claudeLaunchSettings.cleanupSessionSync(sessionId);
+        await this.codexPluginProfiles.cleanupSession(sessionId);
+        return;
+      }
+
+      // Durable state remains running until tmux destruction is confirmed or
+      // tmux authoritatively reports that the exact session is absent.
+      if (session.tmuxSessionId) {
+        const destroyResult = await this.terminalIO.destroyExpectedSession(
+          { name: session.tmuxSessionId },
+          { onUnknownError: 'rearm', sessionId },
+        );
+        if (destroyResult.outcome === 'unknown-error') throw destroyResult.error;
+        if (destroyResult.outcome === 'known-absent') {
+          logger.warn(
+            { sessionId, tmuxSessionId: session.tmuxSessionId },
+            'Tmux session already gone, cleaning up database record',
+          );
+        }
+      }
+
       this.ptyService.stopStreaming(sessionId);
       this.terminalSessionRegistry.dispose(sessionId);
-      if (
-        session.tmuxSessionId &&
-        (await this.terminalIO.sessionExists({ name: session.tmuxSessionId }))
-      ) {
-        await this.terminalIO.destroySession({ name: session.tmuxSessionId });
-      }
-      await this.codexPluginProfiles.cleanupSession(sessionId);
-      return;
-    }
-
-    // Stop PTY streaming
-    this.ptyService.stopStreaming(sessionId);
-    this.terminalSessionRegistry.dispose(sessionId);
-
-    // Kill tmux session if it exists
-    if (session.tmuxSessionId) {
-      const sessionExists = await this.terminalIO.sessionExists({ name: session.tmuxSessionId });
-      if (sessionExists) {
-        await this.terminalIO.destroySession({ name: session.tmuxSessionId });
-      } else {
+      this.runtimeContextCapture.clear(sessionId);
+      this.claudeLaunchSettings.cleanupSessionSync(sessionId);
+      await this.codexPluginProfiles.cleanupSession(sessionId).catch(() => {
         logger.warn(
-          { sessionId, tmuxSessionId: session.tmuxSessionId },
-          'Tmux session already gone, cleaning up database record',
+          { sessionId, errorCode: 'CODEX_PROFILE_CLEANUP_FAILED' },
+          'Failed to clean Codex profile lifecycle after session termination',
         );
+      });
+
+      // Best-effort: read transcript file size at stop time to avoid per-request stat on history queries.
+      // If transcript_path is NULL or stat fails (deleted file, race with auto-discovery), leave size_bytes NULL.
+      let sizeBytes: number | null = null;
+      if (session.transcriptPath) {
+        try {
+          const fileStat = await stat(session.transcriptPath);
+          sizeBytes = fileStat.size;
+        } catch (error) {
+          logger.warn(
+            { error, sessionId, transcriptPath: session.transcriptPath },
+            'Could not stat transcript file for size_bytes — leaving NULL (best-effort)',
+          );
+        }
       }
-    }
-    await this.codexPluginProfiles.cleanupSession(sessionId);
 
-    // Best-effort: read transcript file size at stop time to avoid per-request stat on history queries.
-    // If transcript_path is NULL or stat fails (deleted file, race with auto-discovery), leave size_bytes NULL.
-    let sizeBytes: number | null = null;
-    if (session.transcriptPath) {
-      try {
-        const fileStat = await stat(session.transcriptPath);
-        sizeBytes = fileStat.size;
-      } catch (error) {
-        logger.warn(
-          { error, sessionId, transcriptPath: session.transcriptPath },
-          'Could not stat transcript file for size_bytes — leaving NULL (best-effort)',
-        );
+      // Update session status; fold size_bytes into the same statement to keep stop atomic.
+      const now = new Date().toISOString();
+      this.sqlite
+        .prepare(
+          `
+        UPDATE sessions
+        SET status = ?, ended_at = ?, size_bytes = ?, updated_at = ?
+        WHERE id = ?
+      `,
+        )
+        .run('stopped', now, sizeBytes, now, sessionId);
+
+      logger.info({ sessionId }, 'Session terminated');
+
+      // EventsService.publish uses synchronous emission. Keeping publication in
+      // the locked branch cannot acquire the coordinator re-entrantly.
+      await this.eventsService.publish('session.stopped', { sessionId, ...termination });
+
+      if (session.agentId) {
+        try {
+          await this.eventsService.publish('session.presence.changed', {
+            agentId: session.agentId,
+            online: false,
+            sessionId: null,
+          });
+        } catch (error) {
+          logger.warn(
+            { error, agentId: session.agentId, sessionId },
+            'Failed to broadcast presence update',
+          );
+        }
       }
-    }
-
-    // Update session status; fold size_bytes into the same statement to keep stop atomic.
-    const now = new Date().toISOString();
-    this.sqlite
-      .prepare(
-        `
-      UPDATE sessions
-      SET status = ?, ended_at = ?, size_bytes = ?, updated_at = ?
-      WHERE id = ?
-    `,
-      )
-      .run('stopped', now, sizeBytes, now, sessionId);
-
-    logger.info({ sessionId }, 'Session terminated');
-
-    // Broadcast session.stopped event
-    await this.eventsService.publish('session.stopped', { sessionId });
-
-    // Broadcast presence update (agent offline)
-    if (session.agentId) {
-      try {
-        await this.eventsService.publish('session.presence.changed', {
-          agentId: session.agentId,
-          online: false,
-          sessionId: null,
-        });
-      } catch (error) {
-        logger.warn(
-          { error, agentId: session.agentId, sessionId },
-          'Failed to broadcast presence update',
-        );
-      }
-    }
+    });
   }
 
   async getAgentSessionHistory(
@@ -472,7 +492,6 @@ export class SessionsService {
 
   /**
    * List all active sessions
-   * Also performs cleanup of orphaned sessions (sessions in DB but tmux session gone)
    */
   async listActiveSessions(
     projectId?: string,
@@ -489,62 +508,22 @@ export class SessionsService {
       )
       .all() as SessionRow[];
 
-    // Check for orphaned sessions and clean them up
-    const now = new Date().toISOString();
-    for (const row of rows) {
-      if (row.tmux_session_id) {
-        const exists = await this.terminalIO.sessionExists({ name: row.tmux_session_id });
-        if (!exists) {
-          logger.warn(
-            { sessionId: row.id, tmuxSessionId: row.tmux_session_id },
-            'Detected orphaned session, marking as stopped',
-          );
-
-          // Mark as stopped in database
-          this.sqlite
-            .prepare(
-              `
-            UPDATE sessions
-            SET status = ?, ended_at = ?, updated_at = ?
-            WHERE id = ?
-          `,
-            )
-            .run('stopped', now, now, row.id);
-
-          // Drop any surviving in-memory terminal state; a stale registry
-          // entry would block restoring this session later.
-          this.ptyService.stopStreaming(row.id);
-          this.terminalSessionRegistry.dispose(row.id);
-          this.runtimeContextCapture.clear(row.id);
-          this.claudeLaunchSettings.cleanupSessionSync(row.id);
-          await this.codexPluginProfiles.cleanupSession(row.id);
-
-          // Update row status for return value
-          row.status = 'stopped';
-          row.ended_at = now;
-        }
-      }
-    }
-
-    // Filter out sessions that were just marked as stopped
-    let sessions = rows
-      .filter((row) => row.status === 'running')
-      .map((row) => ({
-        id: row.id,
-        epicId: row.epic_id,
-        agentId: row.agent_id,
-        tmuxSessionId: row.tmux_session_id,
-        status: row.status,
-        startedAt: row.started_at,
-        endedAt: row.ended_at,
-        lastActivityAt: row.last_activity_at ?? null,
-        activityState: row.activity_state ?? null,
-        busySince: row.busy_since ?? null,
-        transcriptPath: row.transcript_path ?? null,
-        name: row.name ?? null,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }));
+    let sessions = rows.map((row) => ({
+      id: row.id,
+      epicId: row.epic_id,
+      agentId: row.agent_id,
+      tmuxSessionId: row.tmux_session_id,
+      status: row.status,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      lastActivityAt: row.last_activity_at ?? null,
+      activityState: row.activity_state ?? null,
+      busySince: row.busy_since ?? null,
+      transcriptPath: row.transcript_path ?? null,
+      name: row.name ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
 
     if (projectId) {
       let agentSet = allowedAgentIds;
@@ -720,7 +699,7 @@ export class SessionsService {
           lastActivityAt: agg?.lastActivityAt ?? session.lastActivityAt ?? null,
           busySince: agg?.busySince ?? session.busySince ?? null,
           idleSince: agg?.idleSince ?? null,
-          currentActivityTitle: this.getCurrentActivityTitle(session.agentId, projectId),
+          currentActivityTitle: null,
         });
       }
     }
@@ -734,26 +713,6 @@ export class SessionsService {
     }
 
     return presenceMap;
-  }
-
-  private getCurrentActivityTitle(agentId: string, projectId?: string): string | null {
-    const row = projectId
-      ? (this.sqlite
-          .prepare(
-            `SELECT ca.title
-             FROM chat_activities ca
-             JOIN chat_threads ct ON ct.id = ca.thread_id
-             WHERE ca.agent_id = ? AND ca.status = 'running' AND ct.project_id = ?
-             ORDER BY ca.started_at DESC
-             LIMIT 1`,
-          )
-          .get(agentId, projectId) as { title: string } | undefined)
-      : (this.sqlite
-          .prepare(
-            `SELECT title FROM chat_activities WHERE agent_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1`,
-          )
-          .get(agentId) as { title: string } | undefined);
-    return row?.title ?? null;
   }
 
   /**

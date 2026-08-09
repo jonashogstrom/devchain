@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { agentCreatedEvent } from './agent.created';
 import { agentDeletedEvent } from './agent.deleted';
 import { agentMessageSentEvent } from './agent.message.sent';
-import { chatMessageReadEvent } from './chat.message.read';
 import { epicCreatedEvent } from './epic.created';
 import { epicDeletedEvent } from './epic.deleted';
 import { epicUpdatedEvent } from './epic.updated';
@@ -57,7 +56,6 @@ export const eventCatalog = {
   [agentCreatedEvent.name]: agentCreatedEvent.schema,
   [agentDeletedEvent.name]: agentDeletedEvent.schema,
   [agentMessageSentEvent.name]: agentMessageSentEvent.schema,
-  [chatMessageReadEvent.name]: chatMessageReadEvent.schema,
   [epicCreatedEvent.name]: epicCreatedEvent.schema,
   [epicDeletedEvent.name]: epicDeletedEvent.schema,
   [epicUpdatedEvent.name]: epicUpdatedEvent.schema,

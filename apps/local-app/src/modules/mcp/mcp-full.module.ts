@@ -4,7 +4,6 @@ import { McpServerService } from './services/mcp-server.service';
 import { McpGateway } from './gateways/mcp.gateway';
 import { StorageModule } from '../storage/storage.module';
 import { EventsCoreModule } from '../events/events-core.module';
-import { ChatModule } from '../chat/chat.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { TerminalModule } from '../terminal/terminal.module';
 import { EpicsModule } from '../epics/epics.module';
@@ -25,7 +24,6 @@ import { ProjectCommunicationModule } from '../project-communication/project-com
     StorageModule,
     EventsCoreModule,
     RealtimeBroadcastModule,
-    forwardRef(() => ChatModule),
     forwardRef(() => SessionsModule),
     TerminalModule,
     forwardRef(() => EpicsModule),

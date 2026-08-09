@@ -1,6 +1,6 @@
 {
   "name": "devchain-cli",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "AI driven development platform",
   "homepage": "https://devchain.cc/",
   "repository": {
@@ -8,6 +8,13 @@
     "url": "https://github.com/twitech-lab/devchain.git"
   },
   "changelog": {
+    "0.20.1": [
+      "[Impr] Subscribers: event filters can combine several conditions with AND/OR in one rule",
+      "[Impr] Teams: adding a member no longer wakes an offline team lead just to deliver the membership notice",
+      "[Impr] Template updates: Brainstormer ships as Project Owner so cross-project messaging works out of the box, refreshed planning and standards prompts",
+      "[Bug Fix] Sessions: agents no longer show up as lost or crashed while a session is still starting",
+      "[Bug Fix] Terminal: after an idle tab, terminals reconnect on their own instead of staying black"
+    ],
     "0.20.0": [
       "Projects: designate an agent as the Project Owner",
       "Cross-project messaging: Project Owners can discover other local projects and message each other",

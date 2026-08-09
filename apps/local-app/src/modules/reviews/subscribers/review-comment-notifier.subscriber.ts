@@ -193,7 +193,6 @@ export class ReviewCommentNotifierSubscriber {
         projectId: payload.projectId,
         senderName: authorName,
         senderType: payload.authorType,
-        messageId: payload.commentId,
         senderAgentId: payload.authorAgentId ?? undefined,
       },
       { submitKeys: ['Enter'] },

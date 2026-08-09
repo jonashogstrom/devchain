@@ -1,9 +1,17 @@
+/**
+ * Test layer: pure unit.
+ * Zod and TypeScript contract validation needs no dependency injection or I/O, so this is the
+ * cheapest reliable layer that proves the subscriber DTO shapes.
+ */
 import { ZodError } from 'zod';
+import type { EventFilterGroup as DomainEventFilterGroup } from '../../storage/models/domain.models';
+import type { EventFilterGroup as UiEventFilterGroup } from '../../../ui/lib/subscribers';
 import {
   ActionInputSchema,
   EventFilterSchema,
   CreateSubscriberSchema,
   UpdateSubscriberSchema,
+  type EventFilterGroup as DtoEventFilterGroup,
 } from './subscriber.dto';
 
 describe('Subscriber DTO schemas', () => {
@@ -64,6 +72,24 @@ describe('Subscriber DTO schemas', () => {
   });
 
   describe('EventFilterSchema', () => {
+    it('requires one or more conditions in every TypeScript group contract', () => {
+      type Condition = { field: string; operator: 'equals'; value: string };
+      type EmptyGroup = { combinator: 'and'; filters: [] };
+      type OneConditionGroup = { combinator: 'and'; filters: [Condition] };
+      type IsAssignable<Source, Target> = Source extends Target ? true : false;
+
+      const assertions: [
+        IsAssignable<EmptyGroup, DomainEventFilterGroup>,
+        IsAssignable<EmptyGroup, UiEventFilterGroup>,
+        IsAssignable<EmptyGroup, DtoEventFilterGroup>,
+        IsAssignable<OneConditionGroup, DomainEventFilterGroup>,
+        IsAssignable<OneConditionGroup, UiEventFilterGroup>,
+        IsAssignable<OneConditionGroup, DtoEventFilterGroup>,
+      ] = [false, false, false, true, true, true];
+
+      expect(assertions).toEqual([false, false, false, true, true, true]);
+    });
+
     it('validates valid filter', () => {
       expect(() =>
         EventFilterSchema.parse({
@@ -74,17 +100,68 @@ describe('Subscriber DTO schemas', () => {
       ).not.toThrow();
     });
 
-    it('validates all operator types', () => {
-      const operators = ['equals', 'contains', 'regex'] as const;
-      for (const operator of operators) {
-        expect(() =>
+    it.each([
+      { operator: 'equals', value: 'value' },
+      { operator: 'contains', value: 'value' },
+      { operator: 'regex', value: '^value$' },
+      { operator: 'is_null', value: '' },
+      { operator: 'is_not_null', value: '' },
+    ] as const)(
+      'validates and preserves the $operator operator/value pair',
+      ({ operator, value }) => {
+        expect(
           EventFilterSchema.parse({
             field: 'test',
             operator,
-            value: 'value',
+            value,
           }),
-        ).not.toThrow();
-      }
+        ).toEqual({ field: 'test', operator, value });
+      },
+    );
+
+    it('requires a string value for null-aware operators', () => {
+      expect(
+        EventFilterSchema.safeParse({
+          field: 'parentId',
+          operator: 'is_not_null',
+          value: null,
+        }).success,
+      ).toBe(false);
+    });
+
+    it.each(['and', 'or'] as const)('validates a non-empty %s filter group', (combinator) => {
+      expect(() =>
+        EventFilterSchema.parse({
+          combinator,
+          filters: [
+            { field: 'agentName', operator: 'equals', value: 'Coder' },
+            { field: 'message', operator: 'contains', value: '' },
+          ],
+        }),
+      ).not.toThrow();
+    });
+
+    it('rejects an empty filter group', () => {
+      expect(() =>
+        EventFilterSchema.parse({
+          combinator: 'and',
+          filters: [],
+        }),
+      ).toThrow(ZodError);
+    });
+
+    it('rejects nested filter groups', () => {
+      expect(() =>
+        EventFilterSchema.parse({
+          combinator: 'or',
+          filters: [
+            {
+              combinator: 'and',
+              filters: [{ field: 'agentName', operator: 'equals', value: 'Coder' }],
+            },
+          ],
+        }),
+      ).toThrow(ZodError);
     });
 
     it('accepts null value', () => {

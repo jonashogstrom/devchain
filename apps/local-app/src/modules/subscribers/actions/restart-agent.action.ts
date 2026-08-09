@@ -122,8 +122,9 @@ export const restartAgentAction: ActionDefinition = {
       }
 
       // 4. Perform restart
-      // Note: launchSession() has internal withAgentLock for serialization.
-      // No outer lock needed here - it would cause deadlock (nested non-reentrant locks).
+      // Terminate and launch each acquire the per-agent lock internally and in
+      // sequence. Never wrap restart in an outer/composite lock: the coordinator
+      // is non-reentrant.
       let previousSessionId: string | undefined;
 
       // Find active session for this agent
@@ -138,7 +139,10 @@ export const restartAgentAction: ActionDefinition = {
           { sessionId: existingSession.id, agentId: resolvedAgentId },
           'Terminating existing session before restart',
         );
-        await sessionsService.terminateSession(existingSession.id);
+        await sessionsService.terminateSession(existingSession.id, {
+          source: 'subscriber',
+          reason: 'restart',
+        });
       }
 
       // Launch new independent session (no epicId)

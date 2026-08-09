@@ -1,5 +1,5 @@
 import type { ExecutorResult, ProcessExecutor } from '../process-executor/process-executor.port';
-import type { SessionTarget, CreateSessionOptions } from './types';
+import type { SessionTarget, CreateSessionOptions, ExpectedSessionDestroyResult } from './types';
 
 const STRICT_HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
@@ -70,6 +70,56 @@ export async function destroySession(
   if (!result.success) {
     throw new Error(`Failed to destroy tmux session "${target.name}": ${result.stderr}`);
   }
+}
+
+export async function destroyExpectedSession(
+  executor: ProcessExecutor,
+  target: SessionTarget,
+): Promise<ExpectedSessionDestroyResult> {
+  let result: ExecutorResult;
+  try {
+    result = await executor.run({
+      argv: ['tmux', 'kill-session', '-t', `=${target.name}`],
+      mode: 'pipe',
+    });
+  } catch (error) {
+    return { outcome: 'unknown-error', error: normalizeDestroyError(target, error) };
+  }
+
+  if (result.success && !result.timedOut) {
+    return { outcome: 'destroyed' };
+  }
+
+  if (isAuthoritativeMissingTmuxResponse(result, target)) {
+    return { outcome: 'known-absent' };
+  }
+
+  const detail = result.timedOut
+    ? 'timed out'
+    : result.truncated
+      ? 'response was truncated'
+      : result.stderr.trim() || `exit code ${result.exitCode ?? 'unknown'}`;
+  return {
+    outcome: 'unknown-error',
+    error: new Error(`Failed to destroy tmux session "${target.name}": ${detail}`),
+  };
+}
+
+function isAuthoritativeMissingTmuxResponse(
+  result: ExecutorResult,
+  target: SessionTarget,
+): boolean {
+  if (result.timedOut || result.truncated || result.exitCode === null) return false;
+
+  const stderr = result.stderr.trim();
+  return (
+    stderr === `can't find session: ${target.name}` || /^no server running on \S+$/.test(stderr)
+  );
+}
+
+function normalizeDestroyError(target: SessionTarget, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`Failed to destroy tmux session "${target.name}": ${detail}`);
 }
 
 export async function listSessions(executor: ProcessExecutor): Promise<SessionTarget[]> {

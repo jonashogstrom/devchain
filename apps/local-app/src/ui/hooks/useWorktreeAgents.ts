@@ -5,6 +5,7 @@ import { listWorktrees, type WorktreeSummary } from '@/modules/orchestrator/ui/a
 import { fetchRuntimeInfo } from '@/ui/lib/runtime';
 import type { AgentPresenceMap } from '@/ui/lib/sessions';
 import type { AgentOrGuest } from '@/ui/hooks/useChatQueries';
+import { compareCanonicalAgents } from '@/ui/lib/agent-ordering';
 import { getWorktreeSocket, releaseWorktreeSocket, type WsEnvelope } from '@/ui/lib/socket';
 import {
   dispatchRealtimeEnvelope,
@@ -92,6 +93,7 @@ function parseAgentsPayload(payload: unknown): AgentOrGuest[] {
     agents.push({
       id,
       name,
+      isProjectOwner: item.isProjectOwner === true,
       profileId: typeof item.profileId === 'string' ? item.profileId : null,
       description: typeof item.description === 'string' ? item.description : null,
       type,
@@ -105,7 +107,7 @@ function parseAgentsPayload(payload: unknown): AgentOrGuest[] {
     });
   }
 
-  return agents;
+  return agents.sort(compareCanonicalAgents);
 }
 
 function parsePresencePayload(payload: unknown): AgentPresenceMap {

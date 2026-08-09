@@ -130,6 +130,7 @@ describe('POST /api/sessions/:id/restore', () => {
     createEmptySession: jest.fn().mockResolvedValue({ name: 'tmux-session' }),
     setAlternateScreen: jest.fn().mockResolvedValue(undefined),
     destroySession: jest.fn().mockResolvedValue(undefined),
+    destroyExpectedSession: jest.fn().mockResolvedValue({ outcome: 'destroyed' }),
     typeCommand: jest.fn().mockResolvedValue(undefined),
     waitForOutput: jest.fn().mockResolvedValue(true),
     sessionExists: jest.fn().mockResolvedValue(false),
@@ -427,7 +428,7 @@ describe('POST /api/sessions/:id/restore', () => {
     expect(row.status).toBe('stopped');
 
     // Tmux session must be destroyed
-    expect(mockTerminalIO.destroySession).toHaveBeenCalledTimes(1);
+    expect(mockTerminalIO.destroyExpectedSession).toHaveBeenCalledTimes(1);
   });
 
   it('event emission: session.restored published; session.started NOT published', async () => {

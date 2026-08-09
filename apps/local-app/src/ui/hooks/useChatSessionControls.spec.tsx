@@ -77,7 +77,7 @@ function buildOptions(
 ): UseChatSessionControlsOptions {
   return {
     projectId: 'proj-1',
-    selectedThreadId: 'thread-1',
+    selectedAgentId: 'agent-1',
     agentPresence: {
       'agent-1': { online: true, sessionId: 'sess-old' },
       'agent-2': { online: true, sessionId: 'sess-2-old' },
@@ -100,10 +100,9 @@ describe('useChatSessionControls', () => {
     jest.clearAllMocks();
   });
 
-  describe('handleRestartSession predicate gating', () => {
-    it('does NOT call onInlineTerminalAttach when canAttachInlineTerminal returns false', async () => {
+  describe('handleRestartSession selected-agent gating', () => {
+    it('does NOT attach a restarted session for an unselected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(false);
 
       mockRestart.mockResolvedValue({
         session: makeSession({ id: 'new-sess', agentId: 'agent-2' }),
@@ -111,8 +110,7 @@ describe('useChatSessionControls', () => {
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(
-        () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+        () => useChatSessionControls(buildOptions({ onInlineTerminalAttach })),
         { wrapper },
       );
 
@@ -120,13 +118,11 @@ describe('useChatSessionControls', () => {
         await result.current.handleRestartSession('agent-2');
       });
 
-      expect(canAttachInlineTerminal).toHaveBeenCalledWith('agent-2');
       expect(onInlineTerminalAttach).not.toHaveBeenCalled();
     });
 
-    it('calls onInlineTerminalAttach when canAttachInlineTerminal returns true', async () => {
+    it('attaches a restarted session for the selected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(true);
 
       mockRestart.mockResolvedValue({
         session: makeSession({ id: 'new-sess', agentId: 'agent-1' }),
@@ -134,8 +130,7 @@ describe('useChatSessionControls', () => {
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(
-        () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+        () => useChatSessionControls(buildOptions({ onInlineTerminalAttach })),
         { wrapper },
       );
 
@@ -143,22 +138,19 @@ describe('useChatSessionControls', () => {
         await result.current.handleRestartSession('agent-1');
       });
 
-      expect(canAttachInlineTerminal).toHaveBeenCalledWith('agent-1');
       expect(onInlineTerminalAttach).toHaveBeenCalledWith('agent-1', 'new-sess');
     });
   });
 
-  describe('handleLaunchSession predicate gating', () => {
-    it('does NOT call onInlineTerminalAttach when canAttachInlineTerminal returns false', async () => {
+  describe('handleLaunchSession selected-agent gating', () => {
+    it('does NOT attach a launched session for an unselected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(false);
 
       mockLaunch.mockResolvedValue(makeSession({ id: 'launched-sess', agentId: 'agent-2' }));
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(
-        () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+        () => useChatSessionControls(buildOptions({ onInlineTerminalAttach })),
         { wrapper },
       );
 
@@ -166,14 +158,12 @@ describe('useChatSessionControls', () => {
         await result.current.handleLaunchSession('agent-2', { attach: true });
       });
 
-      expect(canAttachInlineTerminal).toHaveBeenCalledWith('agent-2');
       expect(onInlineTerminalAttach).not.toHaveBeenCalled();
     });
 
-    it('calls onInlineTerminalAttach when canAttachInlineTerminal returns true', async () => {
+    it('attaches a launched session for the selected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
       const onTerminalMenuClose = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(true);
 
       mockLaunch.mockResolvedValue(makeSession({ id: 'launched-sess', agentId: 'agent-1' }));
 
@@ -182,7 +172,6 @@ describe('useChatSessionControls', () => {
         () =>
           useChatSessionControls(
             buildOptions({
-              canAttachInlineTerminal,
               onInlineTerminalAttach,
               onTerminalMenuClose,
             }),
@@ -194,17 +183,15 @@ describe('useChatSessionControls', () => {
         await result.current.handleLaunchSession('agent-1', { attach: true });
       });
 
-      expect(canAttachInlineTerminal).toHaveBeenCalledWith('agent-1');
       expect(onInlineTerminalAttach).toHaveBeenCalledWith('agent-1', 'launched-sess');
       expect(onTerminalMenuClose).toHaveBeenCalled();
     });
   });
 
   describe('MCP modal deferred launch race coverage', () => {
-    it('does NOT attach when thread changes between MCP modal open and configured', async () => {
+    it('does NOT attach when agent selection changes while the MCP modal is open', async () => {
       const onInlineTerminalAttach = jest.fn();
-      let predicateResult = true;
-      const canAttachInlineTerminal = jest.fn().mockImplementation(() => predicateResult);
+      let selectedAgentId = 'agent-2';
 
       mockLaunch
         .mockRejectedValueOnce(
@@ -224,9 +211,8 @@ describe('useChatSessionControls', () => {
         .mockResolvedValueOnce(makeSession({ id: 'deferred-sess', agentId: 'agent-2' }));
 
       const { wrapper } = createWrapper();
-      const { result } = renderHook(
-        () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+      const { result, rerender } = renderHook(
+        () => useChatSessionControls(buildOptions({ selectedAgentId, onInlineTerminalAttach })),
         { wrapper },
       );
 
@@ -237,7 +223,8 @@ describe('useChatSessionControls', () => {
       expect(result.current.mcpModalOpen).toBe(true);
       expect(onInlineTerminalAttach).not.toHaveBeenCalled();
 
-      predicateResult = false;
+      selectedAgentId = 'agent-1';
+      rerender();
 
       await act(async () => {
         await result.current.handleMcpConfigured();
@@ -246,9 +233,8 @@ describe('useChatSessionControls', () => {
       expect(onInlineTerminalAttach).not.toHaveBeenCalled();
     });
 
-    it('attaches when thread stays the same between MCP modal open and configured', async () => {
+    it('attaches when agent selection stays the same while the MCP modal is open', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(true);
 
       mockLaunch
         .mockRejectedValueOnce(
@@ -270,7 +256,9 @@ describe('useChatSessionControls', () => {
       const { wrapper } = createWrapper();
       const { result } = renderHook(
         () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+          useChatSessionControls(
+            buildOptions({ selectedAgentId: 'agent-2', onInlineTerminalAttach }),
+          ),
         { wrapper },
       );
 
@@ -320,16 +308,14 @@ describe('useChatSessionControls', () => {
       );
     });
 
-    it('calls onInlineTerminalAttach when canAttachInlineTerminal returns true', async () => {
+    it('attaches a restored session for the selected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(true);
       const restoredSess = makeSession({ id: sessionId, agentId });
       mockRestore.mockResolvedValue(restoredSess);
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(
-        () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+        () => useChatSessionControls(buildOptions({ onInlineTerminalAttach })),
         { wrapper },
       );
 
@@ -337,13 +323,11 @@ describe('useChatSessionControls', () => {
         await result.current.handleRestoreSession(sessionId, agentId);
       });
 
-      expect(canAttachInlineTerminal).toHaveBeenCalledWith(agentId);
       expect(onInlineTerminalAttach).toHaveBeenCalledWith(agentId, sessionId);
     });
 
     it('primes presence and active-session cache before attaching restored terminal', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(true);
       const restoredSess = makeSession({ id: sessionId, agentId, tmuxSessionId: 'tmux-restored' });
       mockRestore.mockResolvedValue(restoredSess);
 
@@ -367,7 +351,6 @@ describe('useChatSessionControls', () => {
           useChatSessionControls(
             buildOptions({
               agentPresence: { [agentId]: { online: false, sessionId: undefined } },
-              canAttachInlineTerminal,
               onInlineTerminalAttach,
             }),
           ),
@@ -388,15 +371,16 @@ describe('useChatSessionControls', () => {
       expect(onInlineTerminalAttach).toHaveBeenCalledWith(agentId, sessionId);
     });
 
-    it('does NOT call onInlineTerminalAttach when canAttachInlineTerminal returns false', async () => {
+    it('does NOT attach a restored session for an unselected agent', async () => {
       const onInlineTerminalAttach = jest.fn();
-      const canAttachInlineTerminal = jest.fn().mockReturnValue(false);
       mockRestore.mockResolvedValue(makeSession({ id: sessionId, agentId }));
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(
         () =>
-          useChatSessionControls(buildOptions({ canAttachInlineTerminal, onInlineTerminalAttach })),
+          useChatSessionControls(
+            buildOptions({ selectedAgentId: 'agent-2', onInlineTerminalAttach }),
+          ),
         { wrapper },
       );
 

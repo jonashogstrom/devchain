@@ -6,7 +6,9 @@ category: 'guides'
 tags: ['chat', 'messaging', 'agents', 'workflow']
 ---
 
-DevChain's Chat page is your primary interface for communicating with AI agents and coordinating development work.
+DevChain's `/chat` page is the terminal/session console for communicating with AI agents and coordinating development work. It provides agent lifecycle controls, inline or floating terminals, live terminal input, session transcripts, and session history.
+
+Agent-to-agent messages sent with `devchain_send_message` are routed to terminal sessions and reported through delivery status/diagnostics. `/chat` does not provide durable conversation or thread history. Mobile session Chat, its transcript/history views, and the notification Inbox remain separate retained surfaces.
 
 ## Understanding the Development Workflow
 

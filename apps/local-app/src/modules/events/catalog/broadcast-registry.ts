@@ -45,29 +45,6 @@ export const broadcastRegistry: Record<string, BroadcastRegistryTopicEntry<P>[]>
     },
   ],
 
-  // ── Chat ──
-  'chat.message.created': [
-    {
-      topic: (p) => `chat/${p.threadId}`,
-      type: 'message.created',
-      payloadProjection: (p) => p.message,
-      clientReaction: { kind: 'custom-handler', owner: 'useChatSocket' },
-      // The thread/group message body is real content — withheld on a plaintext push.
-      contentBearing: true,
-    },
-  ],
-  'chat.message.read': [
-    {
-      topic: (p) => `chat/${p.threadId}`,
-      type: 'message.read',
-      payloadProjection: (p) => ({
-        messageId: p.messageId,
-        agentId: p.agentId,
-        readAt: p.readAt,
-      }),
-      clientReaction: { kind: 'no-op', owner: 'global' },
-    },
-  ],
   'agent.message.sent': [
     {
       topic: (p) => `project/${p.projectId}/agent-messages`,

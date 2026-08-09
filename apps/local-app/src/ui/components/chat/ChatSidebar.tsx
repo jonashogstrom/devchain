@@ -42,7 +42,6 @@ import {
 } from './AgentOverridesDialog';
 import { cn } from '@/ui/lib/utils';
 import {
-  Plus,
   Circle,
   ChevronDown,
   ChevronRight,
@@ -50,7 +49,6 @@ import {
   UsersRound,
   Users,
   User,
-  MessageSquare,
   Loader2,
   RotateCcw,
   Play,
@@ -68,8 +66,8 @@ import {
   type AgentSessionEntry,
 } from '@/ui/hooks/useAgentSessionMetrics';
 import { AgentContextBar } from './AgentContextBar';
-import type { Thread } from '@/ui/lib/chat';
 import type { AgentOrGuest } from '@/ui/hooks/useChatQueries';
+import { compareCanonicalAgents } from '@/ui/lib/agent-ordering';
 import type { WorktreeAgentGroup } from '@/ui/hooks/useWorktreeAgents';
 import type { PresetAvailability } from '@/ui/lib/preset-validation';
 import { getProviderIconDataUri } from '@/ui/lib/providers';
@@ -82,12 +80,6 @@ import {
   useAgentEventBusAnchor,
   type AgentEventBusAnchorDescriptor,
 } from './agent-event-bus';
-
-// ============================================
-// Feature Flags
-// ============================================
-
-const CHAT_THREADS_ENABLED = false;
 
 function formatSectionCount(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -112,16 +104,12 @@ export interface ChatSidebarData {
   worktreeAgentGroups: WorktreeAgentGroup[];
   worktreeAgentGroupsLoading: boolean;
   agentPresence: AgentPresenceMap;
-  userThreads: Thread[];
-  agentThreads: Thread[];
   presenceReady: boolean;
   offlineAgents: AgentOrGuest[];
   agentsWithSessions: AgentOrGuest[];
   agentsLoading: boolean;
   agentsError: boolean;
-  userThreadsLoading: boolean;
-  agentThreadsLoading: boolean;
-  selectedThreadId: string | null;
+  selectedAgentId: string | null;
   selectedWorktreeAgent: { worktreeName: string; agentId: string } | null;
   hasSelectedProject: boolean;
   getProviderForAgent: (agentId: string | null | undefined) => string | null;
@@ -141,9 +129,7 @@ export interface ChatSidebarSessionController {
   restartingAgentId: string | null;
   startingAll: boolean;
   terminatingAll: boolean;
-  isLaunchingChat: boolean;
-  onSelectThread: (threadId: string) => void;
-  onLaunchChat: (agentIds: string[]) => void;
+  onSelectAgent: (agentId: string) => void;
   onLaunchWorktreeAgentChat: (group: WorktreeAgentGroup, agentId: string) => void;
   onLaunchWorktreeSession: (group: WorktreeAgentGroup, agentId: string) => Promise<void>;
   onRestartWorktreeSession: (group: WorktreeAgentGroup, agentId: string) => Promise<void>;
@@ -152,7 +138,6 @@ export interface ChatSidebarSessionController {
     agentId: string,
     sessionId: string,
   ) => Promise<void>;
-  onCreateGroup: () => void;
   onStartAllAgents: () => void;
   onTerminateAllConfirm: () => void;
   onLaunchSession: (agentId: string, options?: { attach?: boolean }) => Promise<unknown>;
@@ -183,7 +168,6 @@ export interface ChatSidebarSessionController {
     effortOverride?: string | null,
   ) => Promise<unknown> | void;
   updatingWorktreeConfigKey: string | null;
-  createGroupPending: boolean;
 }
 
 /** Agent admin actions (clone / delete / quick-add / edit-team) and their pending state. */
@@ -274,16 +258,12 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
     worktreeAgentGroups,
     worktreeAgentGroupsLoading,
     agentPresence,
-    userThreads,
-    agentThreads,
     presenceReady,
     offlineAgents,
     agentsWithSessions,
     agentsLoading,
     agentsError,
-    userThreadsLoading,
-    agentThreadsLoading,
-    selectedThreadId,
+    selectedAgentId,
     selectedWorktreeAgent,
     hasSelectedProject,
     getProviderForAgent,
@@ -296,14 +276,11 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
     restartingAgentId,
     startingAll,
     terminatingAll,
-    isLaunchingChat,
-    onSelectThread,
-    onLaunchChat,
+    onSelectAgent,
     onLaunchWorktreeAgentChat,
     onLaunchWorktreeSession,
     onRestartWorktreeSession,
     onTerminateWorktreeSession,
-    onCreateGroup,
     onStartAllAgents,
     onTerminateAllConfirm,
     onLaunchSession,
@@ -319,7 +296,6 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
     updatingConfigAgentIds,
     onSwitchWorktreeConfig,
     updatingWorktreeConfigKey,
-    createGroupPending,
   } = sessionController;
   const { onCloneAgent, onDeleteAgent, pendingDeleteAgentId, onAddTeamAgent, onEditTeam } =
     adminActions;
@@ -340,13 +316,6 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
     setOverridesTarget(null);
   }, []);
 
-  const groups = userThreads
-    .filter((t) => t.isGroup)
-    .map((g) => ({
-      ...g,
-      memberCount: g.members?.length ?? 0,
-      name: g.title ?? 'Untitled Group',
-    }));
   const [mainExpanded, setMainExpanded] = useState(() => {
     if (typeof window === 'undefined') return true;
     const stored = window.localStorage.getItem('devchain:chatSidebar:mainExpanded');
@@ -620,17 +589,13 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
     return map;
   }, [teamDetailQueries, teams]);
 
-  const directThreadsByAgentId = useMemo(() => {
-    const map = new Map<string, Thread>();
-    for (const thread of userThreads) {
-      if (!thread.isGroup && thread.members?.length === 1) {
-        map.set(thread.members[0], thread);
-      }
-    }
-    return map;
-  }, [userThreads]);
+  const canonicalAgents = useMemo(() => [...agents].sort(compareCanonicalAgents), [agents]);
+  const canonicalGuests = useMemo(() => [...guests].sort(compareCanonicalAgents), [guests]);
 
-  const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+  const agentsById = useMemo(
+    () => new Map(canonicalAgents.map((agent) => [agent.id, agent])),
+    [canonicalAgents],
+  );
 
   const teamSections = useMemo(() => {
     const teamMembership = new Set<string>();
@@ -642,7 +607,8 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
         }
         const sectionAgents = detail.members
           .map((member) => agentsById.get(member.agentId))
-          .filter((agent): agent is AgentOrGuest => Boolean(agent));
+          .filter((agent): agent is AgentOrGuest => Boolean(agent))
+          .sort(compareCanonicalAgents);
         if (sectionAgents.length === 0) {
           return null;
         }
@@ -663,9 +629,11 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
 
     return {
       items,
-      noTeamAgents: agents.filter((agent) => !teamMembership.has(agent.id)),
+      noTeamAgents: canonicalAgents
+        .filter((agent) => !teamMembership.has(agent.id))
+        .sort(compareCanonicalAgents),
     };
-  }, [agents, agentsById, teamDetailsById, teams]);
+  }, [agentsById, canonicalAgents, teamDetailsById, teams]);
 
   useEffect(() => {
     const root = sidebarRef.current;
@@ -823,8 +791,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
   ) {
     const isOnline = agentPresence[agent.id]?.online ?? false;
     const activityState = agentPresence[agent.id]?.activityState ?? null;
-    const existingThread = directThreadsByAgentId.get(agent.id);
-    const isSelected = existingThread ? selectedThreadId === existingThread.id : false;
+    const isSelected = selectedWorktreeAgent === null && selectedAgentId === agent.id;
     const agentProviderName = getProviderForAgent(agent.id);
     const agentProviderIcon = agentProviderName ? getProviderIconDataUri(agentProviderName) : null;
     const hasSession = Boolean(isOnline && agentPresence[agent.id]?.sessionId);
@@ -856,7 +823,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
         sessionId={sessionId}
         isLaunching={isLaunching}
         isRestarting={isRestarting}
-        isLaunchingChat={isLaunchingChat}
+        isLaunchingChat={false}
         activityBadge={renderActivityBadge(agent.id)}
         isTeamLead={options?.isTeamLead ?? false}
         canOverride={agent.type !== 'guest' && Boolean(agent.profileId)}
@@ -895,7 +862,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
         canDelete={options?.canDelete ?? false}
         onDelete={onDeleteAgent ? () => onDeleteAgent(agent) : undefined}
         pendingDelete={pendingDeleteAgentId === agent.id}
-        onClick={() => onLaunchChat([agent.id])}
+        onClick={() => onSelectAgent(agent.id)}
         onRestart={() => onRestartSession(agent.id)}
         onLaunch={() => onLaunchSession(agent.id, { attach: false })}
         onTerminate={() => {
@@ -1046,7 +1013,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
                   id="chat-main-agents"
                   className="space-y-1"
                   role={agentGroupMode === 'all' ? 'list' : undefined}
-                  aria-label={agentGroupMode === 'all' ? 'Direct messages' : undefined}
+                  aria-label={agentGroupMode === 'all' ? 'Agents' : undefined}
                 >
                   {agentGroupMode === 'teams' ? (
                     <>
@@ -1264,7 +1231,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
                       ) : agents.length === 0 ? (
                         <p className="text-xs text-muted-foreground">No agents yet.</p>
                       ) : (
-                        agents.map((agent) => renderMainAgentRow(agent))
+                        canonicalAgents.map((agent) => renderMainAgentRow(agent))
                       )}
                     </>
                   )}
@@ -1375,7 +1342,7 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
                               const isRestarting = worktreeBusyAction === 'restarting';
                               const isTerminating = worktreeBusyAction === 'terminating';
                               const anyWorktreeBusy = Boolean(worktreeBusyAction);
-                              const isDisabled = isLaunchingChat || anyWorktreeBusy;
+                              const isDisabled = anyWorktreeBusy;
                               const isSelected =
                                 selectedWorktreeAgent?.worktreeName === group.name &&
                                 selectedWorktreeAgent?.agentId === agent.id;
@@ -1587,17 +1554,17 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
           )}
 
           {/* Guests Section */}
-          {guests.length > 0 && (
+          {canonicalGuests.length > 0 && (
             <>
               <Separator />
               <div className="px-4 py-4">
                 {renderVisualSectionHeader(
                   'GUESTS',
-                  formatSectionCount(guests.length, 'guest'),
+                  formatSectionCount(canonicalGuests.length, 'guest'),
                   <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />,
                 )}
                 <div className="space-y-1" role="list" aria-label="Guest agents">
-                  {guests.map((guest) => {
+                  {canonicalGuests.map((guest) => {
                     const isOnline = true;
 
                     return (
@@ -1636,114 +1603,6 @@ function ChatSidebarInner({ data, sessionController, adminActions }: ChatSidebar
                       </button>
                     );
                   })}
-                </div>
-              </div>
-            </>
-          )}
-
-          <Separator />
-
-          {CHAT_THREADS_ENABLED && (
-            <>
-              {/* Groups Section */}
-              <div className="px-4 py-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-muted-foreground">GROUPS</h3>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={onCreateGroup}
-                    className="h-6 w-6 p-0"
-                    aria-label="Create new group"
-                    disabled={agents.length < 2 || createGroupPending}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-                <div className="space-y-1" role="list" aria-label="Group chats">
-                  {userThreadsLoading ? (
-                    <div className="space-y-2" aria-hidden>
-                      {Array.from({ length: 2 }).map((_, index) => (
-                        <Skeleton key={index} className="h-8 w-full" />
-                      ))}
-                    </div>
-                  ) : groups.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No group threads yet.</p>
-                  ) : (
-                    groups.map((group) => (
-                      <button
-                        key={group.id}
-                        onClick={() => onSelectThread(group.id)}
-                        className={cn(
-                          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted',
-                          selectedThreadId === group.id && 'bg-secondary',
-                        )}
-                        role="listitem"
-                        aria-label={`${group.name} group with ${group.memberCount} members`}
-                        aria-current={selectedThreadId === group.id ? 'true' : undefined}
-                      >
-                        <Users className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                        <span className="flex-1 truncate text-left">{group.name}</span>
-                        <Badge
-                          variant="secondary"
-                          className="text-xs"
-                          aria-label={`${group.memberCount} members`}
-                        >
-                          {group.memberCount}
-                        </Badge>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <Separator />
-
-              {/* Agent Threads Section */}
-              <div className="px-4 py-4">
-                <div className="mb-2">
-                  <h3 className="text-sm font-semibold text-muted-foreground">AGENT THREADS</h3>
-                  <p className="text-xs text-muted-foreground">Read-only agent conversations</p>
-                </div>
-                <div className="space-y-1" role="list" aria-label="Agent-initiated threads">
-                  {agentThreadsLoading ? (
-                    <div className="space-y-2" aria-hidden>
-                      {Array.from({ length: 2 }).map((_, index) => (
-                        <Skeleton key={index} className="h-6 w-full" />
-                      ))}
-                    </div>
-                  ) : agentThreads.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No agent-initiated threads.</p>
-                  ) : (
-                    agentThreads.map((thread) => (
-                      <button
-                        key={thread.id}
-                        onClick={() => onSelectThread(thread.id)}
-                        className={cn(
-                          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted',
-                          selectedThreadId === thread.id && 'bg-secondary',
-                        )}
-                        role="listitem"
-                        aria-label={`${thread.title || 'Agent Thread'} with ${thread.members?.length ?? 0} agents`}
-                        aria-current={selectedThreadId === thread.id ? 'true' : undefined}
-                      >
-                        <MessageSquare
-                          className="h-4 w-4 text-muted-foreground"
-                          aria-hidden="true"
-                        />
-                        <span className="flex-1 truncate text-left text-xs">
-                          {thread.title || 'Agent Thread'}
-                        </span>
-                        <Badge
-                          variant="outline"
-                          className="text-xs"
-                          aria-label={`${thread.members?.length ?? 0} agents`}
-                        >
-                          {thread.members?.length ?? 0}
-                        </Badge>
-                      </button>
-                    ))
-                  )}
                 </div>
               </div>
             </>

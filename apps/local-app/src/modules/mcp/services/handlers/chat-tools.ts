@@ -1,17 +1,10 @@
-import { NotFoundException } from '@nestjs/common';
 import { createLogger } from '../../../../common/logging/logger';
-import { NotFoundError } from '../../../../common/errors/error-types';
 import { ServiceUnavailableError } from '../../../../common/errors/service-unavailable.error';
 import {
   McpResponse,
   SendMessageResponse,
-  ChatAckResponse,
-  ChatListMembersResponse,
   SessionContext,
   type SendMessageParams,
-  type ChatAckParams,
-  type ChatListMembersParams,
-  type ChatReadHistoryParams,
 } from '../../dtos/mcp.dto';
 import type { ChatToolContext } from './chat-context';
 import { resolveSessionContext, getActorFromContext } from '../utils/session-context-helpers';
@@ -98,40 +91,13 @@ export async function handleSendMessage(
       };
     }
 
-    if (sessionCtx.type === 'guest') {
-      if (validated.threadId) {
-        return {
-          success: false,
-          error: {
-            code: 'GUEST_THREAD_NOT_ALLOWED',
-            message:
-              'Guests cannot use threaded messaging. Use recipientAgentNames for direct messaging.',
-          },
-        };
-      }
-      if (validated.recipient === 'user' && !validated.teamName) {
-        return {
-          success: false,
-          error: {
-            code: 'GUEST_USER_DM_NOT_ALLOWED',
-            message: 'Guests cannot send direct messages to users.',
-          },
-        };
-      }
-    }
-
     const senderId = sender.id;
     const senderName = sender.name;
     const senderType = sessionCtx.type;
 
     let effectiveTeamName = validated.teamName;
 
-    if (
-      !validated.teamName &&
-      !validated.recipientAgentNames &&
-      !validated.threadId &&
-      validated.recipient !== 'user'
-    ) {
+    if (!validated.teamName && !validated.recipientAgentNames) {
       const senderAgentId = sessionCtx.type === 'agent' ? sessionCtx.agent?.id : undefined;
       if (!senderAgentId) {
         return {
@@ -149,7 +115,7 @@ export async function handleSendMessage(
           error: {
             code: 'NO_SELF_TEAM',
             message:
-              'Sender is not in any team; provide teamName, recipientAgentNames, or threadId explicitly.',
+              'Sender is not in any team; provide teamName or recipientAgentNames explicitly.',
           },
         };
       }
@@ -164,8 +130,6 @@ export async function handleSendMessage(
       }
       effectiveTeamName = teams[0].name;
     }
-
-    const recipientType = effectiveTeamName ? 'agents' : (validated.recipient ?? 'agents');
 
     const recipientCandidates: ResolvedRecipient[] = [];
     let teamDelivery:
@@ -284,212 +248,125 @@ export async function handleSendMessage(
       };
     }
 
-    if (!validated.threadId && senderId && recipientType !== 'user') {
-      if (resolvedRecipients.length === 0) {
-        return {
-          success: false,
-          error: {
-            code: 'RECIPIENTS_REQUIRED',
-            message: 'Recipients must be provided when sending without threadId.',
-          },
-        };
+    if (resolvedRecipients.length === 0) {
+      return {
+        success: false,
+        error: {
+          code: 'RECIPIENTS_REQUIRED',
+          message: 'Recipients must be provided for terminal delivery.',
+        },
+      };
+    }
+
+    const queued: Array<{
+      name: string;
+      type: 'agent' | 'guest';
+      status: 'queued' | 'launched' | 'delivered' | 'unconfirmed' | 'failed';
+      error?: string;
+    }> = [];
+
+    const agentDescriptors: AgentDescriptor[] = resolvedRecipients
+      .filter((recipient) => recipient.type === 'agent')
+      .map((recipient) => ({
+        agentId: recipient.id,
+        agentName: recipient.name,
+      }));
+    const guestRecipients = resolvedRecipients.filter((recipient) => recipient.type === 'guest');
+
+    if (agentDescriptors.length > 0) {
+      const message = {
+        kind: 'mcp.direct' as const,
+        body: validated.message,
+        source: 'mcp.send_message',
+        projectId: project.id,
+        senderName,
+        senderType: senderType as 'agent' | 'guest',
+        senderAgentId: senderId,
+      };
+      const policy = { submitKeys: ['Enter'] as const };
+
+      const outcome =
+        senderType === 'agent'
+          ? await ctx.agentMessageDelivery.deliverAgentMessage(
+              agentDescriptors,
+              resolveAgentMessageRouting(resolvedRecipients.length, teamRouting),
+              message,
+              policy,
+            )
+          : await ctx.agentMessageDelivery.deliver(
+              agentDescriptors.map((descriptor) => descriptor.agentId),
+              message,
+              policy,
+            );
+
+      for (const result of outcome.results) {
+        const recipient = agentDescriptors.find(
+          (descriptor) => descriptor.agentId === result.agentId,
+        );
+        queued.push({
+          name: recipient?.agentName ?? result.agentId,
+          type: 'agent',
+          status: result.status === 'failed' ? 'failed' : 'queued',
+          error: result.error,
+        });
+      }
+    }
+
+    for (const recipient of guestRecipients) {
+      if (!recipient.tmuxSessionId) {
+        queued.push({
+          name: recipient.name,
+          type: 'guest',
+          status: 'failed',
+          error: 'No session',
+        });
+        continue;
       }
 
-      const queued: Array<{
-        name: string;
-        type: 'agent' | 'guest';
-        status: 'queued' | 'launched' | 'delivered' | 'unconfirmed' | 'failed';
-        error?: string;
-      }> = [];
-
-      const agentDescriptors: AgentDescriptor[] = resolvedRecipients
-        .filter((recipient) => recipient.type === 'agent')
-        .map((recipient) => ({
-          agentId: recipient.id,
-          agentName: recipient.name,
-        }));
-      const guestRecipients = resolvedRecipients.filter((recipient) => recipient.type === 'guest');
-
-      if (agentDescriptors.length > 0) {
-        const message = {
-          kind: 'mcp.direct' as const,
+      try {
+        const guestText = ctx.agentMessageDelivery.formatMessage({
+          kind: 'mcp.direct',
           body: validated.message,
           source: 'mcp.send_message',
           projectId: project.id,
           senderName,
           senderType: senderType as 'agent' | 'guest',
-          senderAgentId: senderId,
-        };
-        const policy = { submitKeys: ['Enter'] as const };
-
-        const outcome =
-          senderType === 'agent'
-            ? await ctx.agentMessageDelivery.deliverAgentMessage(
-                agentDescriptors,
-                resolveAgentMessageRouting(resolvedRecipients.length, teamRouting),
-                message,
-                policy,
-              )
-            : await ctx.agentMessageDelivery.deliver(
-                agentDescriptors.map((descriptor) => descriptor.agentId),
-                message,
-                policy,
-              );
-
-        for (const result of outcome.results) {
-          const recipient = agentDescriptors.find(
-            (descriptor) => descriptor.agentId === result.agentId,
-          );
-          queued.push({
-            name: recipient?.agentName ?? result.agentId,
-            type: 'agent',
-            status: result.status === 'failed' ? 'failed' : 'queued',
-            error: result.error,
-          });
-        }
-      }
-
-      for (const recipient of guestRecipients) {
-        if (!recipient.tmuxSessionId) {
+        });
+        const result = await ctx.agentMessageDelivery.deliverToGuest(
+          recipient.tmuxSessionId,
+          guestText,
+          ['Enter'],
+        );
+        queued.push({
+          name: recipient.name,
+          type: 'guest',
+          status: result.delivered ? 'delivered' : 'failed',
+          error: result.error,
+        });
+      } catch (error) {
+        if (error instanceof ServiceUnavailableError) {
           queued.push({
             name: recipient.name,
             type: 'guest',
             status: 'failed',
-            error: 'No session',
+            error: 'Delivery service unavailable',
           });
           continue;
         }
-
-        try {
-          const guestText = ctx.agentMessageDelivery.formatMessage({
-            kind: 'mcp.direct',
-            body: validated.message,
-            source: 'mcp.send_message',
-            projectId: project.id,
-            senderName,
-            senderType: senderType as 'agent' | 'guest',
-          });
-          const result = await ctx.agentMessageDelivery.deliverToGuest(
-            recipient.tmuxSessionId,
-            guestText,
-            ['Enter'],
-          );
-          queued.push({
-            name: recipient.name,
-            type: 'guest',
-            status: result.delivered ? 'delivered' : 'failed',
-            error: result.error,
-          });
-        } catch (error) {
-          if (error instanceof ServiceUnavailableError) {
-            queued.push({
-              name: recipient.name,
-              type: 'guest',
-              status: 'failed',
-              error: 'Delivery service unavailable',
-            });
-            continue;
-          }
-          throw error;
-        }
-      }
-
-      const estimatedDeliveryMs = ctx.settingsService.getMessagePoolConfigForProject(
-        project.id,
-      ).delayMs;
-
-      const response: SendMessageResponse = {
-        mode: 'pooled',
-        queuedCount: queued.length,
-        queued,
-        estimatedDeliveryMs,
-        ...(teamDelivery ? { teamDelivery } : {}),
-      };
-
-      return { success: true, data: response };
-    }
-
-    let threadId = validated.threadId;
-    if (!threadId && senderId) {
-      if (recipientType === 'user') {
-        const direct = await ctx.chatService.createDirectThread({
-          projectId: project.id,
-          agentId: senderId,
-        });
-        threadId = direct.id;
+        throw error;
       }
     }
 
-    if (!threadId) {
-      return {
-        success: false,
-        error: {
-          code: 'THREAD_REQUIRED',
-          message: 'Unable to determine thread for message delivery',
-        },
-      };
-    }
-
-    const thread = await ctx.chatService.getThread(threadId);
-
-    const message = await ctx.chatService.createMessage(threadId, {
-      authorType: 'agent',
-      authorAgentId: senderId,
-      content: validated.message,
-    });
-
-    let targetAgentIds = resolvedRecipients
-      .filter((recipient) => recipient.type === 'agent')
-      .map((recipient) => recipient.id);
-
-    if (senderId && thread.members && thread.members.length > 1 && targetAgentIds.length === 0) {
-      targetAgentIds = thread.members.filter((id) => id !== senderId);
-    }
-
-    const delivered: Array<{
-      agentName: string;
-      agentId: string;
-      sessionId: string;
-      status: 'delivered' | 'queued' | 'unconfirmed';
-    }> = [];
-
-    if (targetAgentIds.length > 0) {
-      const outcome = await ctx.agentMessageDelivery.deliver(
-        targetAgentIds,
-        {
-          kind: 'mcp.thread',
-          body: validated.message,
-          source: 'mcp.chat_thread',
-          projectId: project.id,
-          senderName,
-          senderType: 'agent',
-          threadId,
-          messageId: message.id,
-          senderAgentId: senderId,
-        },
-        { submitKeys: ['Enter'], immediate: true },
-      );
-
-      for (const result of outcome.results) {
-        const agent = await ctx.storage.getAgent(result.agentId);
-        delivered.push({
-          agentId: result.agentId,
-          agentName: agent.name,
-          sessionId: '',
-          status:
-            result.status === 'failed'
-              ? 'queued'
-              : (result.status as 'delivered' | 'queued' | 'unconfirmed'),
-        });
-      }
-    }
+    const estimatedDeliveryMs = ctx.settingsService.getMessagePoolConfigForProject(
+      project.id,
+    ).delayMs;
 
     const response: SendMessageResponse = {
-      mode: 'thread',
-      threadId,
-      messageId: message.id,
-      deliveryCount: delivered.filter((d) => d.status === 'delivered').length,
-      delivered,
+      mode: 'pooled',
+      queuedCount: queued.length,
+      queued,
+      estimatedDeliveryMs,
+      ...(teamDelivery ? { teamDelivery } : {}),
     };
 
     return { success: true, data: response };
@@ -506,266 +383,6 @@ export async function handleSendMessage(
       error: {
         code: 'SEND_MESSAGE_FAILED',
         message: error instanceof Error ? error.message : 'Failed to send message',
-      },
-    };
-  }
-}
-
-export async function handleChatAck(ctx: ChatToolContext, params: unknown): Promise<McpResponse> {
-  const validated = params as ChatAckParams;
-  const { thread_id: threadId, message_id: messageId } = validated;
-
-  try {
-    const sessionCtxResult = await resolveSessionContext(ctx, validated.sessionId);
-    if (!sessionCtxResult.success) return sessionCtxResult;
-    const sessionCtx = sessionCtxResult.data as SessionContext;
-    const agent = getActorFromContext(sessionCtx);
-
-    if (!agent) {
-      return {
-        success: false,
-        error: {
-          code: 'AGENT_NOT_FOUND',
-          message: 'No agent associated with this session',
-        },
-      };
-    }
-
-    const agentId = agent.id;
-
-    const thread = await ctx.chatService.getThread(threadId);
-    const memberIds = thread.members ?? [];
-    if (!memberIds.includes(agentId)) {
-      return {
-        success: false,
-        error: {
-          code: 'AGENT_NOT_IN_THREAD',
-          message: `Agent ${agent.name} is not a member of thread ${threadId}`,
-        },
-      };
-    }
-
-    await ctx.chatService.markMessageAsRead(messageId, agentId);
-
-    const activeSessions = await ctx.sessionsService.listActiveSessions();
-    const agentSession = activeSessions.find((s) => s.agentId === agentId);
-    if (agentSession && agentSession.tmuxSessionId) {
-      await ctx.chatService.acknowledgeInvite(
-        threadId,
-        messageId,
-        agentId,
-        agentSession.tmuxSessionId,
-      );
-    }
-
-    const response: ChatAckResponse = {
-      threadId,
-      messageId,
-      agentId,
-      agentName: agent.name,
-      acknowledged: true,
-    };
-
-    return { success: true, data: response };
-  } catch (error) {
-    if (error instanceof ServiceUnavailableError) {
-      return { success: false, error: { code: 'SERVICE_UNAVAILABLE', message: error.message } };
-    }
-    logger.error({ error, params: redactParams(validated) }, 'chatAck failed');
-    return {
-      success: false,
-      error: {
-        code: 'CHAT_ACK_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to acknowledge message',
-      },
-    };
-  }
-}
-
-export async function handleChatListMembers(
-  ctx: ChatToolContext,
-  params: unknown,
-): Promise<McpResponse> {
-  const validated = params as ChatListMembersParams;
-
-  try {
-    const thread = await ctx.chatService.getThread(validated.thread_id);
-    const memberIds = thread.members ?? [];
-
-    if (memberIds.length === 0) {
-      const emptyResponse: ChatListMembersResponse = {
-        thread: {
-          id: thread.id,
-          title: thread.title,
-        },
-        members: [],
-        total: 0,
-      };
-
-      return { success: true, data: emptyResponse };
-    }
-
-    const agents = await Promise.all(
-      memberIds.map(async (agentId) => {
-        try {
-          return await ctx.storage.getAgent(agentId);
-        } catch (error) {
-          logger.error(
-            { error, agentId, threadId: thread.id },
-            'Failed to resolve agent for chat members',
-          );
-          throw error;
-        }
-      }),
-    );
-
-    const activeSessions = await ctx.sessionsService.listActiveSessions();
-    const onlineAgents = new Set(activeSessions.map((session) => session.agentId));
-
-    const members: ChatListMembersResponse['members'] = agents.map((agent) => ({
-      agent_id: agent.id,
-      agent_name: agent.name,
-      online: onlineAgents.has(agent.id),
-    }));
-
-    const response: ChatListMembersResponse = {
-      thread: {
-        id: thread.id,
-        title: thread.title,
-      },
-      members,
-      total: members.length,
-    };
-
-    return { success: true, data: response };
-  } catch (error) {
-    if (error instanceof ServiceUnavailableError) {
-      return { success: false, error: { code: 'SERVICE_UNAVAILABLE', message: error.message } };
-    }
-    if (error instanceof NotFoundException || error instanceof NotFoundError) {
-      return {
-        success: false,
-        error: {
-          code: 'NOT_FOUND',
-          message: `Thread ${validated.thread_id} was not found.`,
-        },
-      };
-    }
-
-    logger.error({ error, params }, 'chatListMembers failed');
-    return {
-      success: false,
-      error: {
-        code: 'CHAT_LIST_MEMBERS_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to list chat members',
-      },
-    };
-  }
-}
-
-export async function handleChatReadHistory(
-  ctx: ChatToolContext,
-  params: unknown,
-): Promise<McpResponse> {
-  const validated = params as ChatReadHistoryParams;
-
-  try {
-    const thread = await ctx.chatService.getThread(validated.thread_id);
-
-    const limit = validated.limit ?? 50;
-    const validatedWithExcludeSystem = validated as typeof validated & {
-      exclude_system?: boolean;
-    };
-    const excludeSystem =
-      typeof validatedWithExcludeSystem.exclude_system === 'boolean'
-        ? validatedWithExcludeSystem.exclude_system
-        : true;
-
-    const messagesList = await ctx.chatService.listMessages(validated.thread_id, {
-      since: validated.since,
-      limit,
-      offset: 0,
-    });
-
-    const authorIds = new Set<string>();
-    const targetIds = new Set<string>();
-    for (const message of messagesList.items) {
-      if (message.authorAgentId) authorIds.add(message.authorAgentId);
-      if (message.targets) {
-        for (const target of message.targets) targetIds.add(target);
-      }
-    }
-
-    const idToName = new Map<string, string>();
-    const toLoad = Array.from(new Set([...authorIds, ...targetIds]));
-    for (const id of toLoad) {
-      try {
-        const agent = await ctx.storage.getAgent(id);
-        idToName.set(id, agent.name);
-      } catch {
-        // ignore
-      }
-    }
-
-    const filteredItems = excludeSystem
-      ? messagesList.items.filter((message) => message.authorType !== 'system')
-      : messagesList.items;
-
-    const messages = filteredItems.map((message) => {
-      const base: Record<string, unknown> = {
-        id: message.id,
-        author_type: message.authorType,
-        author_agent_id: message.authorAgentId ?? null,
-        author_agent_name: message.authorAgentId
-          ? (idToName.get(message.authorAgentId) ?? null)
-          : null,
-        content: message.content,
-        created_at: message.createdAt,
-        targets: message.targets,
-      };
-
-      if (message.targets && message.targets.length > 0) {
-        const names = message.targets
-          .map((targetId) => idToName.get(targetId))
-          .filter((name): name is string => typeof name === 'string' && name.length > 0);
-        if (names.length > 0) {
-          base.target_agent_names = names;
-        }
-      }
-
-      return base;
-    });
-
-    const response = {
-      thread: {
-        id: thread.id,
-        title: thread.title,
-      },
-      messages,
-      has_more: messages.length === limit,
-    };
-
-    return { success: true, data: response };
-  } catch (error) {
-    if (error instanceof ServiceUnavailableError) {
-      return { success: false, error: { code: 'SERVICE_UNAVAILABLE', message: error.message } };
-    }
-    if (error instanceof NotFoundException || error instanceof NotFoundError) {
-      return {
-        success: false,
-        error: {
-          code: 'NOT_FOUND',
-          message: `Thread ${validated.thread_id} was not found.`,
-        },
-      };
-    }
-
-    logger.error({ error, params }, 'chatReadHistory failed');
-    return {
-      success: false,
-      error: {
-        code: 'CHAT_READ_HISTORY_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to read chat history',
       },
     };
   }

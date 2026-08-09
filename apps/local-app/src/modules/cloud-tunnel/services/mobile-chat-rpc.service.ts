@@ -710,8 +710,9 @@ export class MobileChatRpcService {
   }
 
   /**
-   * `chat.restartAgent({ agentId, projectId })` — async (atomic terminate+launch
-   * can exceed the relay timeout). Returns an `operationId` to poll.
+   * `chat.restartAgent({ agentId, projectId })` — async sequential terminate+launch
+   * can exceed the relay timeout. Each operation owns its coordinator acquisition;
+   * this transport must not add an outer lock. Returns an `operationId` to poll.
    */
   async restartAgent(params: Record<string, unknown>): Promise<LifecycleStartResult> {
     const agentId = params['agentId'] as string;

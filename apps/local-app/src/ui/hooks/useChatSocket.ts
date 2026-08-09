@@ -1,48 +1,24 @@
-import { useEffect, useRef, useMemo, useCallback } from 'react';
+import { useRef, useMemo, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Socket } from 'socket.io-client';
 import { type WsEnvelope } from '@/ui/lib/socket';
 import { useAppSocket } from '@/ui/hooks/useAppSocket';
 import { useRealtimeDispatch } from '@/ui/hooks/useRealtimeDispatch';
 import type { RealtimeInvalidationRegistry } from '@/ui/lib/realtime-invalidation-registry';
-import { useToast } from '@/ui/hooks/use-toast';
-import type { Message } from '@/ui/lib/chat';
-import { type AgentOrGuest } from './useChatQueries';
 import { teamsQueryKeys } from '@/ui/lib/teams';
 
 export interface UseChatSocketOptions {
   projectId: string | null;
-  selectedThreadId: string | null;
-  agents: AgentOrGuest[];
-  onInlineUnread?: () => void;
-  getLatestSelectedThreadId: () => string | null;
-  isInlineActive: () => boolean;
 }
 
 export interface UseChatSocketResult {
   socketRef: React.RefObject<Socket | null>;
-  subscribedThreadRef: React.RefObject<string | null>;
 }
 
-export function useChatSocket({
-  projectId,
-  selectedThreadId,
-  agents,
-  onInlineUnread,
-  getLatestSelectedThreadId,
-  isInlineActive,
-}: UseChatSocketOptions): UseChatSocketResult {
+export function useChatSocket({ projectId }: UseChatSocketOptions): UseChatSocketResult {
   const queryClient = useQueryClient();
-  const { toast } = useToast();
-  const hasSelectedProject = Boolean(projectId);
 
   const socketRef = useRef<Socket | null>(null);
-  const subscribedThreadRef = useRef<string | null>(null);
-  const latestSelectedThreadRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    latestSelectedThreadRef.current = selectedThreadId;
-  }, [selectedThreadId]);
 
   const invalidationRegistry: RealtimeInvalidationRegistry = useMemo(() => {
     if (!projectId) return [];
@@ -81,8 +57,6 @@ export function useChatSocket({
           { kind: 'invalidate', queryKey: ['active-sessions', projectId] },
           { kind: 'invalidate', queryKey: ['teams', projectId] },
           { kind: 'invalidate', queryKey: ['teams', 'detail'] },
-          { kind: 'invalidate', queryKey: ['user-threads', projectId] },
-          { kind: 'invalidate', queryKey: ['agent-threads', projectId] },
         ],
       },
       {
@@ -117,16 +91,6 @@ export function useChatSocket({
 
   const selectedSocket = useAppSocket(
     {
-      connect: () => {
-        const threadToSubscribe = subscribedThreadRef.current ?? getLatestSelectedThreadId();
-        if (threadToSubscribe) {
-          socketRef.current?.emit('chat:subscribe', { threadId: threadToSubscribe });
-          subscribedThreadRef.current = threadToSubscribe;
-        }
-      },
-      disconnect: () => {
-        subscribedThreadRef.current = null;
-      },
       message: (envelope: WsEnvelope) => {
         const { topic, type, payload } = envelope;
 
@@ -137,85 +101,13 @@ export function useChatSocket({
           if (type === 'team.config.updated') {
             handleTeamDetailInvalidation(payload as Record<string, unknown>);
           }
-          return;
-        }
-
-        if (topic.startsWith('chat/') && type === 'message.created') {
-          const threadId = topic.split('/')[1];
-          const message = payload as Message;
-          queryClient.invalidateQueries({ queryKey: ['messages', threadId] });
-
-          const activeThreadId = getLatestSelectedThreadId();
-          if (threadId === activeThreadId && message.authorType === 'agent') {
-            const agentName = agents.find((a) => a.id === message.authorAgentId)?.name || 'Agent';
-            toast({
-              title: `New message from ${agentName}`,
-              description:
-                message.content.substring(0, 50) + (message.content.length > 50 ? '...' : ''),
-            });
-          }
-
-          if (threadId === activeThreadId && isInlineActive()) {
-            onInlineUnread?.();
-          }
-        }
-
-        if (topic === 'system' && type === 'ping') {
-          socketRef.current?.emit('pong');
         }
       },
     },
-    [
-      projectId,
-      agents,
-      queryClient,
-      toast,
-      getLatestSelectedThreadId,
-      isInlineActive,
-      onInlineUnread,
-      handleTeamDetailInvalidation,
-    ],
+    [projectId, handleTeamDetailInvalidation],
   );
 
   socketRef.current = selectedSocket;
 
-  useEffect(() => {
-    if (!hasSelectedProject) {
-      if (selectedSocket.connected && subscribedThreadRef.current) {
-        selectedSocket.emit('chat:unsubscribe', { threadId: subscribedThreadRef.current });
-      }
-      subscribedThreadRef.current = null;
-      return;
-    }
-  }, [hasSelectedProject, selectedSocket]);
-
-  useEffect(() => {
-    if (!selectedSocket.connected) {
-      subscribedThreadRef.current = selectedThreadId ?? null;
-      return;
-    }
-
-    if (!selectedThreadId) {
-      if (subscribedThreadRef.current) {
-        selectedSocket.emit('chat:unsubscribe', { threadId: subscribedThreadRef.current });
-        subscribedThreadRef.current = null;
-      }
-      return;
-    }
-
-    if (subscribedThreadRef.current === selectedThreadId) {
-      return;
-    }
-
-    if (subscribedThreadRef.current) {
-      selectedSocket.emit('chat:unsubscribe', { threadId: subscribedThreadRef.current });
-    }
-    selectedSocket.emit('chat:subscribe', { threadId: selectedThreadId });
-    subscribedThreadRef.current = selectedThreadId;
-  }, [selectedThreadId, selectedSocket]);
-
-  return {
-    socketRef,
-    subscribedThreadRef,
-  };
+  return { socketRef };
 }

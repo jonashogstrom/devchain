@@ -7,5 +7,20 @@ describe('McpFullModule', () => {
     const imports = Reflect.getMetadata(MODULE_METADATA.IMPORTS, McpFullModule) as unknown[];
 
     expect(imports).toContain(ProjectCommunicationModule);
+    expect(
+      imports.map((module) => {
+        if (typeof module === 'function') return module.name;
+        if (
+          module &&
+          typeof module === 'object' &&
+          'forwardRef' in module &&
+          typeof module.forwardRef === 'function'
+        ) {
+          const resolved = module.forwardRef();
+          return typeof resolved === 'function' ? resolved.name : undefined;
+        }
+        return undefined;
+      }),
+    ).not.toContain('ChatModule');
   });
 });

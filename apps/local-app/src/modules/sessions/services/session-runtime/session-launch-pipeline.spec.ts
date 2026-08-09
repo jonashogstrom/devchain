@@ -624,7 +624,9 @@ describe('SessionLaunchPipeline', () => {
         'send-keys failed',
       );
 
-      expect(mocks.terminalIO.destroySession).toHaveBeenCalled();
+      expect(mocks.terminalIO.destroyExpectedSession).toHaveBeenCalledWith(expect.any(Object), {
+        onUnknownError: 'retire',
+      });
 
       const failUpdates = runCalls.filter(
         (c) => c.sql.includes('UPDATE sessions') && c.args.includes('failed'),
@@ -673,7 +675,9 @@ describe('SessionLaunchPipeline', () => {
       );
 
       // tmux destroyed via createTmuxSession compensator
-      expect(mocks.terminalIO.destroySession).toHaveBeenCalled();
+      expect(mocks.terminalIO.destroyExpectedSession).toHaveBeenCalledWith(expect.any(Object), {
+        onUnknownError: 'retire',
+      });
 
       // registry disposed via bindStreaming compensator
       expect(mocks.terminalSessionRegistry.dispose).toHaveBeenCalled();

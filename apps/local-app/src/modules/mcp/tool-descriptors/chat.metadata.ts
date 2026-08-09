@@ -1,17 +1,11 @@
-import {
-  SendMessageParamsSchema,
-  ChatAckParamsSchema,
-  ChatReadHistoryParamsSchema,
-  ChatListMembersParamsSchema,
-  PROJECT_ID_PREFIX_PATTERN,
-} from '../dtos/mcp.dto';
+import { SendMessageParamsSchema, PROJECT_ID_PREFIX_PATTERN } from '../dtos/mcp.dto';
 import type { ToolMetadataEntry } from './types';
 
 export const chatMetadata: ToolMetadataEntry[] = [
   {
     name: 'devchain_send_message',
     description:
-      'Send a chat message. Sender is derived from session agent. Provide recipientProjectId for Project Owner delivery, threadId to reply in a thread, recipientAgentNames for pooled delivery to one or more explicit recipients without creating a thread, or teamName for pooled team routing. Omit all recipient fields to fan out to your own team (resolved from session).',
+      'Send a terminal-routed message. Sender is derived from session agent. Provide recipientProjectId for Project Owner delivery, recipientAgentNames for one or more explicit recipients, or teamName for team routing. Omit all recipient fields to fan out to your own team (resolved from session).',
     inputSchema: {
       type: 'object',
       required: ['sessionId', 'message'],
@@ -20,85 +14,28 @@ export const chatMetadata: ToolMetadataEntry[] = [
           type: 'string',
           description: 'Session ID (full UUID or 8+ char prefix)',
         },
-        threadId: {
-          type: 'string',
-          description:
-            'Existing thread UUID. When provided, recipients may be omitted to fan-out to thread members.',
-        },
         recipientAgentNames: {
           type: 'array',
           items: { type: 'string' },
           minItems: 1,
           description:
-            'Agent names (case-insensitive) for pooled delivery. Accepts one or more recipients and does not create a thread.',
+            'Agent names (case-insensitive) for pooled terminal delivery. Accepts one or more recipients.',
         },
         teamName: {
           type: 'string',
           description:
-            'Team name (case-insensitive). Routes to team lead if assigned, otherwise to all members. Mutually exclusive with recipientAgentNames. Cannot be combined with threadId. Omit all recipient fields to fan out to your own team (resolved from session).',
+            'Team name (case-insensitive). Routes to team lead if assigned, otherwise to all members. Mutually exclusive with recipientAgentNames. Omit all recipient fields to fan out to your own team (resolved from session).',
         },
         recipientProjectId: {
           type: 'string',
           pattern: PROJECT_ID_PREFIX_PATTERN.source,
           description:
-            'Full project UUID or valid 8+ character UUID prefix. Mutually exclusive with thread, agent, team, and internal recipient routing.',
+            'Full project UUID or valid 8+ character UUID prefix. Mutually exclusive with agent and team routing.',
         },
         message: { type: 'string', description: 'Message content to deliver.' },
       },
       additionalProperties: false,
     },
     paramsSchema: SendMessageParamsSchema,
-  },
-  {
-    name: 'devchain_chat_ack',
-    description: 'Mark a chat message as read for an agent and emit a message.read event.',
-    inputSchema: {
-      type: 'object',
-      required: ['sessionId', 'thread_id', 'message_id'],
-      properties: {
-        sessionId: {
-          type: 'string',
-          description: 'Session ID (full UUID or 8+ char prefix)',
-        },
-        thread_id: { type: 'string', description: 'Chat thread UUID.' },
-        message_id: { type: 'string', description: 'Chat message UUID to acknowledge.' },
-      },
-      additionalProperties: false,
-    },
-    paramsSchema: ChatAckParamsSchema,
-  },
-  {
-    name: 'devchain_chat_read_history',
-    description: 'Fetch recent messages for a chat thread so agents can catch up after an invite.',
-    inputSchema: {
-      type: 'object',
-      required: ['thread_id'],
-      properties: {
-        thread_id: { type: 'string', description: 'Chat thread UUID.' },
-        limit: { type: 'number', description: 'Max messages to return (default 50, max 200).' },
-        since: {
-          type: 'string',
-          description: 'ISO timestamp; only messages after this time are returned.',
-        },
-        exclude_system: {
-          type: 'boolean',
-          description:
-            'Exclude system messages. Defaults to true when omitted to show only user/agent authored messages.',
-        },
-      },
-      additionalProperties: false,
-    },
-    paramsSchema: ChatReadHistoryParamsSchema,
-  },
-  {
-    name: 'devchain_chat_list_members',
-    description: 'List members of a chat thread along with their online status.',
-    inputSchema: {
-      type: 'object',
-      required: ['thread_id'],
-      properties: { thread_id: { type: 'string', description: 'Chat thread UUID.' } },
-      additionalProperties: false,
-    },
-    paramsSchema: ChatListMembersParamsSchema,
   },
 ];

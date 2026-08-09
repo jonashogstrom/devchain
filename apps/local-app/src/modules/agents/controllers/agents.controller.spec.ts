@@ -843,7 +843,10 @@ describe('AgentsController', () => {
 
       const result = await controller.restartAgent('agent-1', { projectId: 'project-1' });
 
-      expect(sessionsService.terminateSession).toHaveBeenCalledWith('session-old');
+      expect(sessionsService.terminateSession).toHaveBeenCalledWith('session-old', {
+        source: 'web-api',
+        reason: 'restart',
+      });
       expect(result.terminateStatus).toBe('success');
       expect(result.terminateWarning).toBeUndefined();
       expect(result.session.id).toBe('session-new');

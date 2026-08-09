@@ -121,7 +121,7 @@ describe('ui/lib/sessions helpers', () => {
   });
 
   describe('restartAgentSession', () => {
-    // Helper to create atomic restart response
+    // Helper to create a restart response
     function makeRestartResponse(
       overrides: Partial<{
         session: Partial<Record<string, unknown>>;
@@ -136,7 +136,7 @@ describe('ui/lib/sessions helpers', () => {
       };
     }
 
-    it('calls atomic restart endpoint and returns session (terminateStatus: success)', async () => {
+    it('calls restart endpoint and returns session (terminateStatus: success)', async () => {
       (global as unknown as { fetch: unknown }).fetch = jest.fn(
         async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = String(input);

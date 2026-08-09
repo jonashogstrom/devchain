@@ -82,7 +82,6 @@ describe('McpService project tool dispatch', () => {
   function createService(projectCommunication?: ProjectCommunicationService): McpService {
     return new McpService(
       storage as unknown as StorageService,
-      undefined,
       sessionsService as never,
       undefined,
       undefined,

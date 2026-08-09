@@ -92,7 +92,7 @@ describe('TeamMembershipChangedNotifierSubscriber', () => {
           projectId: 'project-1',
           senderName: 'System',
         },
-        { submitKeys: ['Enter'] },
+        { submitKeys: ['Enter'], requireActiveSession: true },
       );
     });
 

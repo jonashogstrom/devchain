@@ -129,39 +129,6 @@ describe('CatalogBroadcasterService', () => {
     expect(Object.keys(mockBroadcaster.broadcastEvent.mock.calls[0][2])).toEqual(['agentId']);
   });
 
-  // ── Chat ──
-  it('broadcasts chat.message.created with message payload', () => {
-    const message = {
-      id: 'm1',
-      threadId: 't1',
-      authorType: 'agent',
-      content: 'hi',
-      createdAt: '2026-01-01T00:00:00Z',
-    };
-    emitter.emit('chat.message.created', { threadId: 't1', message });
-
-    expect(mockBroadcaster.broadcastEvent).toHaveBeenCalledWith(
-      'chat/t1',
-      'message.created',
-      message,
-    );
-  });
-
-  it('broadcasts chat.message.read to chat/{threadId}', () => {
-    emitter.emit('chat.message.read', {
-      threadId: 't1',
-      messageId: 'm1',
-      agentId: 'a1',
-      readAt: '2026-01-01T00:00:00Z',
-    });
-
-    expect(mockBroadcaster.broadcastEvent).toHaveBeenCalledWith('chat/t1', 'message.read', {
-      messageId: 'm1',
-      agentId: 'a1',
-      readAt: '2026-01-01T00:00:00Z',
-    });
-  });
-
   it('broadcasts agent.message.sent with only visualization metadata', () => {
     emitter.emit('agent.message.sent', {
       projectId: 'p1',
@@ -543,8 +510,6 @@ describe('broadcastRegistry contract', () => {
     const expectedEvents = [
       'session.activity.changed',
       'session.starting',
-      'chat.message.created',
-      'chat.message.read',
       'agent.message.sent',
       'epic.created',
       'epic.updated',

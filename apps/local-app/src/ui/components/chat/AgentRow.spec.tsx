@@ -114,7 +114,7 @@ describe('AgentRow', () => {
   it('renders agent name, online provider icon, and activity badge', () => {
     const { container } = renderAgentRow();
 
-    expect(screen.getByLabelText(/Chat with Alpha \(online\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Open terminal for Alpha \(online\)/i)).toBeInTheDocument();
     expect(screen.getByText('Busy 10s')).toBeInTheDocument();
     const providerIconFrame = screen.getByTitle('Provider: Claude (online)');
     expect(providerIconFrame).toHaveClass(
@@ -143,7 +143,7 @@ describe('AgentRow', () => {
       activityBadge: undefined,
     });
 
-    expect(screen.getByLabelText(/Chat with Alpha \(offline\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Open terminal for Alpha \(offline\)/i)).toBeInTheDocument();
     const providerIconFrame = screen.getByTitle('Provider: Claude (offline)');
     expect(providerIconFrame).toHaveClass('bg-muted/20', 'border-border/60');
     expect(providerIconFrame).not.toHaveClass('shadow-[0_0_8px_hsl(var(--primary)/0.35)]');
@@ -180,7 +180,7 @@ describe('AgentRow', () => {
   it('fires onClick when the row is clicked', () => {
     const { onClick } = renderAgentRow();
 
-    fireEvent.click(screen.getByLabelText(/Chat with Alpha \(online\)/i));
+    fireEvent.click(screen.getByLabelText(/Open terminal for Alpha \(online\)/i));
 
     expect(onClick).toHaveBeenCalledTimes(1);
   });
@@ -188,7 +188,7 @@ describe('AgentRow', () => {
   it('renders the context menu on right click', async () => {
     renderAgentRow();
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha \(online\)/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha \(online\)/i));
 
     await waitFor(() => {
       expect(screen.getByText('Overrides…')).toBeInTheDocument();
@@ -200,7 +200,7 @@ describe('AgentRow', () => {
   it('fires onOpenOverrides with the row trigger from the context menu', async () => {
     const { onOpenOverrides } = renderAgentRow();
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     fireEvent.click(await screen.findByText('Overrides…'));
 
@@ -222,7 +222,7 @@ describe('AgentRow', () => {
         teamId: 'team-1',
       },
     });
-    const row = screen.getByLabelText(/Chat with Alpha/i);
+    const row = screen.getByLabelText(/Open terminal for Alpha/i);
 
     expect(anchorRef).toHaveBeenCalledWith(row);
     expect(row).toHaveAttribute('data-agent-event-bus-key', 'team-1:agent-1');
@@ -240,7 +240,7 @@ describe('AgentRow', () => {
   it('hides the Overrides item when canOverride is false', async () => {
     renderAgentRow({ canOverride: false });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     await waitFor(() => {
       expect(screen.getByText(/Context tracking/i)).toBeInTheDocument();
@@ -251,11 +251,11 @@ describe('AgentRow', () => {
   it('marks the row as selected when isSelected is true', () => {
     renderAgentRow({ isSelected: true });
 
-    expect(screen.getByLabelText(/Chat with Alpha \(online\)/i)).toHaveAttribute(
+    expect(screen.getByLabelText(/Open terminal for Alpha \(online\)/i)).toHaveAttribute(
       'aria-current',
       'true',
     );
-    expect(screen.getByLabelText(/Chat with Alpha \(online\)/i)).toHaveClass(
+    expect(screen.getByLabelText(/Open terminal for Alpha \(online\)/i)).toHaveClass(
       'border-border',
       'border-r-primary',
       'bg-muted',
@@ -265,7 +265,7 @@ describe('AgentRow', () => {
   it('uses a subtle accent surface for team leads', () => {
     renderAgentRow({ isTeamLead: true });
 
-    expect(screen.getByLabelText(/Chat with Alpha \(online\)/i)).toHaveClass(
+    expect(screen.getByLabelText(/Open terminal for Alpha \(online\)/i)).toHaveClass(
       'bg-primary/5',
       'hover:bg-primary/10',
     );
@@ -295,7 +295,7 @@ describe('AgentRow', () => {
     const onClone = jest.fn();
     renderAgentRow({ canClone: true, onClone });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     const cloneItem = await screen.findByText('Clone');
     fireEvent.click(cloneItem);
@@ -305,7 +305,7 @@ describe('AgentRow', () => {
   it('does not show Clone menu item when canClone is false', async () => {
     renderAgentRow({ canClone: false });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     await waitFor(() => {
       expect(screen.getByText(/Context tracking/i)).toBeInTheDocument();
@@ -317,7 +317,7 @@ describe('AgentRow', () => {
     const onDelete = jest.fn();
     renderAgentRow({ canDelete: true, onDelete });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     const deleteItem = await screen.findByText('Delete');
     fireEvent.click(deleteItem);
@@ -327,7 +327,7 @@ describe('AgentRow', () => {
   it('does not show Delete menu item when canDelete is false', async () => {
     renderAgentRow({ canDelete: false });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     await waitFor(() => {
       expect(screen.getByText(/Context tracking/i)).toBeInTheDocument();
@@ -339,7 +339,7 @@ describe('AgentRow', () => {
     const onDelete = jest.fn();
     renderAgentRow({ canDelete: true, onDelete, pendingDelete: true });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     await waitFor(() => {
       expect(screen.getByText('Deleting…')).toBeInTheDocument();
@@ -353,7 +353,7 @@ describe('AgentRow', () => {
       onEditTeam,
     });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     fireEvent.click(await screen.findByText('Edit team'));
 
@@ -363,7 +363,7 @@ describe('AgentRow', () => {
   it('fires context tracking toggle from the context menu', async () => {
     const { onToggleContextTracking } = renderAgentRow();
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     fireEvent.click(await screen.findByRole('menuitemcheckbox', { name: /Context tracking/i }));
 
@@ -373,7 +373,7 @@ describe('AgentRow', () => {
   it('fires restart and launch session actions from the context menu', async () => {
     const { onRestart, onLaunch } = renderAgentRow({ hasSession: false, sessionId: null });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     fireEvent.click(await screen.findByText('Restart session'));
     fireEvent.click(screen.getByText('Launch session'));
@@ -387,7 +387,7 @@ describe('AgentRow', () => {
   it('fires terminate session action when an active session exists', async () => {
     const { onTerminate } = renderAgentRow({ hasSession: true, sessionId: 'session-1' });
 
-    fireEvent.contextMenu(screen.getByLabelText(/Chat with Alpha/i));
+    fireEvent.contextMenu(screen.getByLabelText(/Open terminal for Alpha/i));
 
     fireEvent.click(await screen.findByText('Terminate session'));
 

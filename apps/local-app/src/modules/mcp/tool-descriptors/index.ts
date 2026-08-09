@@ -16,8 +16,6 @@ import { recordMetadata } from './record.metadata';
 import { recordBindings } from './record.bindings';
 import { chatMetadata } from './chat.metadata';
 import { chatBindings } from './chat.bindings';
-import { activityMetadata } from './activity.metadata';
-import { activityBindings } from './activity.bindings';
 import { teamMetadata } from './team.metadata';
 import { teamBindings } from './team.bindings';
 import { reviewMetadata } from './review.metadata';
@@ -35,7 +33,6 @@ export const allMetadata: ToolMetadataEntry[] = [
   ...recordMetadata,
   ...chatMetadata,
   ...projectMetadata,
-  ...activityMetadata,
   ...teamMetadata,
   ...reviewMetadata,
 ];
@@ -50,7 +47,6 @@ export const allBindings: ToolBindingEntry[] = [
   ...recordBindings,
   ...chatBindings,
   ...projectBindings,
-  ...activityBindings,
   ...teamBindings,
   ...reviewBindings,
 ];

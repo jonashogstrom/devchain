@@ -912,7 +912,10 @@ export class TeamsService {
       );
       for (const session of activeSessions) {
         try {
-          await sessionsService.terminateSession(session.id);
+          await sessionsService.terminateSession(session.id, {
+            source: 'team-management',
+            reason: 'agent-deletion',
+          });
         } catch (error) {
           logger.error(
             { sessionId: session.id, agentId: targetAgent.id, error },

@@ -151,7 +151,11 @@ describe('Runtime signal state-before-broadcast ordering', () => {
       }),
     };
 
-    await eventsService.publish('session.stopped', { sessionId: 's1' });
+    await eventsService.publish('session.stopped', {
+      sessionId: 's1',
+      source: 'web-api',
+      reason: 'user-requested',
+    });
     await eventsService.publish('session.presence.changed', {
       agentId: 'a1',
       online: false,

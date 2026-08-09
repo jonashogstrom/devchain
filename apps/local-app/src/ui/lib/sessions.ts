@@ -249,16 +249,16 @@ export async function launchSession(
   );
 }
 
-/** Backend response shape for atomic restart endpoint */
-interface AtomicRestartResponse {
+/** Backend response shape for the restart endpoint */
+interface RestartResponse {
   session: ActiveSession;
   terminateStatus: 'success' | 'not_found' | 'error';
   terminateWarning?: string;
 }
 
 /**
- * Restart an agent session using the atomic backend endpoint.
- * The backend handles terminate + launch atomically with per-agent locking.
+ * Restart an agent session using the backend restart endpoint.
+ * The backend serializes terminate and launch through separate per-agent lock acquisitions.
  *
  * @param agentId - The agent to restart
  * @param projectId - The project the agent belongs to
@@ -272,7 +272,7 @@ export async function restartSession(
   apiBase = '',
   fetchFn: FetchFn = defaultFetch,
 ): Promise<RestartSessionResult> {
-  const response = await fetchJsonOrThrow<AtomicRestartResponse>(
+  const response = await fetchJsonOrThrow<RestartResponse>(
     `/api/agents/${agentId}/restart`,
     {
       method: 'POST',

@@ -1,4 +1,4 @@
-export type DeliveryKind = 'mcp.direct' | 'mcp.project' | 'mcp.thread' | 'chat.user' | 'pooled';
+export type DeliveryKind = 'mcp.direct' | 'mcp.project' | 'pooled';
 
 export interface DeliveryMessage {
   readonly kind: DeliveryKind;
@@ -7,8 +7,6 @@ export interface DeliveryMessage {
   readonly projectId: string;
   readonly senderName: string;
   readonly senderType?: 'agent' | 'guest' | 'user';
-  readonly threadId?: string;
-  readonly messageId?: string;
   readonly senderAgentId?: string;
   /** Source identity rendered only for cross-project agent messages. */
   readonly sourceProjectId?: string;
@@ -21,7 +19,7 @@ export interface DeliveryMessage {
   readonly clientMessageId?: string;
   /**
    * Tmux framing directive for `kind:'mcp.direct'` deliveries. Only applies to
-   * `mcp.direct`; ignored for `'mcp.project'`, `'mcp.thread'`, `'chat.user'`, and `'pooled'`.
+   * `mcp.direct`; ignored for `'mcp.project'` and `'pooled'`.
    * `'agent-banner'` (default when unset) wraps the body in the agent-oriented
    * `[This message is sent from …]` banner; `'plain'` delivers the raw body with
    * no wrapper — used for human (mobile) user turns where the banner is wrong.

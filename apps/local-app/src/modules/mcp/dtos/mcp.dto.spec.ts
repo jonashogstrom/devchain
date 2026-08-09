@@ -1,8 +1,6 @@
 import { ZodError } from 'zod';
 import {
   AddEpicCommentParamsSchema,
-  ChatAckParamsSchema,
-  ChatListMembersParamsSchema,
   CreateEpicParamsSchema,
   DeleteEpicParamsSchema,
   DeleteEpicResponse,
@@ -154,10 +152,8 @@ describe('MCP chat DTO schemas', () => {
   });
 
   it.each([
-    ['threadId', '00000000-0000-0000-0000-000000000000'],
     ['recipientAgentNames', ['Beta']],
     ['teamName', 'Platform'],
-    ['recipient', 'user'],
   ])('rejects recipientProjectId with %s', (field, value) => {
     expect(
       SendMessageParamsSchema.safeParse({
@@ -190,22 +186,13 @@ describe('MCP chat DTO schemas', () => {
     ).toThrow('teamName and recipientAgentNames are mutually exclusive');
   });
 
-  it('rejects teamName with threadId for send_message', () => {
-    expect(() =>
-      SendMessageParamsSchema.parse({
-        sessionId: 'abcd1234',
-        teamName: 'Platform',
-        threadId: '00000000-0000-0000-0000-000000000000',
-        message: 'hello',
-      }),
-    ).toThrow('teamName cannot be combined with threadId in v1');
-  });
-
-  it('rejects teamName with recipient user for send_message', () => {
+  it.each([
+    ['threadId', '00000000-0000-0000-0000-000000000000'],
+    ['recipient', 'user'],
+  ])('rejects retired send_message field %s as an unrecognized key', (field, value) => {
     const result = SendMessageParamsSchema.safeParse({
       sessionId: 'abcd1234',
-      teamName: 'Platform',
-      recipient: 'user',
+      [field]: value,
       message: 'hello',
     });
 
@@ -213,9 +200,7 @@ describe('MCP chat DTO schemas', () => {
     if (!result.success) {
       expect(result.error.issues).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({
-            message: 'teamName cannot be combined with recipient: "user"',
-          }),
+          expect.objectContaining({ code: 'unrecognized_keys', keys: [field] }),
         ]),
       );
     }
@@ -256,57 +241,6 @@ describe('MCP chat DTO schemas', () => {
     };
 
     expect(response.mode).toBe('project');
-  });
-
-  it('requires thread_id for list members tool', () => {
-    expect(() => ChatListMembersParamsSchema.parse({})).toThrow(ZodError);
-    expect(() =>
-      ChatListMembersParamsSchema.parse({ thread_id: '00000000-0000-0000-0000-000000000000' }),
-    ).not.toThrow();
-  });
-
-  it('validates devchain_chat_ack parameters', () => {
-    // Only required params: sessionId, thread_id, message_id
-    // agent_id and agent_name are response fields, not request params
-    expect(() =>
-      ChatAckParamsSchema.parse({
-        sessionId: '00000000-0000-0000-0000-000000000003',
-        thread_id: '00000000-0000-0000-0000-000000000000',
-        message_id: '00000000-0000-0000-0000-000000000001',
-      }),
-    ).not.toThrow();
-
-    expect(() => ChatAckParamsSchema.parse({ thread_id: 'missing' })).toThrow(ZodError);
-  });
-
-  it('rejects unknown keys in strict mode', () => {
-    // Strict mode should reject extraneous fields
-    expect(() =>
-      ChatAckParamsSchema.parse({
-        sessionId: '00000000-0000-0000-0000-000000000003',
-        thread_id: '00000000-0000-0000-0000-000000000000',
-        message_id: '00000000-0000-0000-0000-000000000001',
-        unknown_field: 'should fail',
-      }),
-    ).toThrow(ZodError);
-  });
-
-  it('reports unrecognized_keys issue code for unknown params', () => {
-    const result = ChatAckParamsSchema.safeParse({
-      sessionId: '00000000-0000-0000-0000-000000000003',
-      thread_id: '00000000-0000-0000-0000-000000000000',
-      message_id: '00000000-0000-0000-0000-000000000001',
-      unknown_param: 'value',
-    });
-
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      const unrecognizedIssue = result.error.issues.find(
-        (issue) => issue.code === 'unrecognized_keys',
-      );
-      expect(unrecognizedIssue).toBeDefined();
-      expect((unrecognizedIssue as { keys: string[] }).keys).toContain('unknown_param');
-    }
   });
 });
 

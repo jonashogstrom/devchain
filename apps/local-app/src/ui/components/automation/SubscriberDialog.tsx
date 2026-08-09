@@ -31,6 +31,7 @@ import {
   type CreateSubscriberData,
   type UpdateSubscriberData,
   type ActionInput as SubscriberActionInput,
+  type EventFilterCondition,
   type EventFilter,
   type SubscribableEventDefinition,
 } from '@/ui/lib/subscribers';
@@ -38,7 +39,98 @@ import { fetchWatchers, type Watcher } from '@/ui/lib/watchers';
 import { fetchActions, type ActionMetadata } from '@/ui/lib/actions';
 import { ActionInputsForm } from './ActionInputsForm';
 
-type FilterOperator = 'equals' | 'contains' | 'regex';
+type FilterOperator = EventFilterCondition['operator'];
+type FilterCombinator = 'and' | 'or';
+
+interface EventFilterRow {
+  id: string;
+  field: string;
+  operator: FilterOperator;
+  value: string;
+}
+
+interface FilterRowErrors {
+  field?: string;
+  value?: string;
+}
+
+let nextFilterRowId = 0;
+
+function isZeroArgumentFilterOperator(operator: FilterOperator): boolean {
+  return operator === 'is_null' || operator === 'is_not_null';
+}
+
+function normalizeFilterValue(operator: FilterOperator, value: string): string {
+  return isZeroArgumentFilterOperator(operator) ? '' : value;
+}
+
+function removeFilterRowError(
+  filterErrors: Record<string, FilterRowErrors>,
+  rowId: string,
+  field: keyof FilterRowErrors,
+): Record<string, FilterRowErrors> {
+  const rowErrors = filterErrors[rowId];
+  if (!rowErrors?.[field]) return filterErrors;
+
+  const nextRowErrors = { ...rowErrors };
+  delete nextRowErrors[field];
+
+  const nextFilterErrors = { ...filterErrors };
+  if (!nextRowErrors.field && !nextRowErrors.value) {
+    delete nextFilterErrors[rowId];
+  } else {
+    nextFilterErrors[rowId] = nextRowErrors;
+  }
+  return nextFilterErrors;
+}
+
+function createFilterRow(condition?: EventFilterCondition): EventFilterRow {
+  nextFilterRowId += 1;
+  const operator = condition?.operator || 'equals';
+  return {
+    id: `event-filter-row-${nextFilterRowId}`,
+    field: condition?.field || '',
+    operator,
+    value: normalizeFilterValue(operator, condition?.value || ''),
+  };
+}
+
+function hydrateEventFilter(eventFilter: EventFilter | null | undefined): {
+  filterRows: EventFilterRow[];
+  filterCombinator: FilterCombinator;
+} {
+  if (!eventFilter) {
+    return { filterRows: [], filterCombinator: 'and' };
+  }
+
+  if ('field' in eventFilter) {
+    return {
+      filterRows: [createFilterRow(eventFilter)],
+      filterCombinator: 'and',
+    };
+  }
+
+  return {
+    filterRows: eventFilter.filters.map((filter) => createFilterRow(filter)),
+    filterCombinator: eventFilter.combinator,
+  };
+}
+
+function serializeEventFilter(
+  filterRows: EventFilterRow[],
+  filterCombinator: FilterCombinator,
+): EventFilter | null {
+  const [first, ...rest] = filterRows.map(({ field, operator, value }) => ({
+    field,
+    operator,
+    value: normalizeFilterValue(operator, value),
+  }));
+  if (!first) return null;
+  return {
+    combinator: rest.length === 0 ? 'and' : filterCombinator,
+    filters: [first, ...rest],
+  };
+}
 
 function sanitizeActionInputs(
   actionType: string,
@@ -70,10 +162,8 @@ interface SubscriberFormData {
   description: string;
   enabled: boolean;
   eventName: string;
-  hasFilter: boolean;
-  filterField: string;
-  filterOperator: FilterOperator;
-  filterValue: string;
+  filterRows: EventFilterRow[];
+  filterCombinator: FilterCombinator;
   actionType: string;
   actionInputs: Record<string, SubscriberActionInput>;
   delayMs: number;
@@ -90,10 +180,8 @@ const defaultFormData: SubscriberFormData = {
   description: '',
   enabled: true,
   eventName: '',
-  hasFilter: false,
-  filterField: '',
-  filterOperator: 'equals',
-  filterValue: '',
+  filterRows: [],
+  filterCombinator: 'and',
   actionType: '',
   actionInputs: {},
   delayMs: 0,
@@ -119,6 +207,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
 
   const [formData, setFormData] = useState<SubscriberFormData>(defaultFormData);
   const [errors, setErrors] = useState<Partial<Record<keyof SubscriberFormData, string>>>({});
+  const [filterErrors, setFilterErrors] = useState<Record<string, FilterRowErrors>>({});
   const [inputErrors, setInputErrors] = useState<Record<string, string>>({});
 
   // Fetch subscribable events from catalog
@@ -149,15 +238,14 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
   useEffect(() => {
     if (open) {
       if (subscriber) {
+        const { filterRows, filterCombinator } = hydrateEventFilter(subscriber.eventFilter);
         setFormData({
           name: subscriber.name,
           description: subscriber.description || '',
           enabled: subscriber.enabled,
           eventName: subscriber.eventName,
-          hasFilter: !!subscriber.eventFilter,
-          filterField: subscriber.eventFilter?.field || '',
-          filterOperator: subscriber.eventFilter?.operator || 'equals',
-          filterValue: subscriber.eventFilter?.value || '',
+          filterRows,
+          filterCombinator,
           actionType: subscriber.actionType,
           actionInputs: sanitizeActionInputs(
             subscriber.actionType,
@@ -176,6 +264,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
         setFormData(defaultFormData);
       }
       setErrors({});
+      setFilterErrors({});
       setInputErrors({});
     }
   }, [open, subscriber]);
@@ -286,6 +375,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
 
   const validate = (): boolean => {
     const newErrors: Partial<Record<keyof SubscriberFormData, string>> = {};
+    const newFilterErrors: Record<string, FilterRowErrors> = {};
     const newInputErrors: Record<string, string> = {};
 
     if (!formData.name.trim()) {
@@ -298,12 +388,16 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
       newErrors.eventName = 'Event name is required';
     }
 
-    if (formData.hasFilter) {
-      if (!formData.filterField.trim()) {
-        newErrors.filterField = 'Filter field is required';
+    for (const row of formData.filterRows) {
+      const rowErrors: FilterRowErrors = {};
+      if (!row.field.trim()) {
+        rowErrors.field = 'Filter field is required';
       }
-      if (!formData.filterValue.trim()) {
-        newErrors.filterValue = 'Filter value is required';
+      if (!isZeroArgumentFilterOperator(row.operator) && !row.value.trim()) {
+        rowErrors.value = 'Filter value is required';
+      }
+      if (Object.keys(rowErrors).length > 0) {
+        newFilterErrors[row.id] = rowErrors;
       }
     }
 
@@ -336,8 +430,13 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
     }
 
     setErrors(newErrors);
+    setFilterErrors(newFilterErrors);
     setInputErrors(newInputErrors);
-    return Object.keys(newErrors).length === 0 && Object.keys(newInputErrors).length === 0;
+    return (
+      Object.keys(newErrors).length === 0 &&
+      Object.keys(newFilterErrors).length === 0 &&
+      Object.keys(newInputErrors).length === 0
+    );
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -353,13 +452,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
       return;
     }
 
-    const eventFilter: EventFilter | null = formData.hasFilter
-      ? {
-          field: formData.filterField,
-          operator: formData.filterOperator,
-          value: formData.filterValue,
-        }
-      : null;
+    const eventFilter = serializeEventFilter(formData.filterRows, formData.filterCombinator);
 
     if (isEditMode && subscriber) {
       const sanitizedActionInputs = sanitizeActionInputs(
@@ -418,6 +511,52 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
     setFormData((prev) => ({ ...prev, [field]: value }));
     if (errors[field]) {
       setErrors((prev) => ({ ...prev, [field]: undefined }));
+    }
+  };
+
+  const addFilterRow = () => {
+    const row = createFilterRow();
+    setFormData((prev) => ({ ...prev, filterRows: [...prev.filterRows, row] }));
+  };
+
+  const removeFilterRow = (rowId: string) => {
+    setFormData((prev) => {
+      const filterRows = prev.filterRows.filter((row) => row.id !== rowId);
+      return {
+        ...prev,
+        filterRows,
+        filterCombinator: filterRows.length === 0 ? 'and' : prev.filterCombinator,
+      };
+    });
+    setFilterErrors((prev) => {
+      const next = { ...prev };
+      delete next[rowId];
+      return next;
+    });
+  };
+
+  const updateFilterRow = (rowId: string, field: 'field' | 'value', value: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      filterRows: prev.filterRows.map((row) =>
+        row.id === rowId ? { ...row, [field]: value } : row,
+      ),
+    }));
+    setFilterErrors((prev) => removeFilterRowError(prev, rowId, field));
+  };
+
+  const updateFilterOperator = (rowId: string, operator: FilterOperator) => {
+    setFormData((prev) => ({
+      ...prev,
+      filterRows: prev.filterRows.map((row) =>
+        row.id === rowId
+          ? { ...row, operator, value: normalizeFilterValue(operator, row.value) }
+          : row,
+      ),
+    }));
+
+    if (isZeroArgumentFilterOperator(operator)) {
+      setFilterErrors((prev) => removeFilterRowError(prev, rowId, 'value'));
     }
   };
 
@@ -501,7 +640,9 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
               <Label htmlFor="eventName">Event Name *</Label>
               <Select
                 value={formData.eventName}
-                onValueChange={(value) => updateField('eventName', value)}
+                onValueChange={(value) => {
+                  if (value) updateField('eventName', value);
+                }}
               >
                 <SelectTrigger className={errors.eventName ? 'border-destructive' : ''}>
                   <SelectValue placeholder="Select event type..." />
@@ -558,53 +699,130 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
               )}
             </div>
 
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="hasFilter"
-                checked={formData.hasFilter}
-                onCheckedChange={(checked) => updateField('hasFilter', checked === true)}
-              />
-              <Label htmlFor="hasFilter" className="cursor-pointer">
+            {formData.filterRows.length === 0 ? (
+              <Button type="button" variant="outline" onClick={addFilterRow}>
                 Add event filter
-              </Label>
-            </div>
+              </Button>
+            ) : (
+              <div className="space-y-3" aria-label="Event filters">
+                {formData.filterRows.length > 1 && (
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="filter-combinator">Match</Label>
+                    <Select
+                      value={formData.filterCombinator}
+                      onValueChange={(value: FilterCombinator) =>
+                        updateField('filterCombinator', value)
+                      }
+                    >
+                      <SelectTrigger id="filter-combinator" aria-label="Filter combination">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="and">Match all</SelectItem>
+                        <SelectItem value="or">Match any</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
 
-            {formData.hasFilter && (
-              <div className="grid grid-cols-3 gap-2 p-3 border rounded-lg">
-                <div className="space-y-1">
-                  <Label className="text-xs">Field</Label>
-                  <Input
-                    value={formData.filterField}
-                    onChange={(e) => updateField('filterField', e.target.value)}
-                    placeholder="sessionId"
-                    className={errors.filterField ? 'border-destructive' : ''}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Operator</Label>
-                  <Select
-                    value={formData.filterOperator}
-                    onValueChange={(value: FilterOperator) => updateField('filterOperator', value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="equals">Equals</SelectItem>
-                      <SelectItem value="contains">Contains</SelectItem>
-                      <SelectItem value="regex">Regex</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Value</Label>
-                  <Input
-                    value={formData.filterValue}
-                    onChange={(e) => updateField('filterValue', e.target.value)}
-                    placeholder="value"
-                    className={errors.filterValue ? 'border-destructive' : ''}
-                  />
-                </div>
+                {formData.filterRows.map((row, index) => {
+                  const rowErrors = filterErrors[row.id] || {};
+                  const fieldErrorId = `filter-field-error-${row.id}`;
+                  const valueErrorId = `filter-value-error-${row.id}`;
+
+                  return (
+                    <div key={row.id} className="space-y-2 rounded-lg border p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium">Filter {index + 1}</p>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => removeFilterRow(row.id)}
+                          aria-label={`Remove filter ${index + 1}`}
+                        >
+                          Remove filter
+                        </Button>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                        <div className="space-y-1">
+                          <Label htmlFor={`filter-field-${row.id}`} className="text-xs">
+                            Field
+                          </Label>
+                          <Input
+                            id={`filter-field-${row.id}`}
+                            value={row.field}
+                            onChange={(e) => updateFilterRow(row.id, 'field', e.target.value)}
+                            placeholder="sessionId"
+                            className={rowErrors.field ? 'border-destructive' : ''}
+                            aria-invalid={!!rowErrors.field}
+                            aria-describedby={rowErrors.field ? fieldErrorId : undefined}
+                          />
+                          {rowErrors.field && (
+                            <p id={fieldErrorId} className="text-sm text-destructive">
+                              {rowErrors.field}
+                            </p>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`filter-operator-${row.id}`} className="text-xs">
+                            Operator
+                          </Label>
+                          <Select
+                            value={row.operator}
+                            onValueChange={(value: FilterOperator) =>
+                              updateFilterOperator(row.id, value)
+                            }
+                          >
+                            <SelectTrigger id={`filter-operator-${row.id}`}>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="equals">Equals</SelectItem>
+                              <SelectItem value="contains">Contains</SelectItem>
+                              <SelectItem value="regex">Regex</SelectItem>
+                              <SelectItem value="is_null">Is null</SelectItem>
+                              <SelectItem value="is_not_null">Is not null</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        {isZeroArgumentFilterOperator(row.operator) ? (
+                          <div className="space-y-1" aria-label="Filter value not required">
+                            <Label className="text-xs">Value</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Not required for this operator
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            <Label htmlFor={`filter-value-${row.id}`} className="text-xs">
+                              Value
+                            </Label>
+                            <Input
+                              id={`filter-value-${row.id}`}
+                              value={row.value}
+                              onChange={(e) => updateFilterRow(row.id, 'value', e.target.value)}
+                              placeholder="value"
+                              className={rowErrors.value ? 'border-destructive' : ''}
+                              aria-invalid={!!rowErrors.value}
+                              aria-describedby={rowErrors.value ? valueErrorId : undefined}
+                            />
+                            {rowErrors.value && (
+                              <p id={valueErrorId} className="text-sm text-destructive">
+                                {rowErrors.value}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <Button type="button" variant="outline" onClick={addFilterRow}>
+                  Add another filter
+                </Button>
               </div>
             )}
           </div>
@@ -630,7 +848,10 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
                     updateField('actionInputs', {});
                   }}
                 >
-                  <SelectTrigger className={errors.actionType ? 'border-destructive' : ''}>
+                  <SelectTrigger
+                    aria-label="Action type"
+                    className={errors.actionType ? 'border-destructive' : ''}
+                  >
                     <SelectValue placeholder="Select action..." />
                   </SelectTrigger>
                   <SelectContent>

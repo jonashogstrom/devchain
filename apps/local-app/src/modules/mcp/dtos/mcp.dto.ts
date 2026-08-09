@@ -701,21 +701,16 @@ export interface DeleteEpicResponse {
 // devchain_send_message
 // Sender identity is derived from sessionId (ctx.agent).
 // Allows:
-// - threadId (agent replies into existing thread; recipients optional for fan-out)
-// - recipientAgentNames (pooled delivery to explicit agents; does not create a thread)
+// - recipientAgentNames (pooled terminal delivery to explicit agents)
 // - teamName (pooled team routing; handler logic resolved separately)
 // - recipientProjectId (delivery to the target project's current Project Owner)
-// - recipient: internal-only, not exposed in tool schema
 export const SendMessageParamsSchema = z
   .object({
     sessionId: z.string().min(8), // Session ID (full UUID or 8+ char prefix)
-    threadId: z.string().uuid().optional(),
     recipientAgentNames: z.array(z.string().min(1)).min(1).optional(), // Target agents to message
     teamName: z.string().min(1).optional(),
     recipientProjectId: ProjectIdPrefixSchema.optional(),
     message: z.string().min(1),
-    // Internal-only: kept for backward compatibility but not exposed in tool schema
-    recipient: z.enum(['user', 'agents']).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -725,10 +720,8 @@ export const SendMessageParamsSchema = z
 
     if (v.recipientProjectId) {
       const conflictingFields = [
-        v.threadId ? 'threadId' : null,
         hasRecipientAgentNames ? 'recipientAgentNames' : null,
         v.teamName ? 'teamName' : null,
-        v.recipient ? 'recipient' : null,
       ].filter((field): field is string => field !== null);
 
       if (conflictingFields.length > 0) {
@@ -748,24 +741,7 @@ export const SendMessageParamsSchema = z
       });
     }
 
-    if (v.teamName && v.threadId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['teamName'],
-        message: 'teamName cannot be combined with threadId in v1',
-      });
-    }
-
-    if (v.teamName && v.recipient === 'user') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['teamName'],
-        message: 'teamName cannot be combined with recipient: "user"',
-      });
-    }
-
-    // All routing fields absent is allowed (self-team fallback in handler)
-    // unless recipient is explicitly 'user' — which is handled separately
+    // All routing fields absent is allowed (self-team fallback in handler).
   });
 
 export type SendMessageParams = z.infer<typeof SendMessageParamsSchema>;
@@ -787,19 +763,6 @@ export type SendMessageResponse =
         routedToLead: boolean;
         summary: string;
       };
-    }
-  | {
-      mode: 'thread';
-      threadId: string;
-      messageId: string;
-      deliveryCount: number;
-      delivered: Array<{
-        agentName: string;
-        agentId: string;
-        sessionId: string;
-        status: 'delivered' | 'queued' | 'unconfirmed' | 'failed';
-        error?: string;
-      }>;
     }
   | {
       mode: 'project';
@@ -838,128 +801,6 @@ export interface ProjectsListResponse {
   limit: number;
   offset: number;
 }
-
-// devchain_chat_ack
-export const ChatAckParamsSchema = z
-  .object({
-    sessionId: z.string().min(8), // Session ID for agent identity
-    thread_id: z.string().uuid(),
-    message_id: z.string().uuid(),
-  })
-  .strict();
-
-export type ChatAckParams = z.infer<typeof ChatAckParamsSchema>;
-
-export interface ChatAckResponse {
-  threadId: string;
-  messageId: string;
-  agentId: string;
-  agentName: string;
-  acknowledged: boolean;
-}
-
-// devchain_chat_read_history
-export const ChatReadHistoryParamsSchema = z
-  .object({
-    thread_id: z.string().uuid(),
-    limit: z.number().int().positive().max(200).optional(),
-    since: z.string().datetime().optional(),
-    // When undefined, service defaults to true (exclude system messages)
-    exclude_system: z.boolean().optional(),
-  })
-  .strict();
-
-export type ChatReadHistoryParams = z.infer<typeof ChatReadHistoryParamsSchema>;
-
-export const ChatHistoryMessageSchema = z.object({
-  id: z.string().uuid(),
-  author_type: z.enum(['user', 'agent', 'system']),
-  author_agent_id: z.string().uuid().nullable(),
-  author_agent_name: z.string().nullable().optional(),
-  content: z.string(),
-  created_at: z.string().datetime(),
-  targets: z.array(z.string().uuid()).optional(),
-  target_agent_names: z.array(z.string()).optional(),
-});
-
-export const ChatHistoryThreadSchema = z.object({
-  id: z.string().uuid(),
-  title: z.string().nullable(),
-});
-
-export const ChatReadHistoryResponseSchema = z.object({
-  thread: ChatHistoryThreadSchema,
-  messages: z.array(ChatHistoryMessageSchema),
-  has_more: z.boolean(),
-});
-
-export type ChatReadHistoryResponse = z.infer<typeof ChatReadHistoryResponseSchema>;
-
-// devchain_chat_list_members
-export const ChatListMembersParamsSchema = z
-  .object({
-    thread_id: z.string().uuid(),
-  })
-  .strict();
-
-export type ChatListMembersParams = z.infer<typeof ChatListMembersParamsSchema>;
-
-export const ChatThreadMemberSchema = z.object({
-  agent_id: z.string().uuid(),
-  agent_name: z.string(),
-  online: z.boolean(),
-});
-
-export const ChatListMembersResponseSchema = z.object({
-  thread: ChatHistoryThreadSchema,
-  members: z.array(ChatThreadMemberSchema),
-  total: z.number().int().nonnegative(),
-});
-
-export type ChatListMembersResponse = z.infer<typeof ChatListMembersResponseSchema>;
-
-// devchain_activity_start
-export const ActivityStartParamsSchema = z
-  .object({
-    sessionId: z.string().min(8), // Session ID (full UUID or 8+ char prefix) - agent resolved from session
-    title: z.string().min(1).max(256),
-    threadId: z.string().uuid().optional(),
-    announce: z.boolean().optional().default(true),
-  })
-  .strict();
-
-export type ActivityStartParams = z.infer<typeof ActivityStartParamsSchema>;
-
-export const ActivityStartResponseSchema = z.object({
-  activity_id: z.string().uuid(),
-  thread_id: z.string().uuid(),
-  start_message_id: z.string().uuid().nullable(),
-  started_at: z.string().datetime(),
-  auto_finished_prior: z.boolean().optional().default(false),
-});
-export type ActivityStartResponse = z.infer<typeof ActivityStartResponseSchema>;
-
-// devchain_activity_finish
-export const ActivityFinishParamsSchema = z
-  .object({
-    sessionId: z.string().min(8), // Session ID (full UUID or 8+ char prefix) - agent resolved from session
-    threadId: z.string().uuid().optional(),
-    message: z.string().max(1000).optional(),
-    status: z.enum(['success', 'failed', 'canceled']).optional(),
-  })
-  .strict();
-
-export type ActivityFinishParams = z.infer<typeof ActivityFinishParamsSchema>;
-
-export const ActivityFinishResponseSchema = z.object({
-  activity_id: z.string().uuid(),
-  thread_id: z.string().uuid(),
-  finish_message_id: z.string().uuid().nullable(),
-  started_at: z.string().datetime(),
-  finished_at: z.string().datetime(),
-  status: z.enum(['success', 'failed', 'canceled', 'running']),
-});
-export type ActivityFinishResponse = z.infer<typeof ActivityFinishResponseSchema>;
 
 // devchain_list_sessions
 export interface SessionSummary {

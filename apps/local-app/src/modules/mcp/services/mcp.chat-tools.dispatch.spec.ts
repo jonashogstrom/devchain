@@ -1,11 +1,8 @@
 import { McpService } from './mcp.service';
 import { DEFAULT_FEATURE_FLAGS } from '../../../common/config/feature-flags';
 import { NotFoundError } from '../../../common/errors/error-types';
-import { NotFoundException } from '@nestjs/common';
 import type { StorageService } from '../../storage/interfaces/storage.interface';
 import type { Agent, Project } from '../../storage/models/domain.models';
-import type { ThreadDto } from '../../chat/dtos/chat.dto';
-import type { ChatListMembersResponse } from '../dtos/mcp.dto';
 
 const TEST_SESSION_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 const TEST_PROJECT: Project = {
@@ -30,7 +27,6 @@ const TEST_AGENT: Agent = {
 describe('McpService', () => {
   let service: McpService;
   let storage: jest.Mocked<StorageService>;
-  let chatService: jest.Mocked<unknown>;
   let sessionsService: jest.Mocked<unknown>;
   let terminalGateway: jest.Mocked<unknown>;
   let agentMessageDelivery: jest.Mocked<unknown>;
@@ -78,14 +74,6 @@ describe('McpService', () => {
       getGuestsByIdPrefix: jest.fn().mockResolvedValue([]),
       getEpicsByIdPrefix: jest.fn().mockResolvedValue([]),
     } as unknown as jest.Mocked<StorageService>;
-
-    chatService = {
-      createGroupThread: jest.fn(),
-      getThread: jest.fn(),
-      createMessage: jest.fn(),
-      listMessages: jest.fn(),
-      createDirectThread: jest.fn(),
-    };
 
     sessionsService = {
       getAgentSession: jest.fn(),
@@ -188,7 +176,6 @@ describe('McpService', () => {
 
     service = new McpService(
       storage,
-      chatService as never,
       sessionsService as never,
       terminalGateway as never,
       epicsService as never,
@@ -209,20 +196,6 @@ describe('McpService', () => {
 
   // TODO(P3.2): migrate handler-internal tests to chat-tools handler spec
   describe('chat tools', () => {
-    const makeThread = (overrides: Partial<ThreadDto> = {}): ThreadDto => ({
-      id: '00000000-0000-0000-0000-000000000123',
-      projectId: 'project-1',
-      title: 'Squad Chat',
-      isGroup: true,
-      createdByType: 'user',
-      createdByUserId: null,
-      createdByAgentId: null,
-      members: ['agent-1', 'agent-2'],
-      createdAt: '2024-01-01T00:00:00Z',
-      updatedAt: '2024-01-01T00:00:00Z',
-      ...overrides,
-    });
-
     const makeAgent = (id: string, name: string): Agent => ({
       id,
       projectId: 'project-1',
@@ -233,159 +206,45 @@ describe('McpService', () => {
       updatedAt: '2024-01-01T00:00:00Z',
     });
 
-    it('returns members with online status', async () => {
-      const thread = makeThread();
-      (chatService as { getThread: jest.Mock }).getThread.mockResolvedValue(thread);
-      storage.getAgent.mockImplementation(async (agentId: string) => {
-        if (agentId === 'agent-1') {
-          return makeAgent(agentId, 'Alpha Agent');
-        }
-        if (agentId === 'agent-2') {
-          return makeAgent(agentId, 'Beta Agent');
-        }
-        throw new NotFoundError('Agent', agentId);
-      });
-
-      (sessionsService as { listActiveSessions: jest.Mock }).listActiveSessions.mockResolvedValue([
-        {
-          id: 'session-1',
-          agentId: 'agent-1',
-          projectId: 'project-1',
-          status: 'running',
-          startedAt: '2024-01-01T00:00:00Z',
-          endedAt: null,
-          epicId: null,
-          profileId: 'profile-1',
-          providerId: 'provider-1',
-        },
-      ]);
-
+    it('returns UNKNOWN_TOOL for retired chat_list_members', async () => {
       const response = await service.handleToolCall('devchain_chat_list_members', {
-        thread_id: thread.id,
-      });
-
-      expect(response.success).toBe(true);
-      const data = response.data as ChatListMembersResponse;
-      expect(data.total).toBe(2);
-      expect(data.members).toEqual([
-        expect.objectContaining({ agent_id: 'agent-1', agent_name: 'Alpha Agent', online: true }),
-        expect.objectContaining({ agent_id: 'agent-2', agent_name: 'Beta Agent', online: false }),
-      ]);
-    });
-
-    it('returns NOT_FOUND when thread does not exist', async () => {
-      (chatService as { getThread: jest.Mock }).getThread.mockRejectedValue(
-        new NotFoundException('thread not found'),
-      );
-
-      const response = await service.handleToolCall('devchain_chat_list_members', {
-        thread_id: '00000000-0000-0000-0000-000000000999',
+        thread_id: '00000000-0000-0000-0000-000000000123',
       });
 
       expect(response.success).toBe(false);
-      expect(response.error?.code).toBe('NOT_FOUND');
+      expect(response.error?.code).toBe('UNKNOWN_TOOL');
     });
 
-    it('chat_read_history excludes system messages by default', async () => {
-      const thread = makeThread();
-      (chatService as { getThread: jest.Mock }).getThread.mockResolvedValue(thread);
-      // messages: system + user
-      const items = [
-        {
-          id: 'm1',
-          threadId: thread.id,
-          authorType: 'system',
-          authorAgentId: null,
-          content: 'system',
-          createdAt: '2024-01-01T00:00:00Z',
-        },
-        {
-          id: 'm2',
-          threadId: thread.id,
-          authorType: 'user',
-          authorAgentId: null,
-          content: 'hi',
-          createdAt: '2024-01-01T00:00:01Z',
-        },
-      ];
-      (chatService as { listMessages: jest.Mock }).listMessages.mockResolvedValue({
-        items,
-        total: items.length,
-        limit: 50,
-        offset: 0,
+    it('returns UNKNOWN_TOOL for retired chat_ack', async () => {
+      const response = await service.handleToolCall('devchain_chat_ack', {
+        sessionId: TEST_SESSION_ID,
+        thread_id: '00000000-0000-0000-0000-000000000999',
+        message_id: '00000000-0000-0000-0000-000000000998',
       });
 
+      expect(response.success).toBe(false);
+      expect(response.error?.code).toBe('UNKNOWN_TOOL');
+    });
+
+    it('returns UNKNOWN_TOOL for retired chat_read_history', async () => {
       const response = await service.handleToolCall('devchain_chat_read_history', {
-        thread_id: thread.id,
+        thread_id: '00000000-0000-0000-0000-000000000123',
         limit: 50,
       });
 
-      expect(response.success).toBe(true);
-      const data = response.data as { messages: Array<{ author_type: string }> };
-      expect(data.messages).toHaveLength(1);
-      expect(data.messages[0].author_type).toBe('user');
+      expect(response.success).toBe(false);
+      expect(response.error?.code).toBe('UNKNOWN_TOOL');
     });
 
-    it('send_message creates DM to user when recipient is user', async () => {
-      const project = {
-        id: 'project-1',
-        name: 'Demo',
-        description: 'Demo project',
-        rootPath: '/tmp/demo-project',
-        isPrivate: false,
-        ownerUserId: null,
-        isTemplate: false,
-        createdAt: '2024-01-01T00:00:00Z',
-        updatedAt: '2024-01-01T00:00:00Z',
-      } as Project;
-      storage.findProjectByPath.mockResolvedValue(project);
-      storage.listAgents.mockResolvedValue({
-        items: [
-          {
-            id: 'agent-1',
-            name: 'Alpha',
-            projectId: project.id,
-            profileId: 'profile-1',
-            description: null,
-            createdAt: '2024-01-01T00:00:00Z',
-            updatedAt: '2024-01-01T00:00:00Z',
-          },
-        ],
-        total: 1,
-        limit: 1000,
-        offset: 0,
-      });
-
-      (chatService as { createDirectThread: jest.Mock }).createDirectThread.mockResolvedValue(
-        makeThread({ isGroup: false, members: ['agent-1'] }),
-      );
-      (chatService as { getThread: jest.Mock }).getThread.mockResolvedValue(
-        makeThread({ isGroup: false, members: ['agent-1'] }),
-      );
-      (chatService as { createMessage: jest.Mock }).createMessage.mockResolvedValue({
-        id: 'msg-1',
-        threadId: 't1',
-        authorType: 'agent',
-        authorAgentId: 'agent-1',
-        content: 'hello',
-        createdAt: '2024-01-01T00:00:02Z',
-      });
-
-      // Sender identity now comes from session context (TEST_AGENT)
+    it('send_message rejects retired recipient field', async () => {
       const result = await service.handleToolCall('devchain_send_message', {
         sessionId: TEST_SESSION_ID,
         recipient: 'user',
         message: 'hello',
       });
 
-      expect(result.success).toBe(true);
-      expect(
-        (chatService as { createDirectThread: jest.Mock }).createDirectThread,
-      ).toHaveBeenCalled();
-      expect((chatService as { createMessage: jest.Mock }).createMessage).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ authorType: 'agent' }),
-      );
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
     });
 
     it('send_message enqueues to pool when recipientAgentNames without threadId', async () => {
@@ -491,11 +350,6 @@ describe('McpService', () => {
       expect(data.queued).toEqual([{ name: 'Beta', type: 'agent', status: 'queued' }]);
       expect(data.queuedCount).toBe(1);
       expect(data.estimatedDeliveryMs).toBe(10000);
-      expect(
-        (chatService as { createGroupThread: jest.Mock }).createGroupThread,
-      ).not.toHaveBeenCalled();
-      expect((chatService as { createMessage: jest.Mock }).createMessage).not.toHaveBeenCalled();
-
       expect((agentMessageDelivery as { deliver: jest.Mock }).deliver).toHaveBeenCalledWith(
         ['agent-2'],
         expect.objectContaining({
@@ -1511,7 +1365,7 @@ describe('McpService', () => {
       );
     });
 
-    it('send_message thread mode injects devchain_chat_ack with sessionId identity', async () => {
+    it('send_message rejects retired thread mode at validation', async () => {
       storage.listAgents.mockResolvedValue({
         items: [
           {
@@ -1567,16 +1421,6 @@ describe('McpService', () => {
         },
       ]);
 
-      (chatService as { getThread: jest.Mock }).getThread.mockResolvedValue({
-        id: '00000000-0000-0000-0000-000000000001',
-        title: 't',
-        members: ['agent-1', 'agent-2'],
-      } as unknown as ThreadDto);
-
-      (chatService as { createMessage: jest.Mock }).createMessage.mockResolvedValue({
-        id: '00000000-0000-0000-0000-000000000002',
-      } as unknown as { id: string });
-
       // Override deliver mock to return result for agent-2
       (agentMessageDelivery as { deliver: jest.Mock }).deliver.mockResolvedValue({
         status: 'delivered',
@@ -1590,21 +1434,9 @@ describe('McpService', () => {
         message: 'hello',
       });
 
-      expect(result.success).toBe(true);
-      // Thread mode now uses agentMessageDelivery.deliver with immediate: true
-      expect((agentMessageDelivery as { deliver: jest.Mock }).deliver).toHaveBeenCalledWith(
-        ['agent-2'],
-        expect.objectContaining({
-          kind: 'mcp.thread',
-          body: 'hello',
-          source: 'mcp.chat_thread',
-          senderName: expect.any(String),
-          senderAgentId: 'agent-1',
-          threadId: '00000000-0000-0000-0000-000000000001',
-          messageId: '00000000-0000-0000-0000-000000000002',
-        }),
-        expect.objectContaining({ submitKeys: ['Enter'], immediate: true }),
-      );
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect((agentMessageDelivery as { deliver: jest.Mock }).deliver).not.toHaveBeenCalled();
     });
 
     it('send_message enqueues to pool for offline agent (pool handles delivery at flush)', async () => {
@@ -1732,7 +1564,7 @@ describe('McpService', () => {
 
       const result = await service.handleToolCall('devchain_send_message', {
         sessionId,
-        recipient: 'user',
+        recipientAgentNames: ['Beta'],
         message: 'hello',
       });
 

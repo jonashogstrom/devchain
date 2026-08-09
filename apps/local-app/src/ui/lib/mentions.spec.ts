@@ -1,4 +1,6 @@
-import { parseMentions } from './chat';
+import { parseMentions } from './mentions';
+
+// Test layer: pure unit tests are the cheapest reliable layer for mention token parsing; no React render or browser is needed.
 
 describe('parseMentions', () => {
   const agents = [

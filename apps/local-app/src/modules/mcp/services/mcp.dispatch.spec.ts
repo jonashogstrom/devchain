@@ -27,7 +27,6 @@ const TEST_AGENT: Agent = {
 describe('McpService', () => {
   let service: McpService;
   let storage: jest.Mocked<StorageService>;
-  let chatService: jest.Mocked<unknown>;
   let sessionsService: jest.Mocked<unknown>;
   let messagePoolService: jest.Mocked<unknown>;
   let terminalGateway: jest.Mocked<unknown>;
@@ -74,14 +73,6 @@ describe('McpService', () => {
       getGuestsByIdPrefix: jest.fn().mockResolvedValue([]),
       getEpicsByIdPrefix: jest.fn().mockResolvedValue([]),
     } as unknown as jest.Mocked<StorageService>;
-
-    chatService = {
-      createGroupThread: jest.fn(),
-      getThread: jest.fn(),
-      createMessage: jest.fn(),
-      listMessages: jest.fn(),
-      createDirectThread: jest.fn(),
-    };
 
     sessionsService = {
       getAgentSession: jest.fn(),
@@ -153,7 +144,6 @@ describe('McpService', () => {
 
     service = new McpService(
       storage,
-      chatService as never,
       sessionsService as never,
       messagePoolService as never,
       terminalGateway as never,

@@ -6,10 +6,7 @@ import {
 
 @Injectable()
 export class LegacyRecipientResolverAdapter extends DeliveryRecipientResolver {
-  async resolve(
-    recipients: string[],
-    _options?: { threadId?: string },
-  ): Promise<ResolvedRecipients> {
+  async resolve(recipients: string[]): Promise<ResolvedRecipients> {
     const agentIds = Array.from(new Set(recipients));
     return { agentIds };
   }

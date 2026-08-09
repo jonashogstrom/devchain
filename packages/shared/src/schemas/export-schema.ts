@@ -50,6 +50,19 @@ export const ManifestSchema = z
 /** Inferred TypeScript type for template manifest metadata */
 export type ManifestData = z.infer<typeof ManifestSchema>;
 
+const EventFilterConditionSchema = z.object({
+  field: z.string(),
+  operator: z.enum(['equals', 'contains', 'regex', 'is_null', 'is_not_null']),
+  value: z.string(),
+});
+
+const EventFilterGroupSchema = z.object({
+  combinator: z.enum(['and', 'or']),
+  filters: z.array(EventFilterConditionSchema).nonempty(),
+});
+
+const EventFilterSchema = z.union([EventFilterGroupSchema, EventFilterConditionSchema]).nullable();
+
 /**
  * ExportSchema - The canonical schema for template/project export format.
  * Used by both local-app and template-registry for consistent data interchange.
@@ -190,14 +203,7 @@ export const ExportSchema = z
           description: z.string().nullable().optional(),
           enabled: z.boolean(),
           eventName: z.string(),
-          eventFilter: z
-            .object({
-              field: z.string(),
-              operator: z.enum(['equals', 'contains', 'regex']),
-              value: z.string(),
-            })
-            .nullable()
-            .optional(),
+          eventFilter: EventFilterSchema.optional(),
           actionType: z.string(),
           actionInputs: z.record(
             z.string(),

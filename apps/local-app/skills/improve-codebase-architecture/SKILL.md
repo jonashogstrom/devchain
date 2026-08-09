@@ -43,7 +43,7 @@ Do not proceed to Phase 1 until VOCABULARY.md is read. Use its terms exactly —
 1. **Vocabulary discipline.** All architectural claims use VOCABULARY.md terms exactly. Consistent language is what makes candidates comparable and the report legible. Project-native names stay as-is when citing concrete artifacts (a NestJS service class, a docs section that says "boundary") — the vocabulary governs your claims and never overrides the target project's documented standards (see the Scope section of VOCABULARY.md).
 2. **Diagnose before prescribing.** Phases 0–2 name problems and sketch solutions in one sentence each; interfaces are designed only in Phase 3, after the user picks a candidate.
 3. **Evidence over vibes.** Every candidate cites concrete files. Apply the deletion test before calling a module shallow.
-4. **Decisions get recorded.** Accepted designs become epics; load-bearing rejections are offered as ADRs so future reviews don't re-suggest them.
+4. **Decisions get recorded.** Accepted designs become epics; load-bearing rejections are recorded where the project already keeps decisions, so future reviews don't re-suggest them. Recording is a byproduct — it never gates the work.
 5. **This skill never writes application code.** The end state is a report, recorded decisions, and epics for worker agents.
 
 ## Workflow (linear — run the phases in order)
@@ -54,7 +54,7 @@ Do not proceed to Phase 1 until VOCABULARY.md is read. Use its terms exactly —
 
 1. Read the project's documentation entry point if one exists (`docs/AGENTS.md`, `docs/README.md`, or the repo root README) and its architecture docs.
 2. Read the domain glossary if one exists (`CONTEXT.md`, a glossary section, or equivalent). Use its terms for domain concepts throughout.
-3. Read `docs/adr/` (or equivalent decision records). List the decisions you must not re-litigate.
+3. Read the project's standing decisions wherever they live — the standards doc, architecture doc, or a decision-record folder. List them as context you must not *re-derive*. They are not vetoes: a candidate may contradict one, it just has to say so.
 4. Note any documented architectural guardrails (module-boundary rules, dependency policies, cycle allowlists).
 
 **Exit:** you can name the project's documented conventions, glossary terms (or their absence), and standing decisions.
@@ -79,8 +79,8 @@ Apply the **deletion test** (VOCABULARY.md) to anything you suspect is shallow: 
 
 **Entry:** Phase 1 candidate list exists; REPORT-FORMAT.md read.
 
-1. Write the report in markdown exactly per REPORT-FORMAT.md: one card per candidate (files, problem, solution, wins, before/after diagram, recommendation strength, ADR-conflict callout where applicable) and a closing **Top recommendation** section.
-2. **ADR conflicts:** if a candidate contradicts a standing decision, surface it only when the friction is real enough to warrant revisiting; mark the card clearly. Don't list every theoretical refactor an ADR forbids.
+1. Write the report in markdown exactly per REPORT-FORMAT.md: one card per candidate (files, problem, solution, wins, before/after diagram, recommendation strength, standing-decision callout where applicable) and a closing **Top recommendation** section.
+2. **Standing-decision conflicts:** if a candidate contradicts a recorded decision, surface it only when the friction is real enough to warrant revisiting; mark the card clearly. Don't list every theoretical refactor a past decision forbids — and don't drop a candidate merely because one does. The user decides; a past record never has a veto.
 3. Deliver the report as a chat message. If the user wants it persisted, write it to `docs/architecture-reviews/<YYYY-MM-DD>.md` in the target project.
 4. Do **NOT** propose interfaces yet. End by asking: "Which of these would you like to explore?"
 
@@ -104,9 +104,10 @@ Interview the user relentlessly about the design until you reach shared understa
 **Entry:** the design interview produced agreements or load-bearing rejections.
 
 1. If the project keeps a domain glossary, add or sharpen terms that crystallized during the interview — the moment they crystallize, not batched.
-2. If the user rejects a candidate for a load-bearing reason, offer an ADR **only** when all three hold: hard to reverse, surprising without context, the result of a real trade-off. Frame it as: "Want me to record this as an ADR so future architecture reviews don't re-suggest it?" Skip ephemeral reasons.
+2. If the user rejects a candidate for a load-bearing reason, record it **only** when all three hold: hard to reverse, surprising without context, the result of a real trade-off. Write it where that project already keeps decisions — the topic doc that owns the rule, its progress log, or a backlog entry (see VOCABULARY.md Scope: follow the project's own conventions; don't introduce a decision-record format it doesn't use). One or two sentences. Skip ephemeral reasons.
+3. Never ask the user to review, approve, or sign a decision record, and never make one a precondition for the epics in Phase 5. The user's decision in the interview *is* the approval; the record just remembers it.
 
-**Exit:** glossary/ADR updates written or explicitly declined.
+**Exit:** glossary and decision notes written or explicitly declined.
 
 ### Phase 5 — Decompose into epics
 
@@ -125,7 +126,7 @@ Interview the user relentlessly about the design until you reach shared understa
 - [ ] Every candidate has concrete file references, a dependency category, and passed (or explicitly failed) the deletion test.
 - [ ] Report follows REPORT-FORMAT.md, ends with a top recommendation, and proposes no interfaces.
 - [ ] The design interview asked one question at a time, each with a recommended answer.
-- [ ] Load-bearing rejections were offered as ADRs; accepted designs are traceable to epics.
+- [ ] Load-bearing rejections were recorded in the project's own decision home; accepted designs are traceable to epics.
 - [ ] No application code was written by this workflow.
 
 ## Attribution

@@ -262,9 +262,9 @@ describe('SessionRestorePipeline', () => {
 
       await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow('foreign ack');
 
-      expect(mocks.terminalIO.destroySession).toHaveBeenCalled();
+      expect(mocks.terminalIO.destroyExpectedSession).toHaveBeenCalled();
       expect(mocks.codexPluginProfiles.cleanupPrepared).toHaveBeenCalled();
-      expect(mocks.terminalIO.destroySession.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(mocks.terminalIO.destroyExpectedSession.mock.invocationCallOrder[0]).toBeLessThan(
         mocks.codexPluginProfiles.cleanupPrepared.mock.invocationCallOrder[0],
       );
     });
@@ -382,7 +382,9 @@ describe('SessionRestorePipeline', () => {
       expect(mocks.terminalSessionRegistry.dispose).toHaveBeenCalledWith(sessionId);
 
       // tmux destroyed
-      expect(mocks.terminalIO.destroySession).toHaveBeenCalled();
+      expect(mocks.terminalIO.destroyExpectedSession).toHaveBeenCalledWith(expect.any(Object), {
+        onUnknownError: 'retire',
+      });
 
       // Status flipped back
       const statusFlipBacks = runCalls.filter(

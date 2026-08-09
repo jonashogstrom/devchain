@@ -2,6 +2,8 @@
  * ExportSchema Validation Tests
  *
  * Tests for validating the export schema structure including profiles, presets, and agent configs.
+ * Test layer: pure unit. Schema validation needs no dependency injection or I/O, so this is the
+ * cheapest reliable layer that proves accepted and rejected export payload shapes.
  * Run with: pnpm test (in packages/shared directory)
  */
 
@@ -9,6 +11,109 @@ import { ExportSchema } from './export-schema';
 import { EnvVarsSchema } from './env-vars';
 
 describe('ExportSchema', () => {
+  describe('subscribers.eventFilter', () => {
+    const baseSubscriber = {
+      name: 'Notify subscribers',
+      enabled: true,
+      eventName: 'epic.created',
+      actionType: 'send_message',
+      actionInputs: {},
+      delayMs: 0,
+      cooldownMs: 0,
+      retryOnError: false,
+    };
+    const baseTemplate = {
+      version: 1,
+      prompts: [],
+      profiles: [],
+      agents: [],
+      statuses: [],
+    };
+
+    it.each([
+      null,
+      { field: 'agentName', operator: 'equals', value: 'Coder' },
+      {
+        combinator: 'and',
+        filters: [
+          { field: 'agentName', operator: 'equals', value: 'Coder' },
+          { field: 'message', operator: 'contains', value: '' },
+        ],
+      },
+      {
+        combinator: 'or',
+        filters: [{ field: 'status', operator: 'regex', value: '^Done$' }],
+      },
+    ])('accepts a compatible filter shape: %j', (eventFilter) => {
+      const result = ExportSchema.safeParse({
+        ...baseTemplate,
+        subscribers: [{ ...baseSubscriber, eventFilter }],
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it.each([
+      { combinator: 'and', filters: [] },
+      { combinator: 'xor', filters: [{ field: 'agentName', operator: 'equals', value: 'Coder' }] },
+      { combinator: 'or', filters: [{ field: 'agentName', operator: 'invalid', value: 'Coder' }] },
+      {
+        combinator: 'and',
+        filters: [
+          {
+            combinator: 'or',
+            filters: [{ field: 'agentName', operator: 'equals', value: 'Coder' }],
+          },
+        ],
+      },
+    ])('rejects an invalid filter shape: %j', (eventFilter) => {
+      const result = ExportSchema.safeParse({
+        ...baseTemplate,
+        subscribers: [{ ...baseSubscriber, eventFilter }],
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it.each([
+      { operator: 'equals', value: 'Coder' },
+      { operator: 'contains', value: 'Coder' },
+      { operator: 'regex', value: '^Coder$' },
+      { operator: 'is_null', value: '' },
+      { operator: 'is_not_null', value: '' },
+    ] as const)('preserves the $operator operator and string value', ({ operator, value }) => {
+      const result = ExportSchema.parse({
+        ...baseTemplate,
+        subscribers: [
+          {
+            ...baseSubscriber,
+            eventFilter: { field: 'parentId', operator, value },
+          },
+        ],
+      });
+
+      expect(result.subscribers[0].eventFilter).toEqual({
+        field: 'parentId',
+        operator,
+        value,
+      });
+    });
+
+    it('requires a string value for null-aware operators', () => {
+      const result = ExportSchema.safeParse({
+        ...baseTemplate,
+        subscribers: [
+          {
+            ...baseSubscriber,
+            eventFilter: { field: 'parentId', operator: 'is_null', value: null },
+          },
+        ],
+      });
+
+      expect(result.success).toBe(false);
+    });
+  });
+
   describe('profiles.familySlug', () => {
     const baseProfile = {
       name: 'Test Profile',

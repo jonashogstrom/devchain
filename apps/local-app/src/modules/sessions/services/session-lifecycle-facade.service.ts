@@ -6,12 +6,12 @@ import type { SessionDetailDto, SessionDto, SessionHistoryResponseDto } from '..
 
 /**
  * Narrow facade over the session lifecycle primitives needed by mobile chat:
- * explicit launch, atomic restart (terminate + launch), restore, and terminate.
+ * explicit launch, sequential terminate-then-launch restart, restore, and terminate.
  *
  * Exists so the cloud tunnel can drive lifecycle without importing the broad
  * `SessionsModule` (heavy session/terminal graph) — the same narrow-facade
  * pattern the seam uses for reads/delivery. Per-agent serialization is preserved
- * by the underlying launch/restore pipelines' internal `withAgentLock`.
+ * by each underlying lifecycle operation's internal `withAgentLock`.
  */
 @Injectable()
 export class SessionLifecycleFacade {
@@ -28,17 +28,19 @@ export class SessionLifecycleFacade {
   }
 
   /**
-   * Atomic restart: terminate the agent's current session (best-effort, mirrors
-   * the web `restartAgent` semantics) then launch a fresh one. The launch
-   * pipeline serializes via its internal per-agent lock — no outer lock here
-   * (which would deadlock the non-reentrant lock).
+   * Restart acquires the per-agent lock twice in sequence: termination releases
+   * its internal acquisition before launch takes its own. There is deliberately
+   * no outer/composite lock because the coordinator is non-reentrant.
    */
   async restart(agentId: string, projectId: string): Promise<SessionDetailDto> {
     const activeSessions = await this.sessionsService.listActiveSessions(projectId);
     const existing = activeSessions.find((s) => s.agentId === agentId);
     if (existing) {
       try {
-        await this.sessionsService.terminateSession(existing.id);
+        await this.sessionsService.terminateSession(existing.id, {
+          source: 'mobile-rpc',
+          reason: 'restart',
+        });
       } catch (error) {
         // Non-fatal: launch below will surface a hard failure if the stale
         // session blocks it; we don't want a terminate hiccup to abort restart.
@@ -62,7 +64,10 @@ export class SessionLifecycleFacade {
 
   /** Terminate a session. Idempotent: missing/already-stopped is treated as success. */
   async terminate(sessionId: string): Promise<void> {
-    return this.sessionsService.terminateSession(sessionId);
+    return this.sessionsService.terminateSession(sessionId, {
+      source: 'mobile-rpc',
+      reason: 'user-requested',
+    });
   }
 
   /**

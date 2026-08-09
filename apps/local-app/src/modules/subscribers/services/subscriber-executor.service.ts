@@ -3,7 +3,13 @@ import { ModuleRef } from '@nestjs/core';
 import { createLogger } from '../../../common/logging/logger';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { STORAGE_SERVICE, type StorageService } from '../../storage/interfaces/storage.interface';
-import type { Subscriber, EventFilter, ActionInput } from '../../storage/models/domain.models';
+import type {
+  Subscriber,
+  EventFilter,
+  EventFilterCondition,
+  EventFilterGroup,
+  ActionInput,
+} from '../../storage/models/domain.models';
 import type { TerminalWatcherTriggeredEventPayload } from '../../events/catalog/terminal.watcher.triggered';
 import { TerminalIOService } from '../../terminal/services/terminal-io/terminal-io.service';
 import { SessionsService } from '../../sessions/services/sessions.service';
@@ -540,8 +546,70 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
    * @returns true if the payload matches the filter
    */
   matchesFilter(filter: EventFilter, payload: SubscribableEventPayload): boolean {
+    const runtimeFilter: unknown = filter;
+
+    if (this.isEventFilterGroup(runtimeFilter)) {
+      const matches = (condition: EventFilterCondition) =>
+        this.matchesFilterCondition(condition, payload);
+      return runtimeFilter.combinator === 'and'
+        ? runtimeFilter.filters.every(matches)
+        : runtimeFilter.filters.some(matches);
+    }
+
+    if (this.isEventFilterCondition(runtimeFilter)) {
+      return this.matchesFilterCondition(runtimeFilter, payload);
+    }
+
+    this.logger.warn({ filter: runtimeFilter }, 'Malformed event filter; failing closed');
+    return false;
+  }
+
+  private isEventFilterCondition(filter: unknown): filter is EventFilterCondition {
+    if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) {
+      return false;
+    }
+
+    const candidate = filter as Record<string, unknown>;
+    return (
+      typeof candidate.field === 'string' &&
+      candidate.field.length > 0 &&
+      (candidate.operator === 'equals' ||
+        candidate.operator === 'contains' ||
+        candidate.operator === 'regex' ||
+        candidate.operator === 'is_null' ||
+        candidate.operator === 'is_not_null') &&
+      typeof candidate.value === 'string'
+    );
+  }
+
+  private isEventFilterGroup(filter: unknown): filter is EventFilterGroup {
+    if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) {
+      return false;
+    }
+
+    const candidate = filter as Record<string, unknown>;
+    return (
+      (candidate.combinator === 'and' || candidate.combinator === 'or') &&
+      Array.isArray(candidate.filters) &&
+      candidate.filters.length > 0 &&
+      candidate.filters.every((condition) => this.isEventFilterCondition(condition))
+    );
+  }
+
+  private matchesFilterCondition(
+    filter: EventFilterCondition,
+    payload: SubscribableEventPayload,
+  ): boolean {
     // Get the field value from the payload
     const fieldValue = this.getPayloadField(payload, filter.field);
+
+    if (filter.operator === 'is_null') {
+      return fieldValue === null;
+    }
+
+    if (filter.operator === 'is_not_null') {
+      return fieldValue !== undefined && fieldValue !== null;
+    }
 
     if (fieldValue === undefined || fieldValue === null) {
       return false;

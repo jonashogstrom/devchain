@@ -3,7 +3,6 @@ import { MainAppModule } from '../app.main.module';
 import { NormalAppModule } from '../app.normal.module';
 import { TerminalModule } from '../modules/terminal/terminal.module';
 import { SessionsModule } from '../modules/sessions/sessions.module';
-import { ChatModule } from '../modules/chat/chat.module';
 import { McpFullModule } from '../modules/mcp/mcp-full.module';
 import { EpicsModule } from '../modules/epics/epics.module';
 import { OrchestratorStorageModule } from '../modules/orchestrator/orchestrator-storage/orchestrator-storage.module';
@@ -23,10 +22,15 @@ describe('MainAppModule', () => {
   it('loads normal modules that remain backend-enabled in main mode', () => {
     expect(mainImports).toContain(TerminalModule);
     expect(mainImports).toContain(SessionsModule);
-    expect(mainImports).toContain(ChatModule);
     expect(mainImports).toContain(EpicsModule);
     expect(mainImports).toContain(McpFullModule);
     expect(mainImports).toContain(CloudTunnelModule);
+    expect(mainImports.map((module) => (module as { name?: string }).name)).not.toContain(
+      'ChatModule',
+    );
+    expect(normalImports.map((module) => (module as { name?: string }).name)).not.toContain(
+      'ChatModule',
+    );
   });
 
   it('loads orchestrator backend modules', () => {

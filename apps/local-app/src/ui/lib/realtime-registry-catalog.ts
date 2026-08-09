@@ -10,8 +10,7 @@
  * projectBroadcast path) that the web client already reacts to. It is **NOT** an
  * exhaustive inventory of every websocket frame the gateways emit — terminal/MCP/
  * session frames were never tracked here and stay out (e.g. `terminal.gateway.ts`
- * around L550-552). `chat/{id}` is intentionally absent: `chat.message.created` /
- * `.read` are registry entries (`broadcast-registry.ts`) and are derived from there.
+ * around L550-552).
  *
  * Each entry declares: topic pattern, type, kind, and the hook/component that owns it.
  */

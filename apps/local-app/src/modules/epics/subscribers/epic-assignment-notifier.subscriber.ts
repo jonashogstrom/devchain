@@ -9,6 +9,10 @@ import { TeamsService } from '../../teams/services/teams.service';
 import { renderTemplate } from '../../../common/template/handlebars-renderer';
 import type { EpicUpdatedEventPayload } from '../../events/catalog/epic.updated';
 import type { EpicCreatedEventPayload } from '../../events/catalog/epic.created';
+import type {
+  DeliveryOutcome,
+  RecipientResult,
+} from '../../agent-message-delivery/dtos/delivery.types';
 
 const TEMPLATE_SETTING_KEY = 'events.epicAssigned.template';
 const DEFAULT_TEMPLATE =
@@ -24,6 +28,26 @@ const LEGACY_VARIABLES = [
   'team_names',
   'is_team_lead',
 ];
+
+const SAFE_DELIVERY_ERROR_CODES = [
+  'SESSION_NOT_RUNNING',
+  'SESSION_NOT_FOUND',
+  'SESSION_LAUNCH_FAILED',
+  'DELIVERY_FAILED',
+] as const;
+
+type SafeDeliveryErrorCode = (typeof SAFE_DELIVERY_ERROR_CODES)[number];
+
+type DeliveryHandlerDetail = {
+  readonly poolStatus: DeliveryOutcome['status'];
+  readonly recipientCount?: number;
+  readonly failedCount?: number;
+  readonly failedAgentIds?: readonly string[];
+  readonly errorCode?: SafeDeliveryErrorCode;
+};
+
+const SAFE_DELIVERY_ERROR_CODE_SET = new Set<string>(SAFE_DELIVERY_ERROR_CODES);
+const SESSION_LAUNCH_ERROR_PATTERN = /^Unable to ensure active session for agent \S+$/;
 
 @Injectable()
 export class EpicAssignmentNotifierSubscriber {
@@ -95,30 +119,19 @@ export class EpicAssignmentNotifierSubscriber {
         { submitKeys: ['Enter'] },
       );
 
-      this.logger.debug(
-        { agentId: payload.agentId, recipientIds, status: result.status },
-        'EpicAssignmentNotifier: message delivered via AMD (epic.created)',
-      );
-
-      if (eventId) {
-        await this.eventLogService.recordHandledOk({
-          eventId,
-          handler,
-          detail: {
-            poolStatus: result.status,
-          },
-          startedAt,
-          endedAt: new Date().toISOString(),
-        });
-      }
-
-      this.logger.log(
-        { eventId, recipientIds, poolStatus: result.status },
-        'Notified agent about epic assignment (epic.created)',
-      );
+      await this.recordDeliveryOutcome({
+        eventId,
+        handler,
+        startedAt,
+        result,
+        logContext: { agentId: payload.agentId, recipientIds },
+        successMessage: 'Notified agent about epic assignment (epic.created)',
+        failureMessage: 'Failed to deliver epic assignment notification (epic.created)',
+      });
     } catch (error) {
+      const errorCode = this.classifyErrorCode(error);
       this.logger.error(
-        { error, payload },
+        { errorCode, eventId, epicId: payload.epicId },
         'Failed to notify agent about epic assignment (epic.created)',
       );
 
@@ -126,10 +139,7 @@ export class EpicAssignmentNotifierSubscriber {
         await this.eventLogService.recordHandledFail({
           eventId,
           handler,
-          detail:
-            error instanceof Error
-              ? { message: error.message }
-              : { message: 'Unknown error', value: String(error) },
+          detail: { errorCode },
           startedAt,
           endedAt: new Date().toISOString(),
         });
@@ -202,43 +212,135 @@ export class EpicAssignmentNotifierSubscriber {
         { submitKeys: ['Enter'] },
       );
 
-      this.logger.debug(
-        { agentId: newAgentId, recipientIds, status: result.status },
-        'EpicAssignmentNotifier: message delivered via AMD',
-      );
-
-      if (eventId) {
-        await this.eventLogService.recordHandledOk({
-          eventId,
-          handler,
-          detail: {
-            poolStatus: result.status,
-          },
-          startedAt,
-          endedAt: new Date().toISOString(),
-        });
-      }
-
-      this.logger.log(
-        { eventId, recipientIds, poolStatus: result.status },
-        'Notified agent about epic assignment',
-      );
+      await this.recordDeliveryOutcome({
+        eventId,
+        handler,
+        startedAt,
+        result,
+        logContext: { agentId: newAgentId, recipientIds },
+        successMessage: 'Notified agent about epic assignment',
+        failureMessage: 'Failed to deliver epic assignment notification',
+      });
     } catch (error) {
-      this.logger.error({ error, payload }, 'Failed to notify agent about epic assignment');
+      const errorCode = this.classifyErrorCode(error);
+      this.logger.error(
+        { errorCode, eventId, epicId: payload.epicId },
+        'Failed to notify agent about epic assignment',
+      );
 
       if (eventId) {
         await this.eventLogService.recordHandledFail({
           eventId,
           handler,
-          detail:
-            error instanceof Error
-              ? { message: error.message }
-              : { message: 'Unknown error', value: String(error) },
+          detail: { errorCode },
           startedAt,
           endedAt: new Date().toISOString(),
         });
       }
     }
+  }
+
+  private async recordDeliveryOutcome(params: {
+    eventId: string | undefined;
+    handler: string;
+    startedAt: string;
+    result: DeliveryOutcome;
+    logContext: Record<string, unknown>;
+    successMessage: string;
+    failureMessage: string;
+  }): Promise<void> {
+    const detail = this.buildDeliveryDetail(params.result);
+    const endedAt = new Date().toISOString();
+    const failed = params.result.status === 'failed' || params.result.status === 'partial';
+
+    if (params.eventId) {
+      const recordParams = {
+        eventId: params.eventId,
+        handler: params.handler,
+        detail,
+        startedAt: params.startedAt,
+        endedAt,
+      };
+      if (failed) {
+        await this.eventLogService.recordHandledFail(recordParams);
+      } else {
+        await this.eventLogService.recordHandledOk(recordParams);
+      }
+    }
+
+    if (failed) {
+      this.logger.error({ ...params.logContext, ...detail }, params.failureMessage);
+      return;
+    }
+
+    this.logger.log(
+      { ...params.logContext, poolStatus: params.result.status },
+      params.successMessage,
+    );
+  }
+
+  private buildDeliveryDetail(result: DeliveryOutcome): DeliveryHandlerDetail {
+    if (result.status !== 'failed' && result.status !== 'partial') {
+      return { poolStatus: result.status };
+    }
+
+    const failedResults = result.results.filter((recipient) => recipient.status === 'failed');
+    return {
+      poolStatus: result.status,
+      recipientCount: result.results.length,
+      failedCount: failedResults.length,
+      failedAgentIds: failedResults.map((recipient) => recipient.agentId),
+      errorCode: this.classifyAggregateErrorCode(failedResults),
+    };
+  }
+
+  private classifyAggregateErrorCode(results: readonly RecipientResult[]): SafeDeliveryErrorCode {
+    const codes = new Set(results.map((recipient) => this.classifyErrorCode(recipient.error)));
+    if (codes.size === 1) {
+      return codes.values().next().value as SafeDeliveryErrorCode;
+    }
+    return 'DELIVERY_FAILED';
+  }
+
+  private classifyErrorCode(error: unknown): SafeDeliveryErrorCode {
+    const message = this.errorMessage(error);
+    if (message && SAFE_DELIVERY_ERROR_CODE_SET.has(message)) {
+      return message as SafeDeliveryErrorCode;
+    }
+
+    if (message && SESSION_LAUNCH_ERROR_PATTERN.test(message)) {
+      return 'SESSION_LAUNCH_FAILED';
+    }
+
+    const code = this.errorCode(error);
+    if (code && SAFE_DELIVERY_ERROR_CODE_SET.has(code)) {
+      return code as SafeDeliveryErrorCode;
+    }
+
+    return 'DELIVERY_FAILED';
+  }
+
+  private errorMessage(error: unknown): string | undefined {
+    if (typeof error === 'string') {
+      return error;
+    }
+    if (error instanceof Error) {
+      return error.message;
+    }
+    if (error && typeof error === 'object' && 'message' in error) {
+      const message = (error as { message?: unknown }).message;
+      return typeof message === 'string' ? message : undefined;
+    }
+    return undefined;
+  }
+
+  private errorCode(error: unknown): string | undefined {
+    if (!error || typeof error !== 'object' || !('code' in error)) {
+      return undefined;
+    }
+
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' ? code : undefined;
   }
 
   private resolveTemplate(): string {

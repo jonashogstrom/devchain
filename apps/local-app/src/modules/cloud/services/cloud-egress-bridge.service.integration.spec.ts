@@ -266,7 +266,10 @@ describe('CloudEgressBridgeService', () => {
         },
       },
       { method: 'onSessionCrashed' as const, payload: { sessionId: 's1', sessionName: 'n' } },
-      { method: 'onSessionStopped' as const, payload: { sessionId: 's1' } },
+      {
+        method: 'onSessionStopped' as const,
+        payload: { sessionId: 's1', source: 'web-api', reason: 'user-requested' },
+      },
     ];
 
     for (let i = 0; i < events.length; i++) {

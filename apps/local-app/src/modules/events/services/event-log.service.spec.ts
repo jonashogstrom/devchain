@@ -102,6 +102,30 @@ describe('EventLogService', () => {
     );
   });
 
+  it('lists historical events whose names are no longer in the runtime catalog', async () => {
+    sqlite
+      .prepare(
+        `INSERT INTO events (id, name, payload_json, request_id, published_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-chat-event',
+        'chat.message.read',
+        JSON.stringify({ threadId: 'thread-1', messageId: 'message-1' }),
+        null,
+        '2026-01-01T00:00:00.000Z',
+      );
+
+    const result = await service.listEvents({ name: 'chat.message.read' });
+
+    expect(result.total).toBe(1);
+    expect(result.items[0]).toMatchObject({
+      id: 'legacy-chat-event',
+      name: 'chat.message.read',
+      payload: { threadId: 'thread-1', messageId: 'message-1' },
+    });
+  });
+
   it('filters by status and handler', async () => {
     const { id: eventId } = await service.recordPublished({
       name: 'epic.assigned',

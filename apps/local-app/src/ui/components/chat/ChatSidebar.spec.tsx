@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { ChatSidebar } from './ChatSidebar';
@@ -109,30 +109,23 @@ function renderSidebar(overrides: Partial<FlatChatSidebarProps> = {}) {
     worktreeAgentGroups: [],
     worktreeAgentGroupsLoading: false,
     agentPresence: {},
-    userThreads: [],
-    agentThreads: [],
     presenceReady: true,
     offlineAgents: [agent],
     agentsWithSessions: [],
     agentsLoading: false,
     agentsError: false,
-    userThreadsLoading: false,
-    agentThreadsLoading: false,
     launchingAgentIds: {},
     restartingAgentId: null,
     startingAll: false,
     terminatingAll: false,
-    isLaunchingChat: false,
-    selectedThreadId: null,
+    selectedAgentId: null,
     selectedWorktreeAgent: null,
     hasSelectedProject: true,
-    onSelectThread: jest.fn(),
-    onLaunchChat: jest.fn(),
+    onSelectAgent: jest.fn(),
     onLaunchWorktreeAgentChat: jest.fn(),
     onLaunchWorktreeSession: jest.fn(async () => {}),
     onRestartWorktreeSession: jest.fn(async () => {}),
     onTerminateWorktreeSession: jest.fn(async () => {}),
-    onCreateGroup: jest.fn(),
     onStartAllAgents: jest.fn(),
     onTerminateAllConfirm: jest.fn(),
     onLaunchSession: jest.fn(async () => ({ id: 'session-1' })),
@@ -151,7 +144,6 @@ function renderSidebar(overrides: Partial<FlatChatSidebarProps> = {}) {
     updatingConfigAgentIds: {},
     onSwitchWorktreeConfig: jest.fn(),
     updatingWorktreeConfigKey: null,
-    createGroupPending: false,
   };
 
   return render(
@@ -190,7 +182,7 @@ describe('ChatSidebar header controls', () => {
     const mainRegion = wrapper.querySelector('#chat-main-agents');
     const overlay = screen.getByTestId('agent-event-bus-svg');
     const lane = screen.getByLabelText('Agent event bus controls');
-    const mainRow = screen.getByRole('listitem', { name: /Chat with Alpha/i });
+    const mainRow = screen.getByRole('listitem', { name: /Open terminal for Alpha/i });
 
     expect(wrapper).toHaveClass('relative', 'px-4', 'py-4');
     expect(mainRegion?.parentElement).toBe(wrapper);
@@ -449,6 +441,67 @@ describe('ChatSidebar agent grouping toggle', () => {
     await waitFor(() => {
       expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
     });
+  });
+});
+
+describe('ChatSidebar canonical agent rendering', () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ items: [], total: 0, limit: 50, offset: 0 }),
+    })) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('renders Project Owner first, then name and stable ID order, with agent identity selected', async () => {
+    const onSelectAgent = jest.fn();
+    const unorderedAgents: AgentOrGuest[] = [
+      { id: 'agent-z', name: 'Alpha', type: 'agent', isProjectOwner: false },
+      { id: 'agent-owner', name: 'Zulu', type: 'agent', isProjectOwner: true },
+      { id: 'agent-a', name: 'Alpha', type: 'agent', isProjectOwner: false },
+    ];
+
+    renderSidebar({
+      agents: unorderedAgents,
+      offlineAgents: unorderedAgents,
+      selectedAgentId: 'agent-a',
+      onSelectAgent,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
+    });
+    const rows = within(screen.getByRole('list', { name: 'Agents' })).getAllByRole('listitem');
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual([
+      'Open terminal for Zulu (offline)',
+      'Open terminal for Alpha (offline)',
+      'Open terminal for Alpha (offline)',
+    ]);
+    expect(rows.map((row) => row.dataset.agentEventBusAgentId)).toEqual([
+      'agent-owner',
+      'agent-a',
+      'agent-z',
+    ]);
+    expect(rows[1]).toHaveAttribute('aria-current', 'true');
+
+    fireEvent.click(rows[2]);
+    expect(onSelectAgent).toHaveBeenCalledWith('agent-z');
+  });
+
+  it('keeps the existing agents load-error state visible', async () => {
+    renderSidebar({
+      agents: [],
+      offlineAgents: [],
+      agentsError: true,
+      agentsLoading: false,
+    });
+
+    expect(await screen.findByText('Failed to load agents. Please try again.')).toBeInTheDocument();
   });
 });
 
@@ -759,6 +812,34 @@ describe('ChatSidebar team lead-as-header rendering', () => {
     expect(screen.getByRole('button', { name: /Legacy Team/i })).toHaveAttribute('aria-expanded');
   });
 
+  it('preserves the team bucket while sorting its agent collection canonically', async () => {
+    const teamAgents: AgentOrGuest[] = [
+      { id: 'agent-z', name: 'Alpha', type: 'agent', isProjectOwner: false },
+      { id: 'agent-owner', name: 'Zulu', type: 'agent', isProjectOwner: true },
+      { id: 'agent-a', name: 'Alpha', type: 'agent', isProjectOwner: false },
+    ];
+    global.fetch = mockTeamFetch({
+      teamLeadAgentId: null,
+      members: [
+        { agentId: 'agent-z', agentName: 'Alpha' },
+        { agentId: 'agent-owner', agentName: 'Zulu' },
+        { agentId: 'agent-a', agentName: 'Alpha' },
+      ],
+    }) as unknown as typeof fetch;
+
+    renderSidebar({ agents: teamAgents, offlineAgents: teamAgents });
+    fireEvent.click(await screen.findByRole('tab', { name: 'Teams' }));
+
+    const rows = within(
+      await screen.findByRole('list', { name: 'Alpha Team agents' }),
+    ).getAllByRole('listitem');
+    expect(rows.map((row) => row.dataset.agentEventBusAgentId)).toEqual([
+      'agent-owner',
+      'agent-a',
+      'agent-z',
+    ]);
+  });
+
   it('no-lead header has no nested buttons', async () => {
     global.fetch = mockTeamFetch({
       teamLeadAgentId: null,
@@ -824,7 +905,7 @@ describe('ChatSidebar team lead-as-header rendering', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText(/Chat with Member Agent/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Open terminal for Member Agent/i)).toBeInTheDocument();
     });
   });
 
@@ -848,7 +929,7 @@ describe('ChatSidebar team lead-as-header rendering', () => {
       'aria-expanded',
       'false',
     );
-    expect(screen.queryByLabelText(/Chat with Member Agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Open terminal for Member Agent/i)).not.toBeInTheDocument();
   });
 
   it('onEditTeam payload includes allowTeamLeadCreateAgents=true from team detail', async () => {
@@ -985,7 +1066,9 @@ describe('ChatSidebar team lead-as-header rendering', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getAllByRole('listitem', { name: /Chat with Member Agent/i })).toHaveLength(2);
+      expect(
+        screen.getAllByRole('listitem', { name: /Open terminal for Member Agent/i }),
+      ).toHaveLength(2);
     });
 
     const anchors = Array.from(
@@ -1058,12 +1141,12 @@ describe('ChatSidebar guest and worktree compatibility', () => {
   });
 
   it('keeps guest rows non-actionable with theme-safe guest styling', async () => {
-    const onLaunchChat = jest.fn();
+    const onSelectAgent = jest.fn();
     renderSidebar({
       agents: [],
       offlineAgents: [],
       guests: [guestAgent],
-      onLaunchChat,
+      onSelectAgent,
     });
 
     await waitFor(() => {
@@ -1076,7 +1159,7 @@ describe('ChatSidebar guest and worktree compatibility', () => {
     expect(guestRow).not.toHaveAttribute('data-agent-event-bus-agent-id');
 
     fireEvent.click(guestRow);
-    expect(onLaunchChat).not.toHaveBeenCalled();
+    expect(onSelectAgent).not.toHaveBeenCalled();
 
     const badge = screen.getByLabelText('Guest type');
     expect(badge).toHaveTextContent('Guest');

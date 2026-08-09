@@ -110,10 +110,164 @@ describe('EpicAssignmentNotifierSubscriber', () => {
       expect.objectContaining({
         handler: 'EpicAssignmentNotifier',
         eventId: 'event-1',
-        detail: { message: 'delivery failure' },
+        detail: { errorCode: 'DELIVERY_FAILED' },
       }),
     );
     expect(eventLogService.recordHandledOk).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', 'SESSION_NOT_RUNNING'],
+    ['partial', 'SESSION_LAUNCH_FAILED'],
+  ] as const)('records returned %s delivery as handler failure', async (status, errorCode) => {
+    deliverMock.mockResolvedValue({
+      status,
+      results: [
+        {
+          agentId: 'agent-1',
+          status: 'failed',
+          error:
+            errorCode === 'SESSION_LAUNCH_FAILED'
+              ? 'Unable to ensure active session for agent agent-1'
+              : errorCode,
+        },
+        ...(status === 'partial' ? [{ agentId: 'agent-2', status: 'delivered' as const }] : []),
+      ],
+    });
+    const logSpy = jest.spyOn(
+      (subscriber as unknown as { logger: { log: (...args: unknown[]) => void } }).logger,
+      'log',
+    );
+
+    await subscriber.handleEpicUpdated(basePayload);
+
+    expect(eventLogService.recordHandledFail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: 'event-1',
+        handler: 'EpicAssignmentNotifier',
+        detail: {
+          poolStatus: status,
+          recipientCount: status === 'partial' ? 2 : 1,
+          failedCount: 1,
+          failedAgentIds: ['agent-1'],
+          errorCode,
+        },
+      }),
+    );
+    expect(eventLogService.recordHandledOk).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it.each(['queued', 'delivered', 'unconfirmed'] as const)(
+    'records %s delivery as handler success',
+    async (status) => {
+      deliverMock.mockResolvedValue({
+        status,
+        results: [{ agentId: 'agent-1', status }],
+      });
+
+      await subscriber.handleEpicUpdated(basePayload);
+
+      expect(eventLogService.recordHandledOk).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventId: 'event-1',
+          handler: 'EpicAssignmentNotifier',
+          detail: { poolStatus: status },
+        }),
+      );
+      expect(eventLogService.recordHandledFail).not.toHaveBeenCalled();
+    },
+  );
+
+  it('classifies returned failures from epic.created through the same outcome helper', async () => {
+    deliverMock.mockResolvedValue({
+      status: 'failed',
+      results: [{ agentId: 'agent-1', status: 'failed', error: 'SESSION_NOT_FOUND' }],
+    });
+
+    await subscriber.handleEpicCreated({
+      epicId: 'epic-1',
+      projectId: 'project-1',
+      title: 'New Epic',
+      agentId: 'agent-1',
+      assignmentRecipientIds: ['agent-1'],
+      actor: { type: 'agent' as const, id: 'agent-2' },
+      projectName: 'Demo Project',
+      agentName: 'Helper Agent',
+    } as never);
+
+    expect(eventLogService.recordHandledFail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: 'event-1',
+        handler: 'EpicAssignmentNotifier',
+        detail: {
+          poolStatus: 'failed',
+          recipientCount: 1,
+          failedCount: 1,
+          failedAgentIds: ['agent-1'],
+          errorCode: 'SESSION_NOT_FOUND',
+        },
+      }),
+    );
+    expect(eventLogService.recordHandledOk).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['SESSION_NOT_RUNNING', 'SESSION_NOT_RUNNING'],
+    ['SESSION_NOT_FOUND', 'SESSION_NOT_FOUND'],
+    ['SESSION_LAUNCH_FAILED', 'SESSION_LAUNCH_FAILED'],
+    ['DELIVERY_FAILED', 'DELIVERY_FAILED'],
+    ['Unable to ensure active session for agent agent-1', 'SESSION_LAUNCH_FAILED'],
+    ['SOME_PROVIDER_ERROR', 'DELIVERY_FAILED'],
+    ['ENOENT', 'DELIVERY_FAILED'],
+    ['/var/lib/provider/runtime.sock', 'DELIVERY_FAILED'],
+    ['the rendered assignment message', 'DELIVERY_FAILED'],
+  ] as const)('persists only the safe error code for %s', async (error, expectedCode) => {
+    deliverMock.mockResolvedValue({
+      status: 'failed',
+      results: [{ agentId: 'agent-1', status: 'failed', error }],
+    });
+
+    await subscriber.handleEpicUpdated(basePayload);
+
+    const detail = eventLogService.recordHandledFail.mock.calls[0][0].detail;
+    expect(detail).toEqual(
+      expect.objectContaining({
+        poolStatus: 'failed',
+        errorCode: expectedCode,
+      }),
+    );
+    if (
+      ![
+        'SESSION_NOT_RUNNING',
+        'SESSION_NOT_FOUND',
+        'SESSION_LAUNCH_FAILED',
+        'DELIVERY_FAILED',
+      ].includes(error)
+    ) {
+      expect(JSON.stringify(detail)).not.toContain(error);
+    }
+  });
+
+  it('keeps thrown handler failures sanitized and maps the stable launch error', async () => {
+    deliverMock.mockRejectedValue(new Error('Unable to ensure active session for agent agent-1'));
+
+    await subscriber.handleEpicUpdated(basePayload);
+
+    expect(eventLogService.recordHandledFail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: { errorCode: 'SESSION_LAUNCH_FAILED' },
+      }),
+    );
+  });
+
+  it('keeps the no-recipient early return unchanged', async () => {
+    await subscriber.handleEpicUpdated({ ...basePayload, recipientIds: [] });
+
+    expect(deliverMock).not.toHaveBeenCalled();
+    expect(eventLogService.recordHandledOk).not.toHaveBeenCalled();
+    expect(eventLogService.recordHandledFail).not.toHaveBeenCalled();
   });
 
   it('fills missing names from storage when payload lacks context', async () => {

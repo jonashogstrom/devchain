@@ -48,7 +48,9 @@ describe('SessionsController', () => {
   });
 
   beforeEach(() => {
-    mockSessionsService = {} as jest.Mocked<SessionsService>;
+    mockSessionsService = {
+      terminateSession: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<SessionsService>;
 
     mockSessionRuntime = {
       launch: jest.fn(),
@@ -403,6 +405,18 @@ describe('SessionsController', () => {
       await expect(controller.renameSession(VALID_SESSION_ID, { name: 'Test' })).rejects.toThrow(
         BadRequestException,
       );
+    });
+  });
+
+  describe('DELETE /sessions/:id (terminateSession)', () => {
+    it('passes web-api user-requested provenance to the service', async () => {
+      const result = await controller.terminateSession('session-1');
+
+      expect(result).toEqual({ message: 'Session terminated successfully' });
+      expect(mockSessionsService.terminateSession).toHaveBeenCalledWith('session-1', {
+        source: 'web-api',
+        reason: 'user-requested',
+      });
     });
   });
 

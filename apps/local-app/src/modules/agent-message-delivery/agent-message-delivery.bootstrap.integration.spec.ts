@@ -10,7 +10,10 @@ import { MODULE_METADATA } from '@nestjs/common/constants';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AgentMessageDeliveryService } from './agent-message-delivery.service';
 import { AgentMessageDeliveryModule } from './agent-message-delivery.module';
-import { ChatMessageDeliverySubscriber } from './subscribers/chat-message-delivery.subscriber';
+import { DeliveryRecipientResolver } from './ports/delivery-recipient-resolver';
+import { DeliveryFormatter } from './ports/delivery-formatter';
+import { LegacyRecipientResolverAdapter } from './adapters/legacy-recipient-resolver.adapter';
+import { LegacyDeliveryFormatterAdapter } from './adapters/legacy-delivery-formatter.adapter';
 import { MessageEnqueueService } from '../sessions/services/message-enqueue.service';
 import { SessionLauncherFacade } from '../sessions/services/session-launcher-facade.service';
 import { GuestDeliveryService } from '../terminal/services/guest-delivery.service';
@@ -62,11 +65,8 @@ describe('AgentMessageDeliveryModule bootstrap', () => {
     await moduleRef.close();
   });
 
-  it('compiles AMD module and resolves its public providers', () => {
+  it('compiles AMD module and resolves its public delivery service', () => {
     expect(moduleRef.get(AgentMessageDeliveryService)).toBeInstanceOf(AgentMessageDeliveryService);
-    expect(moduleRef.get(ChatMessageDeliverySubscriber)).toBeInstanceOf(
-      ChatMessageDeliverySubscriber,
-    );
   });
 
   it('imports only the final narrow module set', () => {
@@ -80,6 +80,18 @@ describe('AgentMessageDeliveryModule bootstrap', () => {
       SessionsReadModule,
       SessionsDeliveryModule,
       TerminalDeliveryModule,
+    ]);
+  });
+
+  it('registers only the delivery service and its two adapters', () => {
+    const providers =
+      (Reflect.getMetadata(MODULE_METADATA.PROVIDERS, AgentMessageDeliveryModule) as unknown[]) ??
+      [];
+
+    expect(providers).toEqual([
+      AgentMessageDeliveryService,
+      { provide: DeliveryRecipientResolver, useClass: LegacyRecipientResolverAdapter },
+      { provide: DeliveryFormatter, useClass: LegacyDeliveryFormatterAdapter },
     ]);
   });
 

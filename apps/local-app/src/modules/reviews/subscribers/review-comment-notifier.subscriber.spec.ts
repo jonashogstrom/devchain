@@ -97,7 +97,6 @@ describe('ReviewCommentNotifierSubscriber', () => {
         source: 'review.comment.created',
         projectId: basePayload.projectId,
         senderName: 'User',
-        messageId: basePayload.commentId,
       }),
     );
     expect(message).toContain('Review Comment');

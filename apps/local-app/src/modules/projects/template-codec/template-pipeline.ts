@@ -1,7 +1,7 @@
 /**
  * TemplatePipeline — composes the section codecs and runs them in a validated order.
  *
- * Concrete service, NOT a port (ADR-004 §5: no new ports without ≥2 adapters). It is
+ * Concrete service, NOT a port (`docs/mcp-standards.md`: no new ports without ≥2 adapters). It is
  * registered as a NestJS provider so its constructor — which runs `assertValidTopology`
  * over the registered codec set — executes at module init: a codec whose declared
  * `reads` can only be satisfied by a LATER codec, or that forms a dependency cycle, or

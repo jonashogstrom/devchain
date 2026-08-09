@@ -40,9 +40,7 @@ export class AgentMessageDeliveryService {
     message: DeliveryMessage,
     policy: DeliveryPolicy = {},
   ): Promise<DeliveryOutcome> {
-    const { agentIds } = await this.recipientResolver.resolve(recipients, {
-      threadId: message.threadId,
-    });
+    const { agentIds } = await this.recipientResolver.resolve(recipients);
 
     if (agentIds.length === 0) {
       this.logger.debug('No recipients resolved, nothing to deliver');

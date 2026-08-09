@@ -91,13 +91,12 @@ describe('AgentMessageDeliveryService', () => {
         source: 'test',
         projectId: 'project-1',
         senderName: 'Alpha',
-        threadId: 'thread-1',
       };
       const policy: DeliveryPolicy = { submitKeys: ['Enter'] };
 
       const outcome = await service.deliver(['agent-1'], message, policy);
 
-      expect(resolver.resolve).toHaveBeenCalledWith(['agent-1'], { threadId: 'thread-1' });
+      expect(resolver.resolve).toHaveBeenCalledWith(['agent-1']);
       expect(launcher.ensureActiveSession).toHaveBeenCalledWith('agent-1', 'project-1');
       expect(formatter.format).toHaveBeenCalledWith(message);
       expect(messageEnqueue.enqueue).toHaveBeenCalledWith([
@@ -208,6 +207,23 @@ describe('AgentMessageDeliveryService', () => {
       expect(outcome.results[0].error).toBe('Binary not found');
     });
 
+    it('returns the pool log-entry ID as RecipientResult.messageId', async () => {
+      const { service, messageEnqueue } = buildService();
+      messageEnqueue.enqueue.mockResolvedValue([
+        { agentId: 'agent-1', status: 'queued', poolSize: 1, logEntryId: 'log-entry-1' },
+      ]);
+
+      const outcome = await service.deliver(
+        ['agent-1'],
+        { kind: 'pooled', body: 'x', source: 'test', projectId: 'p1', senderName: 'A' },
+        {},
+      );
+
+      expect(outcome.results).toEqual([
+        { agentId: 'agent-1', status: 'queued', messageId: 'log-entry-1' },
+      ]);
+    });
+
     it('handles partial failures across multiple recipients', async () => {
       const { service, resolver, launcher, messageEnqueue } = buildService();
       resolver.resolve.mockResolvedValue({ agentIds: ['agent-1', 'agent-2'] });
@@ -270,57 +286,6 @@ describe('AgentMessageDeliveryService', () => {
       );
       expect(messageEnqueue.enqueue).toHaveBeenCalledWith([
         expect.objectContaining({ agentId: 'agent-1', text: '[formatted:mcp.direct] hi' }),
-      ]);
-    });
-
-    it('invokes formatter.format() for mcp.thread kind', async () => {
-      const { service, formatter, messageEnqueue } = buildService();
-
-      await service.deliver(
-        ['agent-1'],
-        {
-          kind: 'mcp.thread',
-          body: 'msg',
-          source: 'test',
-          projectId: 'p1',
-          senderName: 'Alpha',
-          threadId: 't1',
-          messageId: 'm1',
-        },
-        { immediate: true },
-      );
-
-      expect(formatter.format).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: 'mcp.thread', threadId: 't1', messageId: 'm1' }),
-      );
-      expect(messageEnqueue.enqueue).toHaveBeenCalledWith([
-        expect.objectContaining({ agentId: 'agent-1', text: '[formatted:mcp.thread] msg' }),
-      ]);
-    });
-
-    it('invokes formatter.format() for chat.user kind', async () => {
-      const { service, formatter, messageEnqueue } = buildService();
-
-      await service.deliver(
-        ['agent-1'],
-        {
-          kind: 'chat.user',
-          body: 'hello',
-          source: 'chat.message',
-          projectId: 'p1',
-          senderName: 'User',
-          senderType: 'user',
-          threadId: 't1',
-          messageId: 'm1',
-        },
-        {},
-      );
-
-      expect(formatter.format).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: 'chat.user', senderType: 'user', senderName: 'User' }),
-      );
-      expect(messageEnqueue.enqueue).toHaveBeenCalledWith([
-        expect.objectContaining({ agentId: 'agent-1', text: '[formatted:chat.user] hello' }),
       ]);
     });
 
@@ -486,7 +451,7 @@ describe('AgentMessageDeliveryService', () => {
       expect(eventsService.publish.mock.calls[0][1]).not.toHaveProperty('body');
     });
 
-    it('leaves legacy delivery kinds on the default disclosure policy', async () => {
+    it('leaves direct delivery on the default disclosure policy', async () => {
       const { service, messageEnqueue } = buildService();
 
       await service.deliver(
