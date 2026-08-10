@@ -31,6 +31,10 @@ export interface ExportProjectOptions {
       effortOverride?: string | null;
     }>;
   }>;
+  /** Internal-only. Public export requests always use the default sanitized transform. */
+  profileConfigEnvTransform?: (
+    env: Record<string, string> | null | undefined,
+  ) => Record<string, string> | null;
 }
 
 interface ExportProjectDeps {
@@ -74,13 +78,21 @@ export async function exportProjectWithHelper(
 ) {
   logger.info({ projectId }, 'exportProject');
 
-  const { manifestOverrides, presets: presetsOverride } = opts ?? {};
+  const {
+    manifestOverrides,
+    presets: presetsOverride,
+    profileConfigEnvTransform = sanitizeEnvMap,
+  } = opts ?? {};
   const state = await loadExportState(projectId, deps);
 
   const prompts = await loadExportPrompts(state.promptsRes, deps.storage);
   const profileContext = await loadProfileExportContext(state.profilesRes, deps.storage);
 
-  const profiles = buildExportProfiles(state.profilesRes, profileContext, sanitizeEnvMap);
+  const profiles = buildExportProfiles(
+    state.profilesRes,
+    profileContext,
+    profileConfigEnvTransform,
+  );
   const agents = buildExportAgents(state.agentsRes, profileContext.configIdToInfo);
   const statuses = buildExportStatuses(state.statusesRes);
   const transferableInitialPrompt = state.initialPrompt ?? undefined;

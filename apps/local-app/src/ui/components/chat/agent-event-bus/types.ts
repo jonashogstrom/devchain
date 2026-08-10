@@ -20,6 +20,13 @@ export interface AgentEventBusRuntimeOrigin {
   y: number;
 }
 
+export interface AgentEventBusProjectBoundary {
+  kind: 'project-boundary';
+  key: 'project-boundary';
+  x: number;
+  y: number;
+}
+
 export interface AgentEventBusGeometrySnapshot {
   scopeEpoch: number;
   geometryEpoch: number;
@@ -30,9 +37,14 @@ export interface AgentEventBusGeometrySnapshot {
   anchors: AgentEventBusAnchor[];
 }
 
+export type AgentEventBusAgentEndpoint = AgentEventBusAnchor & { kind: 'agent' };
+
 export type AgentEventBusPathSource =
-  | (AgentEventBusAnchor & { kind: 'agent' })
-  | AgentEventBusRuntimeOrigin;
+  | AgentEventBusAgentEndpoint
+  | AgentEventBusRuntimeOrigin
+  | AgentEventBusProjectBoundary;
+
+export type AgentEventBusPathRecipient = AgentEventBusAgentEndpoint | AgentEventBusProjectBoundary;
 
 export interface AgentEventBusPath {
   d: string;
@@ -40,12 +52,8 @@ export interface AgentEventBusPath {
   durationMs: number;
   radius: number;
   source: AgentEventBusPathSource;
-  recipient: AgentEventBusAnchor;
+  recipient: AgentEventBusPathRecipient;
 }
-
-export type AgentEventBusRouteSource =
-  | { kind: 'agent'; senderAgentId: string }
-  | { kind: 'runtime' };
 
 export type AgentEventBusRouteFeedback =
   | { kind: 'delivery'; status: AgentEventBusDeliveryStatus }
@@ -63,7 +71,6 @@ interface AgentEventBusActiveRouteBase {
   frameId: string;
   generation: number;
   eventKind: AgentEventBusEventKind;
-  recipientAgentId: string;
   mode: 'traveling' | 'arrived' | 'static';
   path: AgentEventBusPath;
 }
@@ -71,14 +78,35 @@ interface AgentEventBusActiveRouteBase {
 export type AgentEventBusActiveRoute = AgentEventBusActiveRouteBase &
   (
     | {
+        routeKind: 'agent-to-agent';
         source: { kind: 'agent'; senderAgentId: string };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
         feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
         teamId?: string;
       }
     | {
+        routeKind: 'runtime-ingress';
         source: { kind: 'runtime' };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
         feedback: { kind: 'runtime-started' };
         runtimeOrdinal: number;
+      }
+    | {
+        routeKind: 'project-egress';
+        source: { kind: 'agent'; senderAgentId: string };
+        recipient: { kind: 'project-boundary' };
+        feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
+        projectDirection: 'outbound';
+      }
+    | {
+        routeKind: 'project-ingress';
+        source: { kind: 'project-boundary' };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
+        feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
+        projectDirection: 'inbound';
       }
   );
 

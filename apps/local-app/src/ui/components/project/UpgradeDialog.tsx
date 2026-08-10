@@ -1,54 +1,32 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
-  DialogTitle,
   DialogDescription,
   DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from '@/ui/components/ui/dialog';
 import { Button } from '@/ui/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/components/ui/alert';
-import { Badge } from '@/ui/components/ui/badge';
 import { useToast } from '@/ui/hooks/use-toast';
-import { ArrowRight, Upload, Loader2, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2, RotateCcw } from 'lucide-react';
 import { formatPromptTransferCounts } from '@/common/prompt-transfer';
 import {
-  formatProjectPromptReferenceFailure,
-  isProjectPromptReferenceFailure,
+  formatProjectPreMutationFailure,
+  isProjectPreMutationFailure,
   type UpgradeProjectResponse,
 } from '@/ui/pages/projects/lib/project-api';
-
-// Simplified flow: confirm → applying → done | error (no download step - versions are cached)
-type UpgradeStep = 'confirm' | 'applying' | 'done' | 'error';
 
 interface UpgradeDialogProps {
   projectId: string;
   projectName: string;
-  templateSlug: string;
-  currentVersion: string;
   targetVersion: string;
-  /** Template source - used to differentiate copy between registry and bundled */
   source: 'bundled' | 'registry' | 'file';
+  result: UpgradeProjectResponse;
   open: boolean;
   onClose: () => void;
-}
-
-async function upgradeProject(
-  projectId: string,
-  targetVersion: string,
-): Promise<UpgradeProjectResponse> {
-  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/upgrade-template`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targetVersion }),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ message: 'Upgrade failed' }));
-    throw new Error(error.message || 'Upgrade failed');
-  }
-  return res.json();
 }
 
 async function restoreBackup(projectId: string, backupId: string): Promise<{ success: boolean }> {
@@ -67,187 +45,42 @@ async function restoreBackup(projectId: string, backupId: string): Promise<{ suc
 export function UpgradeDialog({
   projectId,
   projectName,
-  templateSlug,
-  currentVersion,
   targetVersion,
   source,
+  result,
   open,
   onClose,
 }: UpgradeDialogProps) {
-  // Conditional copy based on source
-  const isRegistry = source === 'registry';
-  const actionVerb = isRegistry ? 'Upgrade' : 'Update';
-  const actionVerbPastParticiple = isRegistry ? 'upgraded' : 'updated';
-  // Start at 'confirm' - no download step needed (versions are cached)
-  const [step, setStep] = useState<UpgradeStep>('confirm');
-  const [error, setError] = useState<string | null>(null);
-  const [backupId, setBackupId] = useState<string | null>(null);
-
-  const queryClient = useQueryClient();
+  const [restoreComplete, setRestoreComplete] = useState(false);
   const { toast } = useToast();
+  const actionVerb = source === 'registry' ? 'Upgrade' : 'Update';
+  const actionVerbPastParticiple = source === 'registry' ? 'upgraded' : 'updated';
+  const preMutationFailure = isProjectPreMutationFailure(result) ? result : null;
+  const manualBackupId =
+    !result.success && !preMutationFailure && !result.restored ? result.backupId : undefined;
 
-  // templateSlug is used for display purposes only
-  void templateSlug;
-
-  // Upgrade mutation
-  const upgradeMutation = useMutation({
-    mutationFn: () => upgradeProject(projectId, targetVersion),
-    onSuccess: (result) => {
-      if (result.success === true) {
-        setStep('done');
-        toast({
-          title: `${actionVerb} Complete`,
-          description:
-            `${projectName} ${actionVerbPastParticiple} to v${result.newVersion}` +
-            (result.promptTransfer
-              ? `. Prompts: ${formatPromptTransferCounts(result.promptTransfer)}.`
-              : ''),
-        });
-        queryClient.invalidateQueries({ queryKey: ['project-template-metadata', projectId] });
-      } else if (isProjectPromptReferenceFailure(result)) {
-        setError(formatProjectPromptReferenceFailure(result));
-        setBackupId(null);
-        setStep('error');
-      } else if (result.restored) {
-        // Auto-restore succeeded - show toast and close dialog directly
-        // (can't use handleClose here as mutation isPending check would block)
-        toast({
-          title: `${actionVerb} Failed`,
-          description: 'Project was automatically restored to its previous state',
-          variant: 'destructive',
-        });
-        setStep('confirm');
-        setError(null);
-        setBackupId(null);
-        onClose();
-      } else {
-        // Auto-restore failed or no backup - show error step for manual restore
-        setError(result.error || `${actionVerb} failed`);
-        if (result.backupId) {
-          setBackupId(result.backupId);
-        }
-        setStep('error');
-      }
-    },
-    onError: (err: Error) => {
-      setError(err.message);
-      setStep('error');
-    },
-  });
-
-  // Restore mutation
   const restoreMutation = useMutation({
-    mutationFn: () => restoreBackup(projectId, backupId!),
+    mutationFn: (backupId: string) => restoreBackup(projectId, backupId),
     onSuccess: () => {
+      setRestoreComplete(true);
       toast({
         title: 'Backup Restored',
         description: 'Project has been restored to its previous state',
       });
-      setBackupId(null);
-      handleClose();
     },
-    onError: (err: Error) => {
-      toast({
-        title: 'Restore Failed',
-        description: err.message,
-        variant: 'destructive',
-      });
+    onError: (error: Error) => {
+      toast({ title: 'Restore Failed', description: error.message, variant: 'destructive' });
     },
   });
 
-  const handleApply = () => {
-    setStep('applying');
-    upgradeMutation.mutate();
-  };
-
-  const handleRestore = () => {
-    if (backupId) {
-      restoreMutation.mutate();
-    }
-  };
-
   const handleClose = () => {
-    if (!upgradeMutation.isPending && !restoreMutation.isPending) {
-      setStep('confirm');
-      setError(null);
-      setBackupId(null);
-      onClose();
-    }
+    if (!restoreMutation.isPending) onClose();
   };
-
-  const isPending = upgradeMutation.isPending || restoreMutation.isPending;
 
   return (
-    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && handleClose()}>
       <DialogContent className="sm:max-w-lg">
-        {/* Confirm Step - initial step (no download needed, versions are cached) */}
-        {step === 'confirm' && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Upload className="h-5 w-5" />
-                {actionVerb} Project
-              </DialogTitle>
-              <DialogDescription>
-                {actionVerb} {projectName} to{' '}
-                {isRegistry
-                  ? 'a newer template version from the registry'
-                  : 'the bundled template version'}
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="py-4 space-y-4">
-              {/* Version comparison */}
-              <div className="flex items-center justify-center gap-4 text-lg">
-                <Badge variant="outline" className="text-base px-3 py-1">
-                  v{currentVersion}
-                </Badge>
-                <ArrowRight className="h-5 w-5 text-muted-foreground" />
-                <Badge className="text-base px-3 py-1">v{targetVersion}</Badge>
-              </div>
-
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>What will change</AlertTitle>
-                <AlertDescription>
-                  <ul className="list-disc list-inside mt-2 space-y-1 text-sm">
-                    <li>Prompts, profiles, agents, and statuses may be updated</li>
-                    <li>Watchers and subscribers may be added or modified</li>
-                    <li>Your epics, records, and documents will NOT be affected</li>
-                  </ul>
-                </AlertDescription>
-              </Alert>
-            </div>
-
-            <DialogFooter>
-              <Button variant="outline" onClick={handleClose}>
-                Cancel
-              </Button>
-              <Button onClick={handleApply}>
-                <Upload className="h-4 w-4 mr-2" />
-                {actionVerb}
-              </Button>
-            </DialogFooter>
-          </>
-        )}
-
-        {/* Applying Step */}
-        {step === 'applying' && (
-          <>
-            <DialogHeader>
-              <DialogTitle>Applying {actionVerb}</DialogTitle>
-              <DialogDescription>Creating backup and applying changes...</DialogDescription>
-            </DialogHeader>
-
-            <div className="py-8 flex flex-col items-center justify-center gap-4">
-              <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="text-sm text-muted-foreground">Please wait...</p>
-            </div>
-          </>
-        )}
-
-        {/* Done Step */}
-        {step === 'done' && (
+        {result.success ? (
           <>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-green-600">
@@ -255,83 +88,105 @@ export function UpgradeDialog({
                 {actionVerb} Complete
               </DialogTitle>
               <DialogDescription>
-                {projectName} has been {actionVerbPastParticiple} to v{targetVersion}
+                {projectName} has been {actionVerbPastParticiple} to v{result.newVersion}
               </DialogDescription>
             </DialogHeader>
-
-            <div className="py-8 flex flex-col items-center justify-center gap-4">
+            <div className="flex flex-col items-center justify-center gap-4 py-8">
               <CheckCircle2 className="h-16 w-16 text-green-500" />
               <p className="text-sm text-muted-foreground">
-                All changes have been applied successfully
+                All configured changes have been applied successfully.
               </p>
-              {upgradeMutation.data?.success && upgradeMutation.data.promptTransfer && (
+              {result.promptTransfer && (
                 <div className="text-sm text-muted-foreground">
-                  Prompts: {formatPromptTransferCounts(upgradeMutation.data.promptTransfer)}
+                  Prompts: {formatPromptTransferCounts(result.promptTransfer)}
                 </div>
               )}
             </div>
-
-            <DialogFooter>
-              <Button onClick={handleClose}>Done</Button>
-            </DialogFooter>
           </>
-        )}
-
-        {/* Error Step */}
-        {step === 'error' && (
+        ) : (
           <>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-destructive">
                 <AlertCircle className="h-5 w-5" />
                 {actionVerb} Failed
               </DialogTitle>
+              <DialogDescription>
+                {preMutationFailure
+                  ? `No changes were made to ${projectName}.`
+                  : `The ${actionVerb.toLowerCase()} to v${targetVersion} did not complete.`}
+              </DialogDescription>
             </DialogHeader>
 
-            <div className="py-4 space-y-4">
+            <div className="space-y-4 py-4">
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />
-                <AlertTitle>Error</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
+                <AlertTitle>{preMutationFailure ? 'Blocked before changes' : 'Error'}</AlertTitle>
+                <AlertDescription>
+                  {preMutationFailure
+                    ? formatProjectPreMutationFailure(preMutationFailure)
+                    : result.error || `${actionVerb} failed`}
+                </AlertDescription>
               </Alert>
 
-              {backupId && (
+              {result.restored && (
+                <Alert>
+                  <RotateCcw className="h-4 w-4" />
+                  <AlertTitle>Previous state restored</AlertTitle>
+                  <AlertDescription>
+                    Changes had started, but the project was automatically restored to its previous
+                    state.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {manualBackupId && !restoreComplete && (
                 <Alert>
                   <RotateCcw className="h-4 w-4" />
                   <AlertTitle>Manual Restore Available</AlertTitle>
                   <AlertDescription>
-                    Auto-restore failed. Click the button below to restore your project to its
-                    previous state.
+                    Automatic restore did not complete. Restore the backup before continuing work in
+                    this project.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {restoreComplete && (
+                <Alert>
+                  <CheckCircle2 className="h-4 w-4" />
+                  <AlertTitle>Backup Restored</AlertTitle>
+                  <AlertDescription>
+                    The project has been restored to its previous state.
                   </AlertDescription>
                 </Alert>
               )}
             </div>
-
-            <DialogFooter>
-              <Button variant="outline" onClick={handleClose} disabled={isPending}>
-                Close
-              </Button>
-              {backupId && (
-                <Button
-                  onClick={handleRestore}
-                  disabled={restoreMutation.isPending}
-                  variant="destructive"
-                >
-                  {restoreMutation.isPending ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Restoring...
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="h-4 w-4 mr-2" />
-                      Restore Backup
-                    </>
-                  )}
-                </Button>
-              )}
-            </DialogFooter>
           </>
         )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={handleClose} disabled={restoreMutation.isPending}>
+            {result.success || restoreComplete ? 'Done' : 'Close'}
+          </Button>
+          {manualBackupId && !restoreComplete && (
+            <Button
+              onClick={() => restoreMutation.mutate(manualBackupId)}
+              disabled={restoreMutation.isPending}
+              variant="destructive"
+            >
+              {restoreMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Restoring...
+                </>
+              ) : (
+                <>
+                  <RotateCcw className="mr-2 h-4 w-4" />
+                  Restore Backup
+                </>
+              )}
+            </Button>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

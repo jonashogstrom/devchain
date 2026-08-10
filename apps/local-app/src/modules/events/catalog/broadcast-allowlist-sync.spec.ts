@@ -17,6 +17,8 @@ const SAMPLE = {
   agentId: 'agent-1',
   toolUseId: 'tool-1',
   projectId: 'proj-1',
+  sourceProjectId: 'source-proj-1',
+  targetProjectId: 'target-proj-1',
   reviewId: 'rev-1',
 };
 
@@ -70,5 +72,17 @@ describe('broadcast-registry ↔ shared push allowlist sync', () => {
     expect(topic).toBe('project/proj-1/agent-messages');
     expect(eventType).toBe('session.starting');
     expect(isAllowlistedTunnelPushTopic(topic, eventType)).toBe(false);
+  });
+
+  it('does NOT allowlist either web-only project direction frame', () => {
+    const entries = broadcastRegistry['agent.message.sent'].filter(
+      (entry) => entry.type === 'project.outbound' || entry.type === 'project.inbound',
+    );
+
+    expect(entries).toHaveLength(2);
+    for (const entry of entries) {
+      const { topic, eventType } = resolve(entry);
+      expect(isAllowlistedTunnelPushTopic(topic, eventType)).toBe(false);
+    }
   });
 });

@@ -1,5 +1,23 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString, Matches } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  ArrayMinSize,
+  IsArray,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+} from 'class-validator';
+import type { TemplatePresetAgentConfigDto } from '../../settings/dtos/settings.dto';
+
+type UpgradeTeamOverride = {
+  teamName: string;
+  allowTeamLeadCreateAgents?: boolean;
+  maxMembers?: number;
+  maxConcurrentTasks?: number;
+  profileNames?: string[];
+  profileSelections?: Array<{ profileName: string; configNames: string[] }>;
+};
 
 export class UpgradeTemplateDto {
   @ApiProperty({
@@ -10,6 +28,54 @@ export class UpgradeTemplateDto {
   @IsNotEmpty({ message: 'targetVersion is required' })
   @Matches(/^\d+\.\d+\.\d+/, { message: 'targetVersion must be a valid semver (e.g., 1.0.0)' })
   targetVersion!: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Provider names selected in the upgrade wizard',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  selectedProviderNames?: string[];
+
+  @ApiPropertyOptional({
+    type: Object,
+    description: 'Template provider family to installed provider mapping',
+  })
+  @IsOptional()
+  @IsObject()
+  familyProviderMappings?: Record<string, string>;
+
+  @ApiPropertyOptional({ description: 'Target-template preset to apply' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  presetName?: string;
+
+  @ApiPropertyOptional({
+    type: [Object],
+    description: 'Per-agent selections, mutually exclusive with presetName',
+  })
+  @IsOptional()
+  @IsArray()
+  agentOverrides?: TemplatePresetAgentConfigDto[];
+
+  @ApiPropertyOptional({
+    type: [Object],
+    description: 'Per-team selections from the upgrade wizard',
+  })
+  @IsOptional()
+  @IsArray()
+  teamOverrides?: UpgradeTeamOverride[];
+
+  @ApiPropertyOptional({
+    type: Object,
+    description: 'Template status name to existing status ID mapping',
+  })
+  @IsOptional()
+  @IsObject()
+  statusMappings?: Record<string, string>;
 }
 
 export class RestoreTemplateBackupDto {

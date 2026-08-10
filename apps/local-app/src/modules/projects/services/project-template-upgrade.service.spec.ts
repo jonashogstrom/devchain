@@ -4,6 +4,7 @@ import { TemplateCacheService } from '../../registry/services/template-cache.ser
 import { UnifiedTemplateService } from '../../registry/services/unified-template.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { ProjectsService } from './projects.service';
+import { SessionsService } from '../../sessions/services/sessions.service';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const createMockExportData = (prompts: any[] = []): any => ({
@@ -36,6 +37,7 @@ describe('ProjectTemplateUpgradeService', () => {
   let mockUnifiedTemplateService: jest.Mocked<UnifiedTemplateService>;
   let mockSettingsService: jest.Mocked<SettingsService>;
   let mockProjectsService: jest.Mocked<ProjectsService>;
+  let mockSessionsService: jest.Mocked<SessionsService>;
 
   beforeEach(() => {
     mockCacheService = {
@@ -49,19 +51,27 @@ describe('ProjectTemplateUpgradeService', () => {
     mockSettingsService = {
       getProjectTemplateMetadata: jest.fn(),
       setProjectTemplateMetadata: jest.fn(),
+      getProjectActivePreset: jest.fn().mockReturnValue(null),
+      setProjectActivePreset: jest.fn().mockResolvedValue(undefined),
       getRegistryConfig: jest.fn().mockReturnValue({ url: 'https://test.com' }),
     } as unknown as jest.Mocked<SettingsService>;
 
     mockProjectsService = {
       exportProject: jest.fn(),
       importProject: jest.fn().mockResolvedValue(createMockImportResult()),
+      setupPreview: jest.fn().mockResolvedValue({}),
     } as unknown as jest.Mocked<ProjectsService>;
+
+    mockSessionsService = {
+      getActiveSessionsForProject: jest.fn().mockReturnValue([]),
+    } as unknown as jest.Mocked<SessionsService>;
 
     service = new ProjectTemplateUpgradeService(
       mockProjectsService,
       mockCacheService,
       mockUnifiedTemplateService,
       mockSettingsService,
+      mockSessionsService,
     );
   });
 
@@ -78,7 +88,16 @@ describe('ProjectTemplateUpgradeService', () => {
       const backupId = await service.createBackup('project-123');
 
       expect(backupId).toMatch(/^backup-project-123-\d+$/);
-      expect(mockProjectsService.exportProject).toHaveBeenCalledWith('project-123');
+      expect(mockProjectsService.exportProject).toHaveBeenCalledWith('project-123', {
+        profileConfigEnvTransform: expect.any(Function),
+      });
+      const exportOptions = mockProjectsService.exportProject.mock.calls[0][1];
+      expect(
+        exportOptions?.profileConfigEnvTransform?.({ ANTHROPIC_API_KEY: 'sk-backup-secret' }),
+      ).toEqual({ ANTHROPIC_API_KEY: 'sk-backup-secret' });
+      expect(mockSettingsService.getProjectActivePreset.mock.invocationCallOrder[0]).toBeLessThan(
+        mockProjectsService.exportProject.mock.invocationCallOrder[0],
+      );
     });
 
     it('should throw if project not linked', async () => {
@@ -120,6 +139,126 @@ describe('ProjectTemplateUpgradeService', () => {
     });
   });
 
+  describe('previewUpgrade', () => {
+    const preview = {
+      payload: { version: 1, prompts: [], profiles: [], agents: [], statuses: [] },
+      providerSummary: [],
+      familyAlternatives: [],
+      presetProviderCoverage: [],
+      localAvailability: { installedProviders: [] },
+    };
+
+    it('resolves a registry preview from the exact cached slug and version', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        source: 'registry',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      const content = { _manifest: { version: '2.0.0' }, prompts: [] };
+      mockCacheService.getTemplate.mockResolvedValue({
+        content,
+        metadata: {
+          slug: 'test-template',
+          version: '2.0.0',
+          checksum: 'abc',
+          cachedAt: '',
+          size: 0,
+        },
+      });
+      mockProjectsService.setupPreview.mockResolvedValue(preview as never);
+
+      await expect(
+        service.previewUpgrade({ projectId: 'project-123', targetVersion: '2.0.0' }),
+      ).resolves.toBe(preview);
+      expect(mockCacheService.getTemplate).toHaveBeenCalledWith('test-template', '2.0.0');
+      expect(mockProjectsService.setupPreview).toHaveBeenCalledWith({ rawContent: content });
+      expect(mockUnifiedTemplateService.getBundledTemplate).not.toHaveBeenCalled();
+    });
+
+    it('resolves a bundled preview without falling back to the registry cache', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'bundled-template',
+        source: 'bundled',
+        installedVersion: '1.0.0',
+        registryUrl: null,
+        installedAt: new Date().toISOString(),
+      });
+      const content = { _manifest: { version: '2.0.0' }, prompts: [] };
+      mockUnifiedTemplateService.getBundledTemplate.mockReturnValue({
+        content,
+        source: 'bundled',
+        version: null,
+      });
+      mockProjectsService.setupPreview.mockResolvedValue(preview as never);
+
+      await expect(
+        service.previewUpgrade({ projectId: 'project-123', targetVersion: '2.0.0' }),
+      ).resolves.toBe(preview);
+      expect(mockProjectsService.setupPreview).toHaveBeenCalledWith({ rawContent: content });
+      expect(mockCacheService.getTemplate).not.toHaveBeenCalled();
+    });
+
+    it('rejects a cached payload whose manifest version differs from the requested target', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        source: 'registry',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockCacheService.getTemplate.mockResolvedValue({
+        content: { _manifest: { version: '1.5.0' }, prompts: [] },
+        metadata: {
+          slug: 'test-template',
+          version: '2.0.0',
+          checksum: 'abc',
+          cachedAt: '',
+          size: 0,
+        },
+      });
+
+      await expect(
+        service.previewUpgrade({ projectId: 'project-123', targetVersion: '2.0.0' }),
+      ).resolves.toEqual({
+        success: false,
+        mutationStarted: false,
+        error: 'Cached template version is 1.5.0, not 2.0.0',
+      });
+      expect(mockProjectsService.setupPreview).not.toHaveBeenCalled();
+    });
+
+    it('returns a structured pre-mutation failure when target content is invalid', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        source: 'registry',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockCacheService.getTemplate.mockResolvedValue({
+        content: { _manifest: { version: '2.0.0' } },
+        metadata: {
+          slug: 'test-template',
+          version: '2.0.0',
+          checksum: 'abc',
+          cachedAt: '',
+          size: 0,
+        },
+      });
+      mockProjectsService.setupPreview.mockRejectedValue(new ValidationError('Invalid content'));
+
+      await expect(
+        service.previewUpgrade({ projectId: 'project-123', targetVersion: '2.0.0' }),
+      ).resolves.toEqual({
+        success: false,
+        mutationStarted: false,
+        error: 'Target template content is invalid',
+      });
+    });
+  });
+
   describe('upgradeProject', () => {
     it('should create backup before upgrade', async () => {
       mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
@@ -130,7 +269,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.importProject.mockResolvedValue(createMockImportResult());
@@ -153,7 +292,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [{ id: '1' }] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [{ id: '1' }] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.importProject.mockResolvedValue(createMockImportResult());
@@ -187,9 +326,25 @@ describe('ProjectTemplateUpgradeService', () => {
         registryUrl: 'https://test.com',
         installedAt: new Date().toISOString(),
       });
-      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      const backupPayload = {
+        ...createMockExportData(),
+        profiles: [
+          {
+            id: 'profile-1',
+            name: 'Coder',
+            providerConfigs: [
+              {
+                name: 'default',
+                providerName: 'claude',
+                env: { ANTHROPIC_API_KEY: 'sk-backup-secret' },
+              },
+            ],
+          },
+        ],
+      };
+      mockProjectsService.exportProject.mockResolvedValue(backupPayload);
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       // First import (upgrade) fails, second import (restore) succeeds
@@ -206,6 +361,13 @@ describe('ProjectTemplateUpgradeService', () => {
       expect(result.error).toBe('Import failed');
       expect(result.restored).toBe(true);
       expect(result.backupId).toBeUndefined();
+      expect(mockProjectsService.importProject).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          payload: backupPayload,
+          promptTransferPolicy: 'snapshot',
+        }),
+      );
     });
 
     it('should return backupId when auto-restore also fails', async () => {
@@ -217,7 +379,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       // Both imports fail
@@ -293,7 +455,7 @@ describe('ProjectTemplateUpgradeService', () => {
         installedAt: new Date().toISOString(),
       });
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.exportProject.mockRejectedValue(new Error('Export failed'));
@@ -317,7 +479,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.importProject.mockResolvedValue(createMockImportResult());
@@ -333,7 +495,7 @@ describe('ProjectTemplateUpgradeService', () => {
       expect(backups).toHaveLength(0);
     });
 
-    it('should pass empty familyProviderMappings to auto-select providers on upgrade', async () => {
+    it('does not inject familyProviderMappings when the caller omits it', async () => {
       mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
         templateSlug: 'test-template',
         installedVersion: '1.0.0',
@@ -342,7 +504,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.importProject.mockResolvedValue({ success: true, warnings: [] });
@@ -352,11 +514,124 @@ describe('ProjectTemplateUpgradeService', () => {
         targetVersion: '2.0.0',
       });
 
-      expect(mockProjectsService.importProject).toHaveBeenCalledWith(
-        expect.objectContaining({
-          familyProviderMappings: {},
-        }),
-      );
+      expect(mockProjectsService.importProject).toHaveBeenCalledWith({
+        projectId: 'project-123',
+        payload: { _manifest: { version: '2.0.0' }, prompts: [] },
+        dryRun: false,
+      });
+    });
+
+    it('forwards the caller configuration exactly without injecting defaults', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      const content = { _manifest: { version: '2.0.0' }, prompts: [] };
+      mockCacheService.getTemplate.mockResolvedValue({
+        content,
+        metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
+      });
+      const controls = {
+        selectedProviderNames: ['claude', 'codex'],
+        familyProviderMappings: { anthropic: 'claude' },
+        agentOverrides: [{ agentName: 'Coder', providerConfigName: 'Claude Default' }],
+        teamOverrides: [{ teamName: 'Builders', maxMembers: 4 }],
+        statusMappings: { Review: 'status-review' },
+      };
+
+      await service.upgradeProject({
+        projectId: 'project-123',
+        targetVersion: '2.0.0',
+        ...controls,
+      });
+
+      expect(mockProjectsService.importProject).toHaveBeenCalledWith({
+        projectId: 'project-123',
+        payload: content,
+        dryRun: false,
+        ...controls,
+      });
+    });
+
+    it('blocks active sessions before creating a backup', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockCacheService.getTemplate.mockResolvedValue({
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
+        metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
+      });
+      mockSessionsService.getActiveSessionsForProject.mockReturnValue([
+        { id: 'session-1', agentId: 'agent-1' } as never,
+      ]);
+
+      const result = await service.upgradeProject({
+        projectId: 'project-123',
+        targetVersion: '2.0.0',
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        mutationStarted: false,
+        readiness: {
+          ready: false,
+          issues: [{ code: 'active_sessions' }],
+        },
+      });
+      expect(mockProjectsService.exportProject).not.toHaveBeenCalled();
+      expect(mockProjectsService.importProject).not.toHaveBeenCalled();
+    });
+
+    it('discards the unused backup when the import race guard finds a late session', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      mockCacheService.getTemplate.mockResolvedValue({
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
+        metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
+      });
+      const readiness = {
+        ready: false as const,
+        issues: [
+          {
+            code: 'active_sessions' as const,
+            message: 'Import aborted: active agent sessions detected',
+            details: { activeSessions: [{ id: 'session-late', agentId: 'agent-1' }] },
+          },
+        ],
+      };
+      mockProjectsService.importProject.mockResolvedValue({
+        success: false,
+        mutationStarted: false,
+        error: readiness.issues[0].message,
+        readiness,
+      });
+
+      const result = await service.upgradeProject({
+        projectId: 'project-123',
+        targetVersion: '2.0.0',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        mutationStarted: false,
+        error: readiness.issues[0].message,
+        readiness,
+      });
+      expect(service.getProjectBackups('project-123')).toEqual([]);
+      expect(result).not.toHaveProperty('backupId');
+      expect(result).not.toHaveProperty('restored');
+      expect(mockProjectsService.importProject).toHaveBeenCalledTimes(1);
     });
 
     it('session preserved when agent name still present in target template', async () => {
@@ -368,7 +643,11 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [], agents: [{ name: 'Architect' }] },
+        content: {
+          _manifest: { version: '2.0.0' },
+          prompts: [],
+          agents: [{ name: 'Architect' }],
+        },
         metadata: { slug: 'dev-team', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       // importProject returns success with preservation counts — Architect session preserved
@@ -397,7 +676,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [], agents: [] }, // Reviewer dropped from new template
+        content: { _manifest: { version: '2.0.0' }, prompts: [], agents: [] }, // Reviewer dropped from new template
         metadata: { slug: 'dev-team', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       // importProject returns success with removal counts — Reviewer session deleted
@@ -426,7 +705,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       // importProject returns generic failure (success: false without providerMappingRequired)
@@ -456,7 +735,7 @@ describe('ProjectTemplateUpgradeService', () => {
       });
       mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
       mockCacheService.getTemplate.mockResolvedValue({
-        content: { prompts: [] },
+        content: { _manifest: { version: '2.0.0' }, prompts: [] },
         metadata: { slug: 'test', version: '2.0.0', checksum: 'abc', cachedAt: '', size: 0 },
       });
       mockProjectsService.importProject.mockResolvedValue({
@@ -479,13 +758,13 @@ describe('ProjectTemplateUpgradeService', () => {
         success: false,
         mutationStarted: false,
         error: expect.stringContaining('Private SOP'),
-        backupId: expect.any(String),
         promptReferenceValidation: {
           promptTitles: ['Private SOP'],
         },
       });
       expect(mockProjectsService.importProject).toHaveBeenCalledTimes(1);
       expect(mockSettingsService.setProjectTemplateMetadata).not.toHaveBeenCalled();
+      expect(service.getProjectBackups('project-123')).toEqual([]);
     });
 
     describe('bundled templates', () => {
@@ -527,7 +806,7 @@ describe('ProjectTemplateUpgradeService', () => {
           installedAt: new Date().toISOString(),
         });
         mockUnifiedTemplateService.getBundledTemplate.mockImplementation(() => {
-          throw new Error('Template not found');
+          throw new NotFoundError('Template', 'nonexistent-bundled');
         });
 
         const result = await service.upgradeProject({
@@ -600,6 +879,7 @@ describe('ProjectTemplateUpgradeService', () => {
       mockProjectsService.exportProject.mockResolvedValue(
         createMockExportData([{ id: '1', title: 'Test', content: '', version: 1, tags: [] }]),
       );
+      mockSettingsService.getProjectActivePreset.mockReturnValue('balanced');
 
       const backupId = await service.createBackup('project-123');
 
@@ -614,6 +894,32 @@ describe('ProjectTemplateUpgradeService', () => {
         dryRun: false,
         promptTransferPolicy: 'snapshot',
       });
+      expect(mockSettingsService.setProjectActivePreset).toHaveBeenCalledWith(
+        'project-123',
+        'balanced',
+      );
+      expect(mockProjectsService.importProject.mock.invocationCallOrder[0]).toBeLessThan(
+        mockSettingsService.setProjectTemplateMetadata.mock.invocationCallOrder[0],
+      );
+      expect(
+        mockSettingsService.setProjectTemplateMetadata.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockSettingsService.setProjectActivePreset.mock.invocationCallOrder[0]);
+    });
+
+    it('should restore an explicitly null active preset sidecar', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockSettingsService.getProjectActivePreset.mockReturnValue(null);
+      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+
+      const backupId = await service.createBackup('project-123');
+      await service.restoreBackup(backupId);
+
+      expect(mockSettingsService.setProjectActivePreset).toHaveBeenCalledWith('project-123', null);
     });
 
     it('should throw if backup expired or not found', async () => {
@@ -701,15 +1007,25 @@ describe('ProjectTemplateUpgradeService', () => {
         registryUrl: 'https://test.com',
         installedAt: new Date().toISOString(),
       });
-      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      mockSettingsService.getProjectActivePreset.mockReturnValue('sensitive-preset-name');
+      mockProjectsService.exportProject.mockResolvedValue({
+        ...createMockExportData(),
+        profiles: [{ providerConfigs: [{ env: { API_KEY: 'raw-secret-value' } }] }],
+      });
 
       const backupId = await service.createBackup('project-123');
 
       const info = service.getBackupInfo(backupId);
 
-      expect(info).not.toBeNull();
-      expect(info?.projectId).toBe('project-123');
-      expect(info?.fromVersion).toBe('1.0.0');
+      expect(info).toEqual({
+        projectId: 'project-123',
+        createdAt: expect.any(String),
+        fromVersion: '1.0.0',
+      });
+      expect(info).not.toHaveProperty('data');
+      expect(info).not.toHaveProperty('activePreset');
+      expect(JSON.stringify(info)).not.toContain('raw-secret-value');
+      expect(JSON.stringify(info)).not.toContain('sensitive-preset-name');
     });
 
     it('should return null for non-existent backup', () => {
@@ -726,7 +1042,11 @@ describe('ProjectTemplateUpgradeService', () => {
         registryUrl: 'https://test.com',
         installedAt: new Date().toISOString(),
       });
-      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      mockSettingsService.getProjectActivePreset.mockReturnValue('sensitive-preset-name');
+      mockProjectsService.exportProject.mockResolvedValue({
+        ...createMockExportData(),
+        profiles: [{ providerConfigs: [{ env: { API_KEY: 'raw-secret-value' } }] }],
+      });
 
       await service.createBackup('project-123');
       // Small delay to ensure unique timestamps
@@ -736,7 +1056,14 @@ describe('ProjectTemplateUpgradeService', () => {
       const backups = service.getProjectBackups('project-123');
 
       expect(backups.length).toBeGreaterThanOrEqual(1);
-      expect(backups[0].backupId).toMatch(/^backup-project-123-\d+$/);
+      expect(backups[0]).toEqual({
+        backupId: expect.stringMatching(/^backup-project-123-\d+$/),
+        createdAt: expect.any(String),
+      });
+      expect(backups[0]).not.toHaveProperty('data');
+      expect(backups[0]).not.toHaveProperty('activePreset');
+      expect(JSON.stringify(backups)).not.toContain('raw-secret-value');
+      expect(JSON.stringify(backups)).not.toContain('sensitive-preset-name');
     });
 
     it('should return empty array when no backups', () => {
@@ -844,6 +1171,26 @@ describe('ProjectTemplateUpgradeService', () => {
       // Backup should be removed after restore
       expect(service.getBackupInfo(backupId)).toBeNull();
     });
+
+    it('should retain the backup when active preset restoration fails', async () => {
+      mockSettingsService.getProjectTemplateMetadata.mockReturnValue({
+        templateSlug: 'test-template',
+        installedVersion: '1.0.0',
+        registryUrl: 'https://test.com',
+        installedAt: new Date().toISOString(),
+      });
+      mockSettingsService.getProjectActivePreset.mockReturnValue('balanced');
+      mockProjectsService.exportProject.mockResolvedValue(createMockExportData());
+      mockSettingsService.setProjectActivePreset.mockRejectedValue(
+        new Error('Active preset restore failed'),
+      );
+
+      const backupId = await service.createBackup('project-123');
+
+      await expect(service.restoreBackup(backupId)).rejects.toThrow('Active preset restore failed');
+      expect(mockSettingsService.setProjectTemplateMetadata).toHaveBeenCalled();
+      expect(service.getBackupInfo(backupId)).not.toBeNull();
+    });
   });
 
   describe('backup expiration', () => {
@@ -857,6 +1204,7 @@ describe('ProjectTemplateUpgradeService', () => {
         mockCacheService,
         mockUnifiedTemplateService,
         mockSettingsService,
+        mockSessionsService,
       );
       // Initialize the cleanup timer (moved from constructor to onModuleInit)
       serviceWithFakeTimers.onModuleInit();

@@ -14,18 +14,16 @@
  *  - Field survival across replace-into-existing import: agent effortOverride,
  *    config model/effort, prompt tags, teams profileSelections, scheduled epics,
  *    presets overrides, initialPrompt, provider models/efforts.
- *  - Create-path parity GAPS are characterized (today's lossy behavior, passing) AND
- *    the correct behavior is asserted behind `it.skip` tagged `parity-flip-task8`
- *    (Task 8 flips these).
+ *  - Create-path parity for agent overrides, provider-config fields, and provider catalogs.
  *  - Env secret redaction discipline (config-level '***' preserved; provider-level skipped).
  *  - Legacy v1 fixtures (no providerConfigs / effort fields) import unchanged.
  *  - Response shapes for import (replace), dry-run, and create-from-template.
+ *  - Configured upgrade selection, status-count parity, established-data retention, and
+ *    automatic recovery of raw profile secrets plus active-preset sidecar state.
  *
- * NO production code is exercised through mocks: the helpers run against real storage.
- * Registry / upgrade-template / restore-backup response shapes are locked by their own
- * specs (project-registry-import.service.spec.ts,
- * project-template-upgrade.service.characterization.spec.ts) and by the committed matrix
- * doc; duplicating that wiring here would be a more-expensive layer for no added proof.
+ * Every state mutation runs through the production helpers against real storage. Upgrade-only
+ * network/preview/session boundaries are deterministic in-process adapters so the contract
+ * remains fast and cannot call external services.
  */
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -142,6 +140,13 @@ function importDeps(h: Harness) {
     getImportErrorMessage,
     applyAgentConfigs: (projectId: string, agentConfigs: never, nameMaps?: never) =>
       applyAgentConfigs(projectId, agentConfigs, { storage: h.storage }, nameMaps),
+    applyPreset: (projectId: string, presetName: string, nameMaps?: never) =>
+      applyPresetWithHelper(
+        projectId,
+        presetName,
+        { storage: h.storage, settings: h.settings },
+        nameMaps,
+      ),
     teamsService: teamsAdapter(h.teamsStore) as never,
     scheduledEpicsRefresh: { refreshScheduleWindow: () => {} },
     computeNextRunAt: getNextRunAt,
@@ -203,6 +208,10 @@ function createDeps(h: Harness, template: Record<string, unknown>) {
 
 const BUILDER_PROFILE_ID = '11111111-1111-4111-8111-111111111111';
 const LEGACY_PROFILE_ID = '22222222-2222-4222-8222-222222222222';
+const CURRENT_WORKER_PROFILE_ID = '33333333-3333-4333-8333-333333333333';
+const TARGET_CLAUDE_PROFILE_ID = '44444444-4444-4444-8444-444444444444';
+const TARGET_CODEX_PROFILE_ID = '55555555-5555-4555-8555-555555555555';
+const TARGET_WORKER_AGENT_ID = '66666666-6666-4666-8666-666666666666';
 
 /** A fully-populated, schema-valid export payload touching every section. */
 function allSectionsTemplate(): Record<string, unknown> {
@@ -383,6 +392,136 @@ function legacyV1Template(): Record<string, unknown> {
   };
 }
 
+function configuredUpgradeSourceTemplate(): Record<string, unknown> {
+  return {
+    _manifest: { slug: 'configured-upgrade', name: 'Configured Upgrade', version: '1.0.0' },
+    version: 1,
+    prompts: [
+      {
+        title: 'Current System',
+        content: 'replace this system prompt',
+        tags: ['type:system'],
+      },
+      {
+        title: 'Local Knowledge',
+        content: 'preserve this established custom prompt',
+        tags: ['type:custom', 'local'],
+      },
+    ],
+    profiles: [
+      {
+        id: CURRENT_WORKER_PROFILE_ID,
+        name: 'Current Worker',
+        provider: { name: 'claude' },
+        familySlug: 'worker-family',
+        providerConfigs: [
+          {
+            name: 'claude-current',
+            providerName: 'claude',
+            env: { API_KEY: 'profile-secret-verbatim', LOG_LEVEL: 'debug' },
+            model: 'current-model',
+            effort: 'low',
+          },
+        ],
+      },
+    ],
+    agents: [
+      {
+        name: 'Worker',
+        profileId: CURRENT_WORKER_PROFILE_ID,
+        providerConfigName: 'claude-current',
+      },
+    ],
+    statuses: [
+      { label: 'Ready', color: '#111111', position: 0 },
+      { label: 'Legacy', color: '#222222', position: 1 },
+      { label: 'Unused', color: '#333333', position: 2 },
+    ],
+    presets: [
+      {
+        name: 'Current Preset',
+        agentConfigs: [
+          {
+            agentName: 'Worker',
+            providerConfigName: 'claude-current',
+            modelOverride: 'current-model',
+            effortOverride: 'low',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function configuredUpgradeTargetTemplate(): Record<string, unknown> {
+  return {
+    _manifest: { slug: 'configured-upgrade', name: 'Configured Upgrade', version: '2.0.0' },
+    version: 1,
+    prompts: [
+      {
+        title: 'Target System',
+        content: 'target system prompt',
+        tags: ['type:system'],
+      },
+    ],
+    profiles: [
+      {
+        id: TARGET_CLAUDE_PROFILE_ID,
+        name: 'Claude Target',
+        provider: { name: 'claude' },
+        familySlug: 'worker-family',
+        providerConfigs: [
+          { name: 'claude-target', providerName: 'claude', model: 'claude-default' },
+        ],
+      },
+      {
+        id: TARGET_CODEX_PROFILE_ID,
+        name: 'Codex Target',
+        provider: { name: 'codex' },
+        familySlug: 'worker-family',
+        providerConfigs: [{ name: 'codex-target', providerName: 'codex', model: 'codex-default' }],
+      },
+    ],
+    agents: [
+      {
+        id: TARGET_WORKER_AGENT_ID,
+        name: 'Worker',
+        profileId: TARGET_CLAUDE_PROFILE_ID,
+        providerConfigName: 'claude-target',
+      },
+    ],
+    statuses: [
+      { label: 'Ready', color: '#abcdef', position: 0 },
+      { label: 'Done', color: '#00ff00', position: 1 },
+    ],
+    teams: [
+      {
+        name: 'Target Squad',
+        teamLeadAgentName: 'Worker',
+        memberAgentNames: ['Worker'],
+        maxMembers: 8,
+        maxConcurrentTasks: 6,
+        allowTeamLeadCreateAgents: true,
+        profileNames: ['Claude Target'],
+        profileSelections: [{ profileName: 'Claude Target', configNames: ['claude-target'] }],
+      },
+    ],
+    presets: [
+      {
+        name: 'Target Preset',
+        agentConfigs: [
+          {
+            agentName: 'Worker',
+            providerConfigName: 'codex-target',
+            modelOverride: 'gpt-target',
+            effortOverride: 'high',
+          },
+        ],
+      },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Normalization for idempotent round-trip comparison.
 // ---------------------------------------------------------------------------
@@ -518,6 +657,11 @@ async function seedClaudeProvider(h: Harness): Promise<void> {
   await h.storage.createProvider({ name: 'claude', binPath: null });
 }
 
+async function seedConfiguredUpgradeProviders(h: Harness): Promise<void> {
+  await seedClaudeProvider(h);
+  await h.storage.createProvider({ name: 'codex', binPath: null });
+}
+
 async function freshProject(h: Harness, name: string): Promise<string> {
   const project = await h.storage.createProject({
     name,
@@ -526,6 +670,100 @@ async function freshProject(h: Harness, name: string): Promise<string> {
     isTemplate: false,
   });
   return project.id;
+}
+
+async function seedConfiguredUpgradeSource(
+  h: Harness,
+  projectName: string,
+  activePreset: string | null,
+) {
+  await seedConfiguredUpgradeProviders(h);
+  const projectId = await freshProject(h, projectName);
+  const imported = await importProjectWithHelper(
+    { projectId, payload: configuredUpgradeSourceTemplate() },
+    importDeps(h) as never,
+  );
+  expect(imported).toMatchObject({ success: true });
+  await h.settings.setProjectActivePreset(projectId, activePreset);
+
+  const statuses = await h.storage.listStatuses(projectId, { limit: 100, offset: 0 });
+  const legacyStatus = statuses.items.find((status) => status.label === 'Legacy');
+  const worker = (await h.storage.listAgents(projectId, { limit: 100, offset: 0 })).items.find(
+    (agent) => agent.name === 'Worker',
+  );
+  if (!legacyStatus || !worker) {
+    throw new Error('Configured upgrade source fixture failed to seed');
+  }
+  const epic = await h.storage.createEpicForProject(projectId, {
+    title: 'Established Epic',
+    description: 'must survive replacement',
+    statusId: legacyStatus.id,
+    agentId: worker.id,
+  });
+
+  return { projectId, legacyStatusId: legacyStatus.id, epicId: epic.id };
+}
+
+function configuredUpgradeControls(legacyStatusId: string) {
+  return {
+    selectedProviderNames: ['codex'],
+    familyProviderMappings: { 'worker-family': 'codex' },
+    presetName: 'Target Preset',
+    teamOverrides: [
+      {
+        teamName: 'Target Squad',
+        allowTeamLeadCreateAgents: false,
+        maxMembers: 3,
+        maxConcurrentTasks: 1,
+        profileNames: ['Codex Target'],
+        profileSelections: [{ profileName: 'Codex Target', configNames: ['codex-target'] }],
+      },
+    ],
+    statusMappings: { [legacyStatusId]: 'Done' },
+  };
+}
+
+function createRealStorageUpgradeService(
+  h: Harness,
+  targetTemplate: Record<string, unknown>,
+  options: {
+    sessions?: { getActiveSessionsForProject: (projectId: string) => unknown[] };
+    failAfterFirstMutation?: boolean;
+  } = {},
+) {
+  const sessions = options.sessions ?? { getActiveSessionsForProject: () => [] };
+  let importCalls = 0;
+  let lastUpgradeImportResult: unknown;
+  const projectsFacade = {
+    exportProject: (id: string, exportOptions?: Parameters<typeof exportProjectWithHelper>[1]) =>
+      exportProjectWithHelper(id, exportOptions, exportDeps(h)),
+    setupPreview: jest.fn().mockResolvedValue({}),
+    importProject: async (input: Parameters<typeof importProjectWithHelper>[0]) => {
+      importCalls++;
+      const result = await importProjectWithHelper(input, { ...importDeps(h), sessions } as never);
+      if (importCalls === 1) {
+        lastUpgradeImportResult = result;
+        if (options.failAfterFirstMutation && 'success' in result && result.success) {
+          throw new Error('Injected failure after target mutation');
+        }
+      }
+      return result;
+    },
+  } as unknown as ProjectsService;
+
+  const service = new ProjectTemplateUpgradeService(
+    projectsFacade,
+    { getTemplate: jest.fn().mockResolvedValue({ content: targetTemplate }) } as never,
+    {} as never,
+    h.settings,
+    sessions as never,
+  );
+
+  return {
+    service,
+    projectsFacade,
+    getLastUpgradeImportResult: () => lastUpgradeImportResult,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +1013,7 @@ describe('template round-trip contract safety net (real storage)', () => {
           exportProjectWithHelper(id, options, exportDeps(h)),
         importProject: (input: Parameters<typeof importProjectWithHelper>[0]) =>
           importProjectWithHelper(input, importDeps(h) as never),
+        setupPreview: jest.fn().mockResolvedValue({}),
       } as unknown as ProjectsService;
       const upgradeService = new ProjectTemplateUpgradeService(
         projectsFacade,
@@ -783,6 +1022,7 @@ describe('template round-trip contract safety net (real storage)', () => {
         } as never,
         {} as never,
         h.settings,
+        { getActiveSessionsForProject: jest.fn().mockReturnValue([]) } as never,
       );
 
       const result = await upgradeService.upgradeProject({
@@ -807,6 +1047,247 @@ describe('template round-trip contract safety net (real storage)', () => {
           expect.objectContaining({ contentPreview: 'system peer', tags: ['type:system'] }),
         ]),
       );
+    });
+  });
+
+  describe('configured template upgrade and recovery', () => {
+    it('applies explicit provider, preset, team, and status selections while preserving established data', async () => {
+      const { projectId, legacyStatusId, epicId } = await seedConfiguredUpgradeSource(
+        h,
+        'Configured Upgrade Success',
+        'Current Preset',
+      );
+      const controls = configuredUpgradeControls(legacyStatusId);
+      const statusesBefore = await h.storage.listStatuses(projectId, { limit: 100, offset: 0 });
+      const readyBefore = statusesBefore.items.find((status) => status.label === 'Ready')!;
+      const unusedBefore = statusesBefore.items.find((status) => status.label === 'Unused')!;
+
+      const dryRun = (await importProjectWithHelper(
+        {
+          projectId,
+          payload: configuredUpgradeTargetTemplate(),
+          dryRun: true,
+          ...controls,
+        },
+        importDeps(h) as never,
+      )) as AnyRec;
+      expect(dryRun).toMatchObject({
+        dryRun: true,
+        readiness: { ready: true, issues: [] },
+        unmatchedStatuses: [expect.objectContaining({ id: legacyStatusId, epicCount: 1 })],
+        counts: { toDelete: { statuses: 1 } },
+      });
+
+      const targetTemplate = configuredUpgradeTargetTemplate();
+      const { service, getLastUpgradeImportResult } = createRealStorageUpgradeService(
+        h,
+        targetTemplate,
+      );
+      const result = await service.upgradeProject({
+        projectId,
+        targetVersion: '2.0.0',
+        ...controls,
+      });
+
+      expect(result).toEqual({
+        success: true,
+        newVersion: '2.0.0',
+        promptTransfer: { imported: 1, deleted: 1, preserved: 1, skipped: 0 },
+      });
+      expect(getLastUpgradeImportResult()).toMatchObject({
+        success: true,
+        counts: { deleted: { statuses: dryRun.counts.toDelete.statuses } },
+      });
+
+      const profiles = await h.storage.listAgentProfiles({ projectId, limit: 100, offset: 0 });
+      expect(profiles.items).toEqual([
+        expect.objectContaining({ name: 'Codex Target', familySlug: 'worker-family' }),
+      ]);
+      const codexProfile = profiles.items[0];
+      const configs = await h.storage.listProfileProviderConfigsByProfile(codexProfile.id);
+      expect(configs).toEqual([
+        expect.objectContaining({ name: 'codex-target', providerName: 'codex' }),
+      ]);
+      const agents = await h.storage.listAgents(projectId, { limit: 100, offset: 0 });
+      expect(agents.items).toEqual([
+        expect.objectContaining({
+          name: 'Worker',
+          profileId: codexProfile.id,
+          providerConfigId: configs[0].id,
+          modelOverride: 'gpt-target',
+          effortOverride: 'high',
+        }),
+      ]);
+      expect(h.settings.getProjectActivePreset(projectId)).toBe('Target Preset');
+
+      const teams = await h.teamsStore.listTeams(projectId, { limit: 100, offset: 0 });
+      expect(teams.items).toEqual([
+        expect.objectContaining({
+          name: 'Target Squad',
+          allowTeamLeadCreateAgents: false,
+          maxMembers: 3,
+          maxConcurrentTasks: 1,
+        }),
+      ]);
+      const team = await h.teamsStore.getTeam(teams.items[0].id);
+      expect(team).toMatchObject({
+        profileIds: [codexProfile.id],
+        profileConfigSelections: [{ profileId: codexProfile.id, configIds: [configs[0].id] }],
+      });
+
+      const statusesAfter = await h.storage.listStatuses(projectId, { limit: 100, offset: 0 });
+      expect(statusesAfter.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: readyBefore.id, label: 'Ready', color: '#abcdef' }),
+          expect.objectContaining({ id: unusedBefore.id, label: 'Unused' }),
+          expect.objectContaining({ label: 'Done' }),
+        ]),
+      );
+      expect(statusesAfter.items.map((status) => status.label)).not.toContain('Legacy');
+      const doneStatus = statusesAfter.items.find((status) => status.label === 'Done')!;
+      const epicAfter = await h.storage.getEpic(epicId);
+      expect(epicAfter).toMatchObject({
+        id: epicId,
+        title: 'Established Epic',
+        description: 'must survive replacement',
+        statusId: doneStatus.id,
+      });
+      const prompts = await h.storage.listPrompts({ projectId, limit: 100, offset: 0 });
+      expect(prompts.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ title: 'Target System', tags: ['type:system'] }),
+          expect.objectContaining({
+            title: 'Local Knowledge',
+            contentPreview: 'preserve this established custom prompt',
+            tags: expect.arrayContaining(['type:custom', 'local']),
+          }),
+        ]),
+      );
+    });
+
+    it.each([
+      ['a non-null active preset', 'Current Preset'],
+      ['a null active preset', null],
+    ])(
+      'restores raw profile secrets and %s after a post-mutation failure',
+      async (_caseName, activePreset) => {
+        const { projectId, legacyStatusId } = await seedConfiguredUpgradeSource(
+          h,
+          `Configured Recovery ${activePreset ?? 'Null'}`,
+          activePreset,
+        );
+        const targetTemplate = configuredUpgradeTargetTemplate();
+        targetTemplate.statuses = [
+          { label: 'Ready', color: '#aaaaaa', position: 0 },
+          { label: 'Legacy', color: '#bbbbbb', position: 1 },
+          { label: 'Unused', color: '#cccccc', position: 2 },
+        ];
+        const { statusMappings: _statusMappings, ...controls } =
+          configuredUpgradeControls(legacyStatusId);
+        const { service } = createRealStorageUpgradeService(h, targetTemplate, {
+          failAfterFirstMutation: true,
+        });
+
+        const publicBefore = (await exportProjectWithHelper(
+          projectId,
+          undefined,
+          exportDeps(h),
+        )) as AnyRec;
+        expect(
+          (((publicBefore.profiles as AnyRec[])[0].providerConfigs as AnyRec[])[0].env as AnyRec)
+            .API_KEY,
+        ).toBe('***');
+
+        const result = await service.upgradeProject({
+          projectId,
+          targetVersion: '2.0.0',
+          ...controls,
+        });
+
+        expect(result).toEqual({
+          success: false,
+          error: 'Injected failure after target mutation',
+          restored: true,
+        });
+        expect(service.getProjectBackups(projectId)).toEqual([]);
+        const restoredProfiles = await h.storage.listAgentProfiles({
+          projectId,
+          limit: 100,
+          offset: 0,
+        });
+        expect(restoredProfiles.items).toEqual([
+          expect.objectContaining({ name: 'Current Worker' }),
+        ]);
+        const restoredConfigs = await h.storage.listProfileProviderConfigsByProfile(
+          restoredProfiles.items[0].id,
+        );
+        expect(restoredConfigs).toEqual([
+          expect.objectContaining({
+            name: 'claude-current',
+            env: { API_KEY: 'profile-secret-verbatim', LOG_LEVEL: 'debug' },
+          }),
+        ]);
+        expect(h.settings.getProjectActivePreset(projectId)).toBe(activePreset);
+
+        const publicAfter = (await exportProjectWithHelper(
+          projectId,
+          undefined,
+          exportDeps(h),
+        )) as AnyRec;
+        expect(
+          (((publicAfter.profiles as AnyRec[])[0].providerConfigs as AnyRec[])[0].env as AnyRec)
+            .API_KEY,
+        ).toBe('***');
+      },
+    );
+
+    it('returns a non-mutating race outcome and discards the backup when a session starts during backup', async () => {
+      const { projectId, legacyStatusId } = await seedConfiguredUpgradeSource(
+        h,
+        'Configured Upgrade Session Race',
+        'Current Preset',
+      );
+      const before = (await exportProjectWithHelper(projectId, undefined, exportDeps(h))) as AnyRec;
+      let sessionChecks = 0;
+      const sessions = {
+        getActiveSessionsForProject: () => {
+          sessionChecks++;
+          return sessionChecks === 1 ? [] : [{ id: 'late-session', agentId: 'late-agent' }];
+        },
+      };
+      const { service } = createRealStorageUpgradeService(h, configuredUpgradeTargetTemplate(), {
+        sessions,
+      });
+
+      const result = await service.upgradeProject({
+        projectId,
+        targetVersion: '2.0.0',
+        ...configuredUpgradeControls(legacyStatusId),
+      });
+
+      expect(result).toEqual({
+        success: false,
+        mutationStarted: false,
+        error: 'Import aborted: active agent sessions detected',
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: 'active_sessions',
+              message: 'Import aborted: active agent sessions detected',
+              details: {
+                activeSessions: [{ id: 'late-session', agentId: 'late-agent' }],
+              },
+            },
+          ],
+        },
+      });
+      expect(sessionChecks).toBe(2);
+      expect(service.getProjectBackups(projectId)).toEqual([]);
+      expect(result).not.toHaveProperty('backupId');
+      expect(result).not.toHaveProperty('restored');
+      const after = (await exportProjectWithHelper(projectId, undefined, exportDeps(h))) as AnyRec;
+      expect(normalizeExport(after)).toEqual(normalizeExport(before));
     });
   });
 
@@ -903,6 +1384,7 @@ describe('template round-trip contract safety net (real storage)', () => {
         {} as never,
         {} as never,
         h.settings,
+        { getActiveSessionsForProject: jest.fn().mockReturnValue([]) } as never,
       );
 
       const backupId = await upgradeService.createBackup(projectId);
@@ -959,6 +1441,7 @@ describe('template round-trip contract safety net (real storage)', () => {
         {} as never,
         {} as never,
         h.settings,
+        { getActiveSessionsForProject: jest.fn().mockReturnValue([]) } as never,
       );
 
       const backupId = await upgradeService.createBackup(projectId);
@@ -1029,6 +1512,26 @@ describe('template round-trip contract safety net (real storage)', () => {
       // Legacy import defaults optional collections to empty, not absent-error.
       expect(exportA.providerModels).toEqual([]);
       expect(exportA.providerEfforts).toEqual([]);
+    });
+  });
+
+  describe('replace import preset application', () => {
+    it('applies the freshly stored preset and marks it active only through the full-match helper', async () => {
+      await seedClaudeProvider(h);
+      const projectId = await freshProject(h, 'Preset Replace');
+
+      const result = await importProjectWithHelper(
+        { projectId, payload: allSectionsTemplate(), presetName: 'Fast' },
+        importDeps(h) as never,
+      );
+
+      expect(result).toMatchObject({ success: true, mode: 'replace' });
+      expect(h.settings.getProjectActivePreset(projectId)).toBe('Fast');
+      const agents = await h.storage.listAgents(projectId, { limit: 100, offset: 0 });
+      expect(agents.items.find((agent) => agent.name === 'Builder Agent')).toMatchObject({
+        modelOverride: 'opus',
+        effortOverride: 'high',
+      });
     });
   });
 

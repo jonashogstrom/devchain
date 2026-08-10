@@ -269,6 +269,7 @@ export const ChatTerminal = forwardRef<ChatTerminalHandle, ChatTerminalProps>(fu
     appTheme,
     writePump.setTerminal,
     setScrollIntentController,
+    isAuthorityRef,
   );
 
   // Seed management
@@ -372,6 +373,7 @@ export const ChatTerminal = forwardRef<ChatTerminalHandle, ChatTerminalProps>(fu
       },
       disconnect: () => {
         termLog('socket_disconnect_event', { sessionId });
+        isAuthorityRef.current = false;
         dispatchConn({ type: 'SOCKET_DISCONNECT' });
         isSubscribedRef.current = false;
         // Invalidate any active history attempt and drop its unapplied buffer before reconnect
@@ -533,6 +535,9 @@ export const ChatTerminal = forwardRef<ChatTerminalHandle, ChatTerminalProps>(fu
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || !socket.connected) return;
+    if (isSubscribedRef.current && !isAuthorityRef.current) {
+      socket.emit('terminal:focus', { sessionId });
+    }
     socket.emit('terminal:input', { sessionId, data: input });
     setInput('');
     inputRef.current?.focus();

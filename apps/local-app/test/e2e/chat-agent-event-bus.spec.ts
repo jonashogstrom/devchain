@@ -180,7 +180,10 @@ async function installRoutes(page: Page) {
 
 async function emitEventBusFrame(
   page: Page,
-  frame: { type: 'sent' | 'session.starting'; payload: unknown },
+  frame: {
+    type: 'sent' | 'session.starting' | 'project.outbound' | 'project.inbound';
+    payload: unknown;
+  },
 ) {
   await page.evaluate(
     async ({ projectId, type, payload }) => {
@@ -268,6 +271,16 @@ class EventBusStoryboard {
     });
     await expect(this.overlay.locator('[data-route-animation]')).toHaveCount(8);
     await this.seek('launch');
+  }
+
+  async emitProjectMessage(
+    direction: 'outbound' | 'inbound',
+    status: 'delivered' | 'failed',
+  ): Promise<void> {
+    await emitEventBusFrame(this.page, {
+      type: direction === 'outbound' ? 'project.outbound' : 'project.inbound',
+      payload: { agentId: 'agent-coder', status },
+    });
   }
 
   async routeDurationMs(): Promise<number> {
@@ -553,5 +566,94 @@ test.describe('Chat agent event bus', () => {
     expect(ocean.spark).not.toEqual(dark.spark);
     expect(`rgb(${ocean.spark.r}, ${ocean.spark.g}, ${ocean.spark.b})`).not.toBe(ocean.agentBody);
     expect(`rgb(${ocean.spark.r}, ${ocean.spark.g}, ${ocean.spark.b})`).not.toBe(ocean.sessionBody);
+  });
+
+  test('storyboards project direction, failure, Reduce motion, and layout neutrality', async ({
+    page,
+  }) => {
+    await page.clock.install({ time: new Date(NOW) });
+    const storyboard = new EventBusStoryboard(page);
+    await storyboard.open();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+
+    const localAgent = page.locator('[data-agent-event-bus-agent-id="agent-coder"]');
+    const beforeBox = await localAgent.boundingBox();
+    expect(beforeBox).not.toBeNull();
+
+    await storyboard.emitProjectMessage('outbound', 'failed');
+    const outbound = storyboard.overlay.locator(
+      '[data-route-kind="project-egress"][data-route-source="agent"][data-route-target="project-boundary"]',
+    );
+    await expect(outbound).toHaveCount(3);
+    await expect(outbound.first()).toHaveClass(/agent-event-bus__route--agent-message/);
+    await expect(
+      storyboard.overlay.locator(
+        '[data-marker-kind="ignition"][data-route-kind="project-egress"][data-route-source="agent"][data-route-target="project-boundary"]',
+      ),
+    ).toHaveCount(1);
+
+    const outboundDuration = await storyboard.routeDurationMs();
+    await page.clock.fastForward(outboundDuration);
+    const outboundArrival = storyboard.overlay.locator(
+      '[data-marker-kind="arrival"][data-route-kind="project-egress"][data-route-source="agent"][data-route-target="project-boundary"]',
+    );
+    await expect(outboundArrival).toHaveCount(1);
+    await expect(outboundArrival).toHaveClass(/agent-event-bus__feedback--failed/);
+    await expect(outboundArrival).toHaveClass(/agent-event-bus__failed-anchor/);
+
+    const afterOutboundBox = await localAgent.boundingBox();
+    expect(afterOutboundBox).toEqual(beforeBox);
+    await page.clock.fastForward(240);
+    await expect(storyboard.overlay.locator('[data-route-animation]')).toHaveCount(0);
+
+    await storyboard.emitProjectMessage('inbound', 'delivered');
+    const inbound = storyboard.overlay.locator(
+      '[data-route-kind="project-ingress"][data-route-source="project-boundary"][data-route-target="agent"]',
+    );
+    await expect(inbound).toHaveCount(3);
+    await expect(
+      storyboard.overlay.locator(
+        '[data-marker-kind="ignition"][data-route-kind="project-ingress"][data-route-source="project-boundary"][data-route-target="agent"]',
+      ),
+    ).toHaveCount(1);
+    const inboundDuration = await storyboard.routeDurationMs();
+    await page.clock.fastForward(inboundDuration);
+    await expect(
+      storyboard.overlay.locator(
+        '[data-marker-kind="arrival"][data-route-kind="project-ingress"][data-route-source="project-boundary"][data-route-target="agent"]',
+      ),
+    ).toHaveCount(1);
+    await page.clock.fastForward(240);
+    await expect(storyboard.overlay.locator('[data-route-animation]')).toHaveCount(0);
+
+    const lane = page.getByTestId('agent-event-bus-control-lane');
+    await lane.click({ button: 'right' });
+    await page.getByRole('menuitemcheckbox', { name: 'Reduce motion' }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem('devchain:chatSidebar:eventBusReduceMotion'),
+        ),
+      )
+      .toBe('true');
+
+    await storyboard.emitProjectMessage('outbound', 'delivered');
+    await expect(storyboard.overlay.locator('[data-route-animation]')).toHaveCount(0);
+    await expect(storyboard.overlay.getByTestId('agent-event-bus-runtime-origin')).toHaveAttribute(
+      'data-route-kind',
+      'project-egress',
+    );
+    await expect(storyboard.overlay.getByTestId('agent-event-bus-runtime-origin')).toHaveAttribute(
+      'data-route-source',
+      'agent',
+    );
+    await expect(storyboard.overlay.getByTestId('agent-event-bus-runtime-origin')).toHaveAttribute(
+      'data-route-target',
+      'project-boundary',
+    );
+    const reducedBox = await localAgent.boundingBox();
+    expect(reducedBox).toEqual(beforeBox);
+    await page.clock.fastForward(280);
+    await expect(storyboard.overlay.getByTestId('agent-event-bus-runtime-origin')).toHaveCount(0);
   });
 });

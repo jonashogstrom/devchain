@@ -37,25 +37,15 @@ export interface Step4ReviewProps {
   /** Unmatched-status → template-status-label map (only meaningful when unmatchedStatuses exist). */
   statusMappings: Record<string, string>;
   onStatusMappingChange: (statusId: string, templateLabel: string) => void;
+  operationName?: string;
 }
 
-/**
- * Wizard final step — Review & Confirm (import). Extracted VERBATIM from the legacy `ImportConfirmDialog`
- * body: the to-import / will-delete counts (ALWAYS shown) plus a conditional status-mapping section
- * (rendered ONLY when the dry-run reports unmatched statuses). The destructive "Import" action is the
- * wizard footer's submit on this last step — the controller gates it on the dry-run having loaded and
- * every required status mapping being filled. This preserves today's DESTRUCTIVE-COUNTS confirmation.
- *
- * Counts + status mapping are kept as one review surface (as the legacy dialog was) rather than split
- * across two wizard steps: the dry-run is async and fires on entry to this step, so a preceding
- * "status mappings" step would have no data to gate on until this step runs — merging avoids that
- * ordering hazard while keeping the status section strictly conditional.
- */
 export function Step4Review({
   review,
   isLoading,
   statusMappings,
   onStatusMappingChange,
+  operationName = 'import',
 }: Step4ReviewProps) {
   if (isLoading || !review) {
     return (
@@ -64,7 +54,7 @@ export function Step4Review({
         data-testid="wizard-review-loading"
       >
         <Loader2 className="h-4 w-4 animate-spin" />
-        Computing import changes…
+        Computing {operationName} changes…
       </div>
     );
   }
@@ -74,8 +64,9 @@ export function Step4Review({
   return (
     <div className="space-y-3 text-sm" data-testid="wizard-review-step">
       <p className="text-muted-foreground">
-        This will REPLACE prompts, profiles, agents, statuses, and the initial session prompt for
-        this project. This action is destructive.
+        This will REPLACE prompts, profiles, agents, teams, watchers, subscribers, scheduled epics,
+        and the initial session prompt for this project. Only unmatched statuses mapped below will
+        be deleted; matching statuses are retained. This action is destructive.
       </p>
 
       {review.missingProviders && review.missingProviders.length > 0 && (

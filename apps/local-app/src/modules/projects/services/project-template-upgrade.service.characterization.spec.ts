@@ -55,19 +55,24 @@ describe('ProjectTemplateUpgradeService characterization', () => {
     const settings = {
       getProjectTemplateMetadata: jest.fn().mockReturnValue(metadata),
       setProjectTemplateMetadata: jest.fn().mockResolvedValue(undefined),
+      getProjectActivePreset: jest.fn().mockReturnValue(null),
+      setProjectActivePreset: jest.fn().mockResolvedValue(undefined),
       getRegistryConfig: jest.fn().mockReturnValue({ url: 'https://registry.example' }),
     };
     const projects = {
       exportProject: jest.fn().mockResolvedValue(exportPayload),
       importProject: jest.fn().mockResolvedValue(createImportResult()),
+      setupPreview: jest.fn().mockResolvedValue({}),
     };
+    const sessions = { getActiveSessionsForProject: jest.fn().mockReturnValue([]) };
     const service = new ProjectTemplateUpgradeService(
       projects as never,
       cache as never,
       unified as never,
       settings as never,
+      sessions as never,
     );
-    return { service, cache, settings, projects };
+    return { service, cache, settings, projects, sessions };
   }
 
   afterEach(() => {
@@ -82,12 +87,13 @@ describe('ProjectTemplateUpgradeService characterization', () => {
       service.upgradeProject({ projectId: 'project-1', targetVersion: '2.0.0' }),
     ).resolves.toEqual({ success: true, newVersion: '2.0.0' });
 
-    expect(projects.exportProject).toHaveBeenCalledWith('project-1');
+    expect(projects.exportProject).toHaveBeenCalledWith('project-1', {
+      profileConfigEnvTransform: expect.any(Function),
+    });
     expect(projects.importProject).toHaveBeenCalledWith({
       projectId: 'project-1',
       payload: cachedTemplate.content,
       dryRun: false,
-      familyProviderMappings: {},
     });
     expect(settings.setProjectTemplateMetadata).toHaveBeenCalledWith(
       'project-1',
@@ -163,18 +169,27 @@ describe('ProjectTemplateUpgradeService characterization', () => {
     settings.getProjectTemplateMetadata.mockReturnValueOnce(null);
     await expect(
       service.upgradeProject({ projectId: 'project-1', targetVersion: '2.0.0' }),
-    ).resolves.toEqual({ success: false, error: 'Project not linked to a template' });
+    ).resolves.toEqual({
+      success: false,
+      mutationStarted: false,
+      error: 'Project not linked to a template',
+    });
 
     settings.getProjectTemplateMetadata.mockReturnValueOnce({ ...metadata, source: 'file' });
     await expect(
       service.upgradeProject({ projectId: 'project-1', targetVersion: '2.0.0' }),
-    ).resolves.toEqual({ success: false, error: 'File-based templates cannot be upgraded' });
+    ).resolves.toEqual({
+      success: false,
+      mutationStarted: false,
+      error: 'File-based templates cannot be upgraded',
+    });
 
     cache.getTemplate.mockResolvedValueOnce(null);
     await expect(
       service.upgradeProject({ projectId: 'project-1', targetVersion: '9.0.0' }),
     ).resolves.toEqual({
       success: false,
+      mutationStarted: false,
       error: 'Version 9.0.0 is not cached. Please download it first from the Registry page.',
     });
 

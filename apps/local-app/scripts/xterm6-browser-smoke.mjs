@@ -1,10 +1,12 @@
 /**
- * Real xterm 6 Chromium smoke for the trusted scroll-intent seam.
+ * Real xterm 6 Chromium smoke for trusted terminal input-intent seams.
  *
  * Jest mocks the browser `Terminal`, so it can prove the seam's routing logic but NOT the xterm 6
  * SmoothScrollableElement's real DOM/event coupling. This smoke loads the SAME production modules
- * (`scroll-intent-binding` + `scroll-history-detector`) through the Vite dev server and drives them
- * with TRUSTED Chromium input (real wheel / pointer, not `dispatchEvent`), asserting:
+ * (`terminal-input-intent-binding`, `scroll-intent-binding`, and `scroll-history-detector`) through
+ * the Vite dev server and drives them with TRUSTED Chromium input (not `dispatchEvent`), asserting:
+ *   - physical keys and clipboard/text insertion produce input intent before xterm onData;
+ *   - programmatic blur/focus DEC reports reach onData without producing input intent;
  *   - a trusted wheel-up from the bottom moves xterm natively and yields exactly ONE decision;
  *   - a trusted scrollbar track click and a slider drag each yield exactly ONE decision;
  *   - terminal-content selection yields none;
@@ -15,6 +17,8 @@
  * Prerequisite: the Vite dev server must be serving the Local App UI (`pnpm --filter local-app
  * dev:ui`, port 5175 by default). Override with XTERM6_SMOKE_BASE_URL. The smoke builds a
  * standalone terminal in the page and needs no API/socket backend.
+ * OS-level IME composition and virtual-keyboard entry remain manual checks because Playwright
+ * cannot select or drive those platform input methods deterministically.
  */
 import { chromium } from '@playwright/test';
 
@@ -22,7 +26,11 @@ const BASE_URL = process.env.XTERM6_SMOKE_BASE_URL ?? 'http://127.0.0.1:5175';
 
 const browser = await chromium.launch();
 try {
-  const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  const context = await browser.newContext({
+    viewport: { width: 1000, height: 700 },
+    permissions: ['clipboard-read', 'clipboard-write'],
+  });
+  const page = await context.newPage();
   await page.goto(`${BASE_URL}/@vite/client`);
 
   // Build the terminal and wire the PRODUCTION seam + detector exactly as useXterm does.
@@ -32,6 +40,9 @@ try {
     const fitModule = await import('/@id/@xterm/addon-fit');
     const { createScrollIntentBinding } = await import(
       '/src/ui/components/terminal/scroll-intent-binding.ts'
+    );
+    const { createTerminalInputIntentBinding } = await import(
+      '/src/ui/components/terminal/terminal-input-intent-binding.ts'
     );
     const { createScrollHistoryDetector, SCROLL_GESTURE_STALE_MS } = await import(
       '/src/ui/components/terminal/scroll-history-detector.ts'
@@ -62,9 +73,37 @@ try {
 
     let ttyMode = false;
     let mouseInput = '';
+    const inputTrace = [];
+    const domInputTrace = [];
+    const keyTrace = [];
     terminal.onData((data) => {
       mouseInput += data;
+      inputTrace.push({ marker: 'input', data });
     });
+    terminal.onKey(({ key, domEvent }) => {
+      keyTrace.push({ key, trusted: domEvent.isTrusted });
+    });
+    const inputIntent = createTerminalInputIntentBinding({
+      terminal,
+      container: host,
+      onInputIntent: () => inputTrace.push({ marker: 'focus' }),
+    });
+    for (const type of ['paste', 'compositionstart', 'beforeinput']) {
+      host.addEventListener(
+        type,
+        (event) => {
+          domInputTrace.push({
+            type,
+            trusted: event.isTrusted,
+            inputType: event instanceof InputEvent ? event.inputType : null,
+            data: event instanceof InputEvent ? event.data : null,
+            clipboardText:
+              event instanceof ClipboardEvent ? event.clipboardData?.getData('text/plain') : null,
+          });
+        },
+        { capture: true },
+      );
+    }
 
     // Short cooldown isolates the seam's DOM routing (the cooldown/cycle policy is unit-proven);
     // the gesture-stale window stays at the production default so the intent-expiry phase is real.
@@ -124,6 +163,20 @@ try {
       resetMouseInput: () => {
         mouseInput = '';
       },
+      inputTrace: () => inputTrace.slice(),
+      domInputTrace: () => domInputTrace.slice(),
+      keyTrace: () => keyTrace.slice(),
+      resetInputTrace: () => {
+        inputTrace.length = 0;
+        domInputTrace.length = 0;
+        keyTrace.length = 0;
+      },
+      focusTerminal: () => terminal.focus(),
+      enableDecFocusReporting: () => write('\x1b[?1004h'),
+      cycleProgrammaticFocus: () => {
+        terminal.blur();
+        terminal.focus();
+      },
       enableTuiMouse: () => write('\x1b[?1049h\x1b[?1000h\x1b[?1006h'),
       disableTuiMouse: () => write('\x1b[?1006l\x1b[?1000l\x1b[?1049l'),
       rects: () => ({
@@ -133,7 +186,9 @@ try {
       }),
       teardown: () => {
         clearInterval(poll);
+        inputIntent.dispose();
         controller.dispose();
+        terminal.dispose();
       },
     };
 
@@ -164,6 +219,91 @@ try {
     await settle();
     await smoke(() => window.__xterm6Smoke.resetDecisions());
   };
+
+  const assertFocusBeforeInput = (label, trace, expectedData) => {
+    const focusIndex = trace.findIndex(({ marker }) => marker === 'focus');
+    const inputIndex = trace.findIndex(
+      ({ marker, data }) =>
+        marker === 'input' && (expectedData === undefined || data === expectedData),
+    );
+    if (focusIndex < 0) throw new Error(`${label} did not record an input-intent focus marker`);
+    if (inputIndex < 0) {
+      throw new Error(`${label} did not reach xterm onData: ${JSON.stringify(trace)}`);
+    }
+    if (focusIndex >= inputIndex) {
+      throw new Error(`${label} expected focus before input, got ${JSON.stringify(trace)}`);
+    }
+  };
+
+  // --- Input phase 1: trusted physical key emits intent before xterm onData ---
+  await smoke(() => window.__xterm6Smoke.focusTerminal());
+  await smoke(() => window.__xterm6Smoke.resetInputTrace());
+  await page.keyboard.press('KeyK');
+  await settle();
+  const physicalKey = {
+    trace: await smoke(() => window.__xterm6Smoke.inputTrace()),
+    keys: await smoke(() => window.__xterm6Smoke.keyTrace()),
+  };
+  assertFocusBeforeInput('Trusted physical key', physicalKey.trace, 'k');
+  if (!physicalKey.keys.some(({ key, trusted }) => key === 'k' && trusted)) {
+    throw new Error(
+      `Physical key did not reach trusted xterm onKey: ${JSON.stringify(physicalKey.keys)}`,
+    );
+  }
+
+  // --- Input phase 2: trusted clipboard paste emits intent before pasted onData ---
+  const pastedText = 'trusted-paste';
+  await smoke(() => window.__xterm6Smoke.resetInputTrace());
+  await page.evaluate((text) => navigator.clipboard.writeText(text), pastedText);
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+Shift+V');
+  await settle();
+  const clipboardPaste = {
+    trace: await smoke(() => window.__xterm6Smoke.inputTrace()),
+    dom: await smoke(() => window.__xterm6Smoke.domInputTrace()),
+  };
+  assertFocusBeforeInput('Trusted clipboard paste', clipboardPaste.trace, pastedText);
+  if (!clipboardPaste.dom.some(({ type, trusted }) => type === 'paste' && trusted)) {
+    throw new Error(
+      `Clipboard shortcut did not produce a trusted paste: ${JSON.stringify(clipboardPaste.dom)}`,
+    );
+  }
+
+  // --- Input phase 3: Chromium trusted text insertion exposes beforeinput coupling ---
+  const insertedText = 'trusted-insert';
+  await smoke(() => window.__xterm6Smoke.resetInputTrace());
+  await page.keyboard.insertText(insertedText);
+  await settle();
+  const textInsertion = {
+    trace: await smoke(() => window.__xterm6Smoke.inputTrace()),
+    dom: await smoke(() => window.__xterm6Smoke.domInputTrace()),
+  };
+  assertFocusBeforeInput('Trusted text insertion', textInsertion.trace, insertedText);
+  if (!textInsertion.dom.some(({ type, trusted }) => type === 'beforeinput' && trusted)) {
+    throw new Error(
+      `Chromium text insertion did not expose trusted beforeinput: ${JSON.stringify(textInsertion.dom)}`,
+    );
+  }
+
+  // --- Input phase 4: DEC focus reports reach onData without claiming input intent ---
+  await smoke(() => window.__xterm6Smoke.enableDecFocusReporting());
+  await smoke(() => window.__xterm6Smoke.resetInputTrace());
+  await smoke(() => window.__xterm6Smoke.cycleProgrammaticFocus());
+  await settle();
+  const decFocus = { trace: await smoke(() => window.__xterm6Smoke.inputTrace()) };
+  const decInput = decFocus.trace
+    .filter(({ marker }) => marker === 'input')
+    .map(({ data }) => data)
+    .join('');
+  if (decFocus.trace.some(({ marker }) => marker === 'focus')) {
+    throw new Error(
+      `Programmatic DEC focus cycle stole input authority: ${JSON.stringify(decFocus.trace)}`,
+    );
+  }
+  if (decInput !== '\x1b[O\x1b[I') {
+    throw new Error(
+      `Programmatic DEC focus cycle expected ESC[O then ESC[I onData, got ${JSON.stringify(decInput)}`,
+    );
+  }
 
   // --- Phase 1: trusted wheel-up from the bottom moves xterm natively → exactly one decision ---
   await rearm();
@@ -282,6 +422,10 @@ try {
 
   const result = {
     customScrollbarPresent: setup.customScrollbarPresent,
+    physicalKey,
+    clipboardPaste,
+    textInsertion,
+    decFocus,
     wheel,
     track,
     drag,

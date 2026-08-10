@@ -11,6 +11,7 @@ import {
 } from '@/common/constants/terminal';
 import { DARK_XTERM_THEME, OCEAN_XTERM_THEME } from '../terminal-themes';
 import { createTerminalHistorySync } from '../terminal-history-sync';
+import type { Socket } from 'socket.io-client';
 
 // Mock @xterm/xterm (same pattern as ChatTerminal.spec.tsx)
 jest.mock('@xterm/xterm', () => {
@@ -33,6 +34,7 @@ jest.mock('@xterm/xterm', () => {
       scrollLines: jest.fn(),
       scrollToBottom: jest.fn(),
       scrollToLine: jest.fn(),
+      onKey: jest.fn().mockReturnValue({ dispose: jest.fn() }),
       onData: jest.fn().mockReturnValue({ dispose: jest.fn() }),
       onScroll: jest.fn().mockReturnValue({ dispose: jest.fn() }),
       onSelectionChange: jest.fn().mockReturnValue({ dispose: jest.fn() }),
@@ -384,6 +386,143 @@ describe('useXterm', () => {
           scrollback: validValue,
         }),
       );
+    });
+  });
+
+  describe('TTY input authority recovery', () => {
+    function renderTtyHook(options?: {
+      connected?: boolean;
+      subscribed?: boolean;
+      authority?: boolean;
+      includeSubscribedRef?: boolean;
+      includeAuthorityRef?: boolean;
+    }) {
+      const socket = {
+        connected: options?.connected ?? true,
+        emit: jest.fn(),
+      } as unknown as Socket;
+      const terminalRef = { current: mockContainerElement };
+      const view = renderHook(() => {
+        const xtermRef = useRef<Terminal | null>(null);
+        const fitAddonRef = useRef<FitAddon | null>(null);
+        const isSubscribedRef = useRef(options?.subscribed ?? true);
+        const isAuthorityRef = useRef(options?.authority ?? false);
+        useXterm(
+          terminalRef,
+          'test-session',
+          xtermRef,
+          fitAddonRef,
+          undefined,
+          'tty',
+          undefined,
+          options?.includeSubscribedRef === false ? undefined : isSubscribedRef,
+          undefined,
+          undefined,
+          undefined,
+          DEFAULT_TERMINAL_SCROLLBACK,
+          socket,
+          'dark',
+          undefined,
+          undefined,
+          options?.includeAuthorityRef === false ? undefined : isAuthorityRef,
+        );
+        return { xtermRef, isSubscribedRef, isAuthorityRef };
+      });
+      const terminal = view.result.current.xtermRef.current!;
+      const onKey = (terminal.onKey as jest.Mock).mock.calls[0][0] as () => void;
+      const onData = (terminal.onData as jest.Mock).mock.calls[0][0] as (data: string) => void;
+      return { ...view, onData, onKey, socket: socket as unknown as { emit: jest.Mock } };
+    }
+
+    it('emits focus from onKey before the related connected-only input', () => {
+      const { onData, onKey, socket } = renderTtyHook();
+
+      act(() => {
+        onKey();
+        onData('a');
+      });
+
+      expect(socket.emit.mock.calls).toEqual([
+        ['terminal:focus', { sessionId: 'test-session' }],
+        ['terminal:input', { sessionId: 'test-session', data: 'a', ttyMode: true }],
+      ]);
+    });
+
+    it('routes capture-phase DOM text intent through the same focus guard', () => {
+      const { socket } = renderTtyHook();
+
+      act(() => {
+        mockContainerElement.dispatchEvent(new Event('paste', { bubbles: true }));
+        mockContainerElement.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+        mockContainerElement.dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
+      });
+
+      expect(socket.emit.mock.calls).toEqual([
+        ['terminal:focus', { sessionId: 'test-session' }],
+        ['terminal:focus', { sessionId: 'test-session' }],
+        ['terminal:focus', { sessionId: 'test-session' }],
+      ]);
+    });
+
+    it.each([
+      ['missing subscription ref', { includeSubscribedRef: false }],
+      ['missing authority ref', { includeAuthorityRef: false }],
+      ['unsubscribed state', { subscribed: false }],
+      ['held authority', { authority: true }],
+    ])('fails closed for focus claims with %s', (_label, options) => {
+      const { onData, onKey, socket } = renderTtyHook(options);
+
+      act(() => {
+        onKey();
+        onData('a');
+      });
+
+      expect(socket.emit.mock.calls).toEqual([
+        ['terminal:input', { sessionId: 'test-session', data: 'a', ttyMode: true }],
+      ]);
+    });
+
+    it('keeps both focus and input silent while disconnected', () => {
+      const { onData, onKey, socket } = renderTtyHook({ connected: false });
+
+      act(() => {
+        onKey();
+        onData('a');
+      });
+
+      expect(socket.emit).not.toHaveBeenCalled();
+    });
+
+    it('forwards a CSI focus report from onData without treating it as intent', () => {
+      const { onData, socket } = renderTtyHook();
+
+      act(() => onData('\x1b[I'));
+
+      expect(socket.emit.mock.calls).toEqual([
+        ['terminal:input', { sessionId: 'test-session', data: '\x1b[I', ttyMode: true }],
+      ]);
+    });
+
+    it('registers the binding only in TTY mode and disposes it during cleanup', () => {
+      const tty = renderTtyHook();
+      const ttyTerminal = tty.result.current.xtermRef.current!;
+      const keyDisposable = (ttyTerminal.onKey as jest.Mock).mock.results[0].value as {
+        dispose: jest.Mock;
+      };
+
+      tty.unmount();
+
+      expect(keyDisposable.dispose).toHaveBeenCalledTimes(1);
+
+      const terminalRef = { current: mockContainerElement };
+      const form = renderHook(() => {
+        const xtermRef = useRef<Terminal | null>(null);
+        const fitAddonRef = useRef<FitAddon | null>(null);
+        useXterm(terminalRef, 'form-session', xtermRef, fitAddonRef, undefined, 'form');
+        return xtermRef;
+      });
+
+      expect(form.result.current.current?.onKey).not.toHaveBeenCalled();
     });
   });
 

@@ -206,13 +206,26 @@ describe('ProjectsService — selectedProviderNames validation', () => {
         limit: 100,
         offset: 0,
       }),
+      listPrompts: jest.fn().mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 }),
+      listAgentProfiles: jest
+        .fn()
+        .mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 }),
+      listAgents: jest.fn().mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 }),
+      listStatuses: jest.fn().mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 }),
+      listWatchers: jest.fn().mockResolvedValue([]),
+      listSubscribers: jest.fn().mockResolvedValue([]),
+      listScheduledEpics: jest.fn().mockResolvedValue({ items: [], total: 0 }),
+      countEpicsByStatus: jest.fn().mockResolvedValue(0),
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ProjectsService,
         { provide: STORAGE_SERVICE, useValue: storage },
-        { provide: SessionsService, useValue: {} },
+        {
+          provide: SessionsService,
+          useValue: { getActiveSessionsForProject: jest.fn().mockReturnValue([]) },
+        },
         { provide: SettingsService, useValue: {} },
         { provide: WatchersService, useValue: {} },
         { provide: WatcherRunnerService, useValue: {} },
@@ -241,26 +254,39 @@ describe('ProjectsService — selectedProviderNames validation', () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
-  it('importProject rejects an unknown provider name (400 before any import work)', async () => {
-    await expect(
-      service.importProject({
-        projectId: 'p1',
-        payload: {},
-        selectedProviderNames: ['ghost'],
-      }),
-    ).rejects.toBeInstanceOf(ValidationError);
+  it('importProject returns structured readiness for an unknown provider name', async () => {
+    const result = await service.importProject({
+      projectId: 'p1',
+      payload: {},
+      selectedProviderNames: ['ghost'],
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: 'selected_providers_not_installed',
+            details: { providerNames: ['ghost'] },
+          },
+        ],
+      },
+    });
   });
 
-  it('accepts a known provider name case-insensitively (passes validation, delegates onward)', async () => {
-    // 'CLAUDE' matches installed 'Claude'; validation passes, so the call proceeds past the guard
-    // into importProject work (which then fails on the empty payload — proving the guard let it through).
-    await expect(
-      service.importProject({
-        projectId: 'p1',
-        payload: {},
-        selectedProviderNames: ['CLAUDE'],
-        dryRun: true,
-      }),
-    ).rejects.not.toBeInstanceOf(ValidationError);
+  it('accepts an installed provider name case-insensitively in readiness', async () => {
+    const result = await service.importProject({
+      projectId: 'p1',
+      payload: {},
+      selectedProviderNames: ['CLAUDE'],
+      dryRun: true,
+    });
+
+    expect(result).toMatchObject({
+      dryRun: true,
+      readiness: { ready: true, issues: [] },
+    });
   });
 });

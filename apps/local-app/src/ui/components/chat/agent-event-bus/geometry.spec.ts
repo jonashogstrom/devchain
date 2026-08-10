@@ -1,11 +1,15 @@
 import {
   createRoundedOrthogonalPath,
+  createRoundedProjectEgressPath,
+  createRoundedProjectIngressPath,
   createRoundedSystemIngressPath,
   DEFAULT_BUS_X,
   EVENT_BUS_GUTTER_RIGHT,
   EVENT_BUS_ROUTE_DURATION_MS,
   roundSvgCoordinate,
   selectAgentEventBusRoute,
+  selectProjectEgressEventBusRoute,
+  selectProjectIngressEventBusRoute,
   selectRuntimeEventBusRoute,
 } from './geometry';
 import type { AgentEventBusAnchor, AgentEventBusGeometrySnapshot } from './types';
@@ -87,6 +91,44 @@ describe('agent event-bus geometry', () => {
     expect(path.durationMs).toBe(EVENT_BUS_ROUTE_DURATION_MS);
   });
 
+  it('models project ingress at the runtime coordinate with a distinct endpoint discriminant', () => {
+    const path = createRoundedProjectIngressPath(
+      { ...anchor('recipient', 'recipient', 100.006, 1), x: 52.006 },
+      8.004,
+      8.006,
+      12.006,
+    );
+
+    expect(path.d).toBe('M 8 8.01 V 88 Q 8 100.01 20.01 100.01 H 52.01');
+    expect(path.source).toEqual({
+      kind: 'project-boundary',
+      key: 'project-boundary',
+      x: 8,
+      y: 8.01,
+    });
+    expect(path.recipient).toMatchObject({ kind: 'agent', key: 'recipient' });
+    expect(path.source.kind).not.toBe('runtime');
+  });
+
+  it('builds project egress in the truthful agent-to-boundary animation direction', () => {
+    const path = createRoundedProjectEgressPath(
+      { ...anchor('source', 'source', 100.006, 1), x: 52.006 },
+      8.004,
+      8.006,
+      12.006,
+    );
+
+    expect(path.d).toBe('M 52.01 100.01 H 20.01 Q 8 100.01 8 88 V 8.01');
+    expect(path.source).toMatchObject({ kind: 'agent', key: 'source' });
+    expect(path.recipient).toEqual({
+      kind: 'project-boundary',
+      key: 'project-boundary',
+      x: 8,
+      y: 8.01,
+    });
+    expect(path.length).toBe(roundSvgCoordinate(44.01 + 92 - 2 * 12.01 + (Math.PI * 12.01) / 2));
+  });
+
   it('selects duplicate sender and recipient copies jointly by vertical distance then DOM order', () => {
     const geometry = snapshot([
       anchor('sender-top', 'sender', 20, 0),
@@ -148,5 +190,25 @@ describe('agent event-bus geometry', () => {
     expect(selected?.recipient.key).toBe('near-earlier');
     expect(selected?.path.source).toEqual(geometry.runtimeOrigin);
     expect(selectRuntimeEventBusRoute(geometry, 'missing')).toBeNull();
+  });
+
+  it('selects only mounted local copies for dedicated project ingress and egress routes', () => {
+    const geometry = snapshot([
+      { ...anchor('far', 'local-agent', 160, 0), x: 48 },
+      { ...anchor('near-later', 'local-agent', 80, 2), x: 48 },
+      { ...anchor('near-earlier', 'local-agent', 80, 1), x: 48 },
+      anchor('unrelated', 'unrelated-agent', 20, 3),
+    ]);
+
+    const ingress = selectProjectIngressEventBusRoute(geometry, 'local-agent');
+    const egress = selectProjectEgressEventBusRoute(geometry, 'local-agent');
+
+    expect(ingress?.recipient.key).toBe('near-earlier');
+    expect(ingress?.path.source).toMatchObject({ kind: 'project-boundary', x: 8, y: 8 });
+    expect(egress?.source.key).toBe('near-earlier');
+    expect(egress?.path.recipient).toMatchObject({ kind: 'project-boundary', x: 8, y: 8 });
+    expect(selectProjectIngressEventBusRoute(geometry, 'foreign-agent')).toBeNull();
+    expect(selectProjectEgressEventBusRoute(geometry, 'foreign-agent')).toBeNull();
+    expect('projectBoundary' in geometry).toBe(false);
   });
 });

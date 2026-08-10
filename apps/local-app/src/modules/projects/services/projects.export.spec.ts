@@ -829,6 +829,51 @@ describe('ProjectsService', () => {
       expect(result.agents[0].modelOverride).toBe('anthropic/claude-sonnet-4-5');
     });
 
+    it('should allow only profile-config env to bypass sanitization for internal snapshots', async () => {
+      const projectId = 'project-123';
+
+      storage.listPrompts.mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 });
+      storage.listAgentProfiles.mockResolvedValue({
+        items: [{ id: 'prof-1', name: 'Test Profile' }],
+        total: 1,
+        limit: 1000,
+        offset: 0,
+      });
+      storage.listProfileProviderConfigsByProfile.mockResolvedValue([
+        {
+          id: 'config-1',
+          profileId: 'prof-1',
+          providerId: 'prov-1',
+          name: 'default',
+          options: null,
+          env: { PROFILE_API_KEY: 'profile-secret' },
+          position: 0,
+        },
+      ]);
+      storage.listProvidersByIds.mockResolvedValue([
+        {
+          id: 'prov-1',
+          name: 'claude',
+          autoCompactThreshold: null,
+          env: { PROVIDER_API_KEY: 'provider-secret' },
+        },
+      ]);
+      storage.listAgents.mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 });
+      storage.listStatuses.mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 });
+      storage.getInitialSessionPrompt.mockResolvedValue(null);
+
+      const result = await service.exportProject(projectId, {
+        profileConfigEnvTransform: (env) => env ?? null,
+      });
+
+      expect(result.profiles[0].providerConfigs?.[0].env).toEqual({
+        PROFILE_API_KEY: 'profile-secret',
+      });
+      expect(result.providerSettings?.[0].env).toEqual({
+        PROVIDER_API_KEY: '***',
+      });
+    });
+
     it('should not include providerConfigs in export when profile has none', async () => {
       const projectId = 'project-123';
 

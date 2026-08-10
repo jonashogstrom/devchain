@@ -11,6 +11,8 @@ import { createRef } from 'react';
 
 jest.mock('@xterm/xterm/css/xterm.css', () => ({}), { virtual: true });
 const xtermScrollCallbacks: Array<() => void> = [];
+const xtermKeyCallbacks: Array<() => void> = [];
+const xtermDataCallbacks: Array<(data: string) => void> = [];
 const heldXtermWriteCallbacks: Array<() => void> = [];
 let holdXtermWriteCallbacks = false;
 
@@ -58,7 +60,14 @@ jest.mock('@xterm/xterm', () => {
           xtermScrollCallbacks.push(cb);
           return { dispose: jest.fn() };
         }),
-        onData: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+        onKey: jest.fn((cb: () => void) => {
+          xtermKeyCallbacks.push(cb);
+          return { dispose: jest.fn() };
+        }),
+        onData: jest.fn((cb: (data: string) => void) => {
+          xtermDataCallbacks.push(cb);
+          return { dispose: jest.fn() };
+        }),
         onSelectionChange: jest.fn().mockReturnValue({ dispose: jest.fn() }),
         getSelection: jest.fn().mockReturnValue(''),
         parser: { registerOscHandler: jest.fn() },
@@ -174,6 +183,8 @@ describe('ChatTerminal', () => {
     }
     currentAppSocket = null;
     xtermScrollCallbacks.length = 0;
+    xtermKeyCallbacks.length = 0;
+    xtermDataCallbacks.length = 0;
     heldXtermWriteCallbacks.length = 0;
     holdXtermWriteCallbacks = false;
     _resetThemeCacheForTesting();
@@ -246,6 +257,37 @@ describe('ChatTerminal', () => {
     });
 
     return { socket, history, viewport, utils };
+  };
+
+  const resolveInputMode = (inputMode: 'form' | 'tty') => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      json: () => Promise.resolve({ terminal: { inputMode } }),
+    });
+  };
+
+  const resubscribeWithoutAuthorityUpdate = async (socket: MockSocket) => {
+    await act(async () => {
+      socket.trigger('message', {
+        topic: 'terminal/chat-session',
+        ts: new Date().toISOString(),
+        type: 'subscribed',
+        payload: { currentSequence: 0 },
+      });
+      socket.trigger('message', {
+        topic: 'terminal/chat-session',
+        ts: new Date().toISOString(),
+        type: 'focus_changed',
+        payload: { clientId: 'socket-test' },
+      });
+      socket.trigger('disconnect');
+      socket.trigger('connect');
+      socket.trigger('message', {
+        topic: 'terminal/chat-session',
+        ts: new Date().toISOString(),
+        type: 'subscribed',
+        payload: { currentSequence: 0 },
+      });
+    });
   };
 
   it('returns the fallback main-socket refcount to baseline across mount cycles', () => {
@@ -797,6 +839,42 @@ describe('ChatTerminal', () => {
       sessionId: 'chat-session',
       data: 'echo hello',
     });
+  });
+
+  it('clears authority on disconnect and reclaims before form input after resubscribe', async () => {
+    resolveInputMode('form');
+    const { socket, utils } = await renderTerminal();
+
+    await resubscribeWithoutAuthorityUpdate(socket);
+
+    socket.emit.mockClear();
+    fireEvent.change(utils.getByPlaceholderText('Type command...'), {
+      target: { value: 'echo recovered' },
+    });
+    fireEvent.click(utils.getByRole('button', { name: /send/i }));
+
+    expect(socket.emit.mock.calls).toEqual([
+      ['terminal:focus', { sessionId: 'chat-session' }],
+      ['terminal:input', { sessionId: 'chat-session', data: 'echo recovered' }],
+    ]);
+  });
+
+  it('clears authority on disconnect and reclaims from TTY key intent after resubscribe', async () => {
+    resolveInputMode('tty');
+    const { socket } = await renderTerminal();
+
+    await resubscribeWithoutAuthorityUpdate(socket);
+
+    socket.emit.mockClear();
+    act(() => {
+      xtermKeyCallbacks.at(-1)?.();
+      xtermDataCallbacks.at(-1)?.('a');
+    });
+
+    expect(socket.emit.mock.calls).toEqual([
+      ['terminal:focus', { sessionId: 'chat-session' }],
+      ['terminal:input', { sessionId: 'chat-session', data: 'a', ttyMode: true }],
+    ]);
   });
 
   it('inserts multiline form prompt text at the selection without a socket write', async () => {

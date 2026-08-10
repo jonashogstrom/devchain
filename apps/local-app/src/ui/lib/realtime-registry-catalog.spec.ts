@@ -15,6 +15,8 @@ function resolveTopicPattern(topic: string | ((p: Record<string, unknown>) => st
     sessionId: '{id}',
     threadId: '{id}',
     projectId: '{id}',
+    sourceProjectId: '{id}',
+    targetProjectId: '{id}',
     reviewId: '{id}',
     worktreeId: '{id}',
     agentId: '{id}',
@@ -54,16 +56,16 @@ describe('broadcastRegistry clientReaction contract ↔ non-registry catalog', (
   // over this COMBINED set — they previously guarded the hand mirror and must not be lost.
   const combined: RegistryCatalogEntry[] = [...registryDerived, ...nonRegistryBroadcastCatalog];
 
-  it('coverage counts are stable (29 keys / 35 items / 34 static + 1 dynamic / 45 combined)', () => {
+  it('coverage counts are stable (29 keys / 37 items / 36 static + 1 dynamic / 47 combined)', () => {
     const keyCount = Object.keys(broadcastRegistry).length;
     const itemCount = Object.values(broadcastRegistry).reduce((n, arr) => n + arr.length, 0);
 
     expect(keyCount).toBe(29);
-    expect(itemCount).toBe(35);
-    expect(registryDerived.length).toBe(34);
+    expect(itemCount).toBe(37);
+    expect(registryDerived.length).toBe(36);
     expect(dynamicEntries.length).toBe(1);
     expect(nonRegistryBroadcastCatalog.length).toBe(11);
-    expect(combined.length).toBe(45);
+    expect(combined.length).toBe(47);
   });
 
   it('every dynamic-type registry entry declares a valid clientReaction kind', () => {
@@ -79,8 +81,9 @@ describe('broadcastRegistry clientReaction contract ↔ non-registry catalog', (
     }
   });
 
-  it('assigns both event-bus frames to the shared stream owner', () => {
+  it('assigns all event-bus frames to the shared stream owner', () => {
     const sessionStartedEntries = broadcastRegistry['session.starting'];
+    const projectDirectionEntries = broadcastRegistry['agent.message.sent'].slice(1);
 
     expect(sessionStartedEntries).toHaveLength(1);
     expect(sessionStartedEntries[0].contentBearing).toBeUndefined();
@@ -92,6 +95,16 @@ describe('broadcastRegistry clientReaction contract ↔ non-registry catalog', (
       kind: 'custom-handler',
       owner: 'useAgentEventBusStream',
     });
+    expect(projectDirectionEntries.map((entry) => entry.type)).toEqual([
+      'project.outbound',
+      'project.inbound',
+    ]);
+    for (const entry of projectDirectionEntries) {
+      expect(entry.clientReaction).toEqual({
+        kind: 'custom-handler',
+        owner: 'useAgentEventBusStream',
+      });
+    }
   });
 
   it('no duplicate catalog entries across the combined set', () => {

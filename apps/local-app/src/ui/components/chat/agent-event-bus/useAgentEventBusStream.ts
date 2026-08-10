@@ -22,6 +22,13 @@ export interface SessionStartedEventFrame {
   agentId: string;
 }
 
+export interface ProjectMessageEventFrame {
+  kind: 'project-message';
+  direction: 'outbound' | 'inbound';
+  agentId: string;
+  status: AgentMessageRecipientStatus;
+}
+
 /**
  * An epic changed hands. `fromAgentId` is null for a first assignment, which routes from
  * the runtime origin exactly like a session start — there is no sender to travel from.
@@ -34,6 +41,7 @@ export interface EpicAssignedEventFrame {
 
 export type AgentEventBusStreamFrame =
   | AgentMessageEventFrame
+  | ProjectMessageEventFrame
   | SessionStartedEventFrame
   | EpicAssignedEventFrame;
 
@@ -101,6 +109,12 @@ export function isSessionStartedEventPayload(
   );
 }
 
+export type ProjectMessageEventPayload = Pick<ProjectMessageEventFrame, 'agentId' | 'status'>;
+
+export function isProjectMessageEventPayload(value: unknown): value is ProjectMessageEventPayload {
+  return isAgentMessageRecipient(value);
+}
+
 export function isEpicAssignedEventPayload(
   value: unknown,
 ): value is Omit<EpicAssignedEventFrame, 'kind'> {
@@ -135,6 +149,16 @@ export function parseAgentEventBusEnvelope(
 
   if (value.type === 'sent' && isAgentMessageEventPayload(value.payload)) {
     return { kind: 'agent-message', ...value.payload };
+  }
+  if (
+    (value.type === 'project.outbound' || value.type === 'project.inbound') &&
+    isProjectMessageEventPayload(value.payload)
+  ) {
+    return {
+      kind: 'project-message',
+      direction: value.type === 'project.outbound' ? 'outbound' : 'inbound',
+      ...value.payload,
+    };
   }
   // Wire type is `session.starting` — the launch pipeline announces the start before the
   // provider CLI runs, so the pulse is not several seconds behind the agent. The client

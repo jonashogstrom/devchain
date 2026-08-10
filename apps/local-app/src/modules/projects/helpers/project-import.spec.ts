@@ -6,7 +6,6 @@ import {
 } from './project-import';
 import { preserveImportedEnv } from './profile-mapping.helpers';
 import { applyTeamOverrides } from './team-overrides.helpers';
-import { ConflictError, ValidationError } from '../../../common/errors/error-types';
 
 jest.mock('../../../common/logging/logger', () => ({
   createLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() }),
@@ -781,6 +780,7 @@ describe('importProjectWithHelper — session preservation', () => {
     applyProjectSettings: jest.fn().mockResolvedValue({ initialPromptSet: false }),
     getImportErrorMessage: jest.fn().mockImplementation((e: unknown) => String(e)),
     applyAgentConfigs: jest.fn().mockResolvedValue({ applied: 0, warnings: [] }),
+    applyPreset: jest.fn().mockResolvedValue({ applied: 0, warnings: [] }),
   });
 
   it('(a) preserves sessions when old agent name matches new template agent name', async () => {
@@ -862,6 +862,233 @@ describe('importProjectWithHelper — session preservation', () => {
 
     expect(result).toMatchObject({ success: true });
     expect(deps.applyAgentConfigs).not.toHaveBeenCalled();
+  });
+
+  it('applies presetName only after the presets codec stores it, using fresh import maps', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+    const payload = {
+      ...makePayload([makeTemplateAgent('Coder')]),
+      presets: [
+        {
+          name: 'Fast',
+          agentConfigs: [{ agentName: 'Coder', providerConfigName: 'default' }],
+        },
+      ],
+    };
+
+    const result = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload, presetName: 'Fast' },
+      deps,
+    );
+
+    expect(result).toMatchObject({ success: true });
+    expect(deps.applyPreset).toHaveBeenCalledWith(
+      PROJECT_ID,
+      'Fast',
+      expect.objectContaining({
+        agentNameToId: expect.any(Map),
+        configLookupMap: expect.any(Map),
+      }),
+    );
+    const settings = deps.settings as unknown as { setProjectPresets: jest.Mock };
+    expect(settings.setProjectPresets.mock.invocationCallOrder[0]).toBeLessThan(
+      deps.applyPreset.mock.invocationCallOrder[0],
+    );
+    expect(deps.applyAgentConfigs).not.toHaveBeenCalled();
+  });
+
+  it('returns structured readiness and does not mutate when presetName is absent from the template', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload: makePayload([makeTemplateAgent('Coder')]),
+        presetName: 'Missing',
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [{ code: 'preset_not_found', details: { presetName: 'Missing' } }],
+      },
+    });
+    expect(storage.parkSessionsFromAgents).not.toHaveBeenCalled();
+    expect(deps.applyPreset).not.toHaveBeenCalled();
+  });
+
+  it('uses selected-preset provider coverage to bypass an otherwise impossible family default', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+    deps.computeFamilyAlternatives.mockResolvedValue({
+      alternatives: [
+        {
+          familySlug: 'coder',
+          defaultProvider: 'codex',
+          defaultProviderAvailable: false,
+          availableProviders: [],
+          hasAlternatives: false,
+        },
+      ],
+      missingProviders: ['codex'],
+      canImport: false,
+    });
+    const presetProfile = {
+      ...defaultProfile,
+      familySlug: 'coder',
+      provider: { name: 'codex' },
+      providerConfigs: [{ name: 'claude-fast', providerName: 'claude' }],
+    };
+    const payload = {
+      ...makePayload([makeTemplateAgent('Coder')], [presetProfile]),
+      presets: [
+        {
+          name: 'Fast',
+          agentConfigs: [{ agentName: 'Coder', providerConfigName: 'claude-fast' }],
+        },
+      ],
+    };
+
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload,
+        dryRun: true,
+        presetName: 'Fast',
+        selectedProviderNames: ['claude'],
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      dryRun: true,
+      readiness: { ready: true, issues: [] },
+      counts: { toImport: { profiles: 1 } },
+    });
+    expect(result).not.toHaveProperty('providerMappingRequired');
+  });
+
+  it('does not report providerMappingRequired when the submitted family mapping is valid', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+    deps.computeFamilyAlternatives.mockResolvedValue({
+      alternatives: [
+        {
+          familySlug: 'coder',
+          defaultProvider: 'codex',
+          defaultProviderAvailable: false,
+          availableProviders: ['claude'],
+          hasAlternatives: true,
+        },
+      ],
+      missingProviders: ['codex'],
+      canImport: true,
+    });
+    const claudeProfileId = '33333333-3333-4333-8333-333333333333';
+    const payload = makePayload(
+      [makeTemplateAgent('Coder')],
+      [
+        { ...defaultProfile, familySlug: 'coder', provider: { name: 'codex' } },
+        {
+          ...defaultProfile,
+          id: claudeProfileId,
+          name: 'Claude Profile',
+          familySlug: 'coder',
+          provider: { name: 'claude' },
+        },
+      ],
+    );
+
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload,
+        dryRun: true,
+        selectedProviderNames: ['claude'],
+        familyProviderMappings: { coder: 'claude' },
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      dryRun: true,
+      readiness: { ready: true, issues: [] },
+      counts: { toImport: { profiles: 1 } },
+    });
+    expect(result).not.toHaveProperty('providerMappingRequired');
+  });
+
+  it('does not let an empty family mapping object bypass unresolved provider selection', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+    deps.computeFamilyAlternatives.mockResolvedValue({
+      alternatives: [
+        {
+          familySlug: 'coder',
+          defaultProvider: 'codex',
+          defaultProviderAvailable: false,
+          availableProviders: ['claude'],
+          hasAlternatives: true,
+        },
+      ],
+      missingProviders: ['codex'],
+      canImport: true,
+    });
+
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload: makePayload([makeTemplateAgent('Coder')]),
+        dryRun: true,
+        familyProviderMappings: {},
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [{ code: 'provider_mapping_required' }],
+      },
+      providerMappingRequired: { canImport: true },
+    });
+  });
+
+  it('returns structured readiness when selectedProviderNames includes an uninstalled provider', async () => {
+    const storage = makeStorage();
+    const deps = makeDeps(storage);
+
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload: makePayload([makeTemplateAgent('Coder')]),
+        dryRun: true,
+        selectedProviderNames: ['claude', 'codex'],
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: 'selected_providers_not_installed',
+            details: { providerNames: ['codex'] },
+          },
+        ],
+      },
+    });
   });
 
   it('(b) deletes sessions when old agent name has no match in new template', async () => {
@@ -982,7 +1209,7 @@ describe('importProjectWithHelper — session preservation', () => {
     );
   });
 
-  it('(e) throws ValidationError before any DB mutation when new template has duplicate agent names', async () => {
+  it('(e) returns structured duplicate-name readiness before any DB mutation', async () => {
     // Both 'Coder' and 'coder' normalise to the same key — hard-fail before touching storage.
     const storage = makeStorage({
       listAgents: jest.fn().mockResolvedValue({
@@ -994,18 +1221,25 @@ describe('importProjectWithHelper — session preservation', () => {
     });
     const deps = makeDeps(storage);
 
-    await expect(
-      importProjectWithHelper(
-        {
-          projectId: PROJECT_ID,
-          payload: makePayload([
-            makeTemplateAgent('Coder', AGENT_TPL_1_ID),
-            makeTemplateAgent('coder', AGENT_TPL_2_ID),
-          ]),
-        },
-        deps,
-      ),
-    ).rejects.toThrow(ValidationError);
+    const result = await importProjectWithHelper(
+      {
+        projectId: PROJECT_ID,
+        payload: makePayload([
+          makeTemplateAgent('Coder', AGENT_TPL_1_ID),
+          makeTemplateAgent('coder', AGENT_TPL_2_ID),
+        ]),
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [{ code: 'duplicate_agent_names', details: { agentNames: ['coder'] } }],
+      },
+    });
 
     expect(storage.parkSessionsFromAgents).not.toHaveBeenCalled();
     expect(storage.applySessionPlan).not.toHaveBeenCalled();
@@ -1133,6 +1367,79 @@ describe('importProjectWithHelper — session preservation', () => {
     });
     expect(storage.deletePrompt).not.toHaveBeenCalled();
     expect(storage.createPrompt).not.toHaveBeenCalled();
+  });
+
+  it('counts only unmatched statuses with epics as required status deletions', async () => {
+    const storage = makeStorage({
+      listStatuses: jest.fn().mockResolvedValue({
+        items: [
+          { id: 'matching', label: 'Ready', color: '#111111', position: 0 },
+          { id: 'mapped', label: 'Legacy', color: '#222222', position: 1 },
+          { id: 'orphan', label: 'Unused', color: '#333333', position: 2 },
+        ],
+        total: 3,
+        limit: 10000,
+        offset: 0,
+      }),
+      countEpicsByStatus: jest
+        .fn()
+        .mockImplementation(async (statusId: string) => (statusId === 'mapped' ? 4 : 0)),
+    });
+    const deps = makeDeps(storage);
+    const payload = {
+      ...makePayload([], []),
+      statuses: [{ label: 'ready', color: '#ffffff', position: 0 }],
+    };
+
+    const result = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload, dryRun: true },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      dryRun: true,
+      unmatchedStatuses: [{ id: 'mapped', label: 'Legacy', epicCount: 4 }],
+      counts: { toDelete: { statuses: 1 } },
+    });
+  });
+
+  it('keeps dry-run status deletion count in parity with the wet-run codec deletion set', async () => {
+    const storage = makeStorage({
+      listStatuses: jest.fn().mockResolvedValue({
+        items: [
+          { id: 'matching', label: 'Ready', color: '#111111', position: 0 },
+          { id: 'mapped', label: 'Legacy', color: '#222222', position: 1 },
+          { id: 'orphan', label: 'Unused', color: '#333333', position: 2 },
+        ],
+        total: 3,
+        limit: 10000,
+        offset: 0,
+      }),
+      countEpicsByStatus: jest
+        .fn()
+        .mockImplementation(async (statusId: string) => (statusId === 'mapped' ? 4 : 0)),
+      updateEpicsStatus: jest.fn().mockResolvedValue(4),
+    });
+    const deps = makeDeps(storage);
+    const payload = {
+      ...makePayload([], []),
+      statuses: [{ label: 'Ready', color: '#ffffff', position: 0 }],
+    };
+
+    const dryRun = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload, dryRun: true, statusMappings: { mapped: 'Ready' } },
+      deps,
+    );
+    const wetRun = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload, statusMappings: { mapped: 'Ready' } },
+      deps,
+    );
+
+    expect(dryRun).toMatchObject({ counts: { toDelete: { statuses: 1 } } });
+    expect(wetRun).toMatchObject({ success: true, counts: { deleted: { statuses: 1 } } });
+    expect(storage.updateEpicsStatus).toHaveBeenCalledWith('mapped', expect.any(String));
+    expect(storage.deleteStatus).toHaveBeenCalledTimes(1);
+    expect(storage.deleteStatus).toHaveBeenCalledWith('mapped');
   });
 
   it('replaces matching Custom rows while preserving unrelated and whitespace-different rows', async () => {
@@ -1450,21 +1757,63 @@ describe('importProjectWithHelper — session preservation', () => {
     expect(result).not.toHaveProperty('promptReferenceValidation');
   });
 
-  it('(h) active running session still blocks import — regression lock on ConflictError path', async () => {
+  it('(h) active running session returns structured readiness before mutation', async () => {
     const storage = makeStorage();
     const activeSessions = jest
       .fn()
       .mockReturnValue([{ id: 'running-sess-1', agentId: 'agent-x' }]);
     const deps = makeDeps(storage, activeSessions);
 
-    await expect(
-      importProjectWithHelper(
-        { projectId: PROJECT_ID, payload: makePayload([makeTemplateAgent('Coder')]) },
-        deps,
-      ),
-    ).rejects.toThrow(ConflictError);
+    const result = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload: makePayload([makeTemplateAgent('Coder')]) },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: 'active_sessions',
+            details: { activeSessions: [{ id: 'running-sess-1', agentId: 'agent-x' }] },
+          },
+        ],
+      },
+    });
 
     expect(storage.parkSessionsFromAgents).not.toHaveBeenCalled();
     expect(storage.applySessionPlan).not.toHaveBeenCalled();
+  });
+
+  it('rechecks active sessions immediately before mutation and returns a non-mutating race outcome', async () => {
+    const storage = makeStorage();
+    const activeSessions = jest
+      .fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([{ id: 'late-session', agentId: 'agent-x' }]);
+    const deps = makeDeps(storage, activeSessions);
+
+    const result = await importProjectWithHelper(
+      { projectId: PROJECT_ID, payload: makePayload([makeTemplateAgent('Coder')]) },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      mutationStarted: false,
+      readiness: {
+        issues: [
+          {
+            code: 'active_sessions',
+            details: { activeSessions: [{ id: 'late-session', agentId: 'agent-x' }] },
+          },
+        ],
+      },
+    });
+    expect(activeSessions).toHaveBeenCalledTimes(2);
+    expect(storage.parkSessionsFromAgents).not.toHaveBeenCalled();
+    expect(storage.deleteAgent).not.toHaveBeenCalled();
   });
 });

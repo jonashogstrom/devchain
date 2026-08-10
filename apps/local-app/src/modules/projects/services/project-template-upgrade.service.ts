@@ -3,23 +3,41 @@ import { createLogger } from '../../../common/logging/logger';
 import { ValidationError, NotFoundError } from '../../../common/errors/error-types';
 import type { PromptReferenceValidationFailure } from '../../../common/prompt-references';
 import { PROMPT_TRANSFER_POLICY, type PromptTransferCounts } from '../../../common/prompt-transfer';
+import { buildActiveSessionReadiness, type ImportReadiness } from '../helpers/project-import';
+import type { SetupPreviewResponse } from '../dtos/setup-preview.dto';
 import { TemplateCacheService } from '../../registry/services/template-cache.service';
 import { UnifiedTemplateService } from '../../registry/services/unified-template.service';
+import { SessionsService } from '../../sessions/services/sessions.service';
 import { SettingsService } from '../../settings/services/settings.service';
-import { ProjectsService } from './projects.service';
+import { ProjectsService, type ImportProjectInput } from './projects.service';
 
 const logger = createLogger('ProjectTemplateUpgradeService');
 
 interface BackupEntry {
   projectId: string;
   data: unknown;
+  activePreset: string | null;
   createdAt: string;
   templateSlug: string;
   fromVersion: string;
   source: 'bundled' | 'registry' | 'file';
 }
 
-export interface UpgradeProjectInput {
+export interface UpgradeProjectInput
+  extends Pick<
+    ImportProjectInput,
+    | 'selectedProviderNames'
+    | 'familyProviderMappings'
+    | 'presetName'
+    | 'agentOverrides'
+    | 'teamOverrides'
+    | 'statusMappings'
+  > {
+  projectId: string;
+  targetVersion: string;
+}
+
+export interface UpgradePreviewInput {
   projectId: string;
   targetVersion: string;
 }
@@ -52,7 +70,26 @@ export interface UpgradeResult {
   mutationStarted?: false;
   /** Actionable prompt references when a template would skip required prompts. */
   promptReferenceValidation?: PromptReferenceValidationFailure['promptReferenceValidation'];
+  /** Structured replace-import readiness details for non-mutating failures. */
+  readiness?: ImportReadiness;
 }
+
+export type UpgradePreviewResult = SetupPreviewResponse | UpgradeResult;
+
+type ProjectTemplateMetadata = NonNullable<
+  ReturnType<SettingsService['getProjectTemplateMetadata']>
+>;
+
+type ResolvedUpgradeTarget = {
+  metadata: ProjectTemplateMetadata;
+  source: 'bundled' | 'registry';
+  content: Record<string, unknown>;
+  preview: SetupPreviewResponse;
+};
+
+type UpgradeTargetResolution =
+  | { success: true; target: ResolvedUpgradeTarget }
+  | { success: false; result: UpgradeResult };
 
 /**
  * Projects-owned service for upgrading projects to newer template versions
@@ -74,6 +111,7 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
     private readonly cacheService: TemplateCacheService,
     private readonly unifiedTemplateService: UnifiedTemplateService,
     private readonly settingsService: SettingsService,
+    private readonly sessionsService: SessionsService,
   ) {}
 
   onModuleInit(): void {
@@ -117,8 +155,13 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
       });
     }
 
-    // Export current project state
-    const exportData = await this.projectsService.exportProject(projectId);
+    const activePreset = this.settingsService.getProjectActivePreset(projectId);
+
+    // Export current project state without redacting profile-config env. Provider-level env
+    // continues through the exporter's fixed sanitizer.
+    const exportData = await this.projectsService.exportProject(projectId, {
+      profileConfigEnvTransform: (env) => env ?? null,
+    });
 
     // Generate backup ID
     const backupId = `backup-${projectId}-${Date.now()}`;
@@ -127,6 +170,7 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
     this.backups.set(backupId, {
       projectId,
       data: exportData,
+      activePreset,
       createdAt: new Date().toISOString(),
       templateSlug: metadata.templateSlug,
       fromVersion: metadata.installedVersion,
@@ -139,6 +183,95 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
     );
 
     return backupId;
+  }
+
+  /**
+   * Resolve and validate the exact target from the project's persisted source metadata.
+   * Preview and commit both call this method, so neither can silently switch between registry
+   * cache and bundled content for the same requested version.
+   */
+  private async resolveUpgradeTarget(input: UpgradePreviewInput): Promise<UpgradeTargetResolution> {
+    const { projectId, targetVersion } = input;
+    const metadata = this.settingsService.getProjectTemplateMetadata(projectId);
+    if (!metadata) {
+      return this.targetFailure('Project not linked to a template');
+    }
+    if (!metadata.installedVersion) {
+      return this.targetFailure('Cannot upgrade: project has no installed version');
+    }
+    if (metadata.installedVersion === targetVersion) {
+      return this.targetFailure('Project is already at this version');
+    }
+
+    const source = metadata.source ?? 'registry';
+    if (source === 'file') {
+      return this.targetFailure('File-based templates cannot be upgraded');
+    }
+
+    let content: Record<string, unknown>;
+    if (source === 'bundled') {
+      try {
+        content = this.unifiedTemplateService.getBundledTemplate(metadata.templateSlug)
+          .content as Record<string, unknown>;
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          return this.targetFailure(`Bundled template "${metadata.templateSlug}" not found`);
+        }
+        logger.warn(
+          { projectId, templateSlug: metadata.templateSlug, targetVersion, error },
+          'Bundled upgrade target could not be loaded',
+        );
+        return this.targetFailure(`Bundled template "${metadata.templateSlug}" is invalid`);
+      }
+    } else {
+      const cached = await this.cacheService.getTemplate(metadata.templateSlug, targetVersion);
+      if (!cached) {
+        logger.warn(
+          { projectId, templateSlug: metadata.templateSlug, targetVersion },
+          'Upgrade attempted with uncached version',
+        );
+        return this.targetFailure(
+          `Version ${targetVersion} is not cached. Please download it first from the Registry page.`,
+        );
+      }
+      content = cached.content as Record<string, unknown>;
+    }
+
+    const manifest = content._manifest as { version?: unknown } | undefined;
+    const manifestVersion = typeof manifest?.version === 'string' ? manifest.version : 'unknown';
+    if (manifestVersion !== targetVersion) {
+      const sourceLabel = source === 'bundled' ? 'Bundled' : 'Cached';
+      return this.targetFailure(
+        `${sourceLabel} template version is ${manifestVersion}, not ${targetVersion}`,
+      );
+    }
+
+    try {
+      const preview = await this.projectsService.setupPreview({ rawContent: content });
+      return {
+        success: true,
+        target: { metadata, source, content, preview },
+      };
+    } catch (error) {
+      logger.warn(
+        { projectId, templateSlug: metadata.templateSlug, targetVersion, error },
+        'Upgrade target content failed setup-preview validation',
+      );
+      return this.targetFailure('Target template content is invalid');
+    }
+  }
+
+  private targetFailure(error: string): UpgradeTargetResolution {
+    return {
+      success: false,
+      result: { success: false, mutationStarted: false, error },
+    };
+  }
+
+  async previewUpgrade(input: UpgradePreviewInput): Promise<UpgradePreviewResult> {
+    logger.info(input, 'Resolving project upgrade preview');
+    const resolution = await this.resolveUpgradeTarget(input);
+    return resolution.success ? resolution.target.preview : resolution.result;
   }
 
   /**
@@ -164,68 +297,23 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
 
     logger.info({ projectId, targetVersion }, 'Starting project upgrade');
 
-    // Get current metadata
-    const metadata = this.settingsService.getProjectTemplateMetadata(projectId);
-    if (!metadata) {
+    const resolution = await this.resolveUpgradeTarget({ projectId, targetVersion });
+    if (!resolution.success) {
+      return resolution.result;
+    }
+    const { metadata, source, content: templateContent } = resolution.target;
+
+    const activeSessions = this.sessionsService
+      .getActiveSessionsForProject(projectId)
+      .map((session) => ({ id: session.id, agentId: session.agentId }));
+    if (activeSessions.length > 0) {
+      const readiness = buildActiveSessionReadiness(activeSessions);
       return {
         success: false,
-        error: 'Project not linked to a template',
+        mutationStarted: false,
+        error: readiness.issues[0]?.message ?? 'Active agent sessions block template upgrade',
+        readiness,
       };
-    }
-
-    // Check if already at target version
-    if (metadata.installedVersion === targetVersion) {
-      return {
-        success: false,
-        error: 'Project is already at this version',
-      };
-    }
-
-    // File-based templates cannot be upgraded (source file may have moved/changed)
-    if (metadata.source === 'file') {
-      return {
-        success: false,
-        error: 'File-based templates cannot be upgraded',
-      };
-    }
-
-    const isBundled = metadata.source === 'bundled';
-    let templateContent: Record<string, unknown>;
-
-    if (isBundled) {
-      // Bundled template: fetch from local bundled templates
-      try {
-        const bundled = this.unifiedTemplateService.getBundledTemplate(metadata.templateSlug);
-        templateContent = bundled.content as Record<string, unknown>;
-
-        // Verify the bundled template has the target version
-        const manifest = templateContent._manifest as { version?: string } | undefined;
-        if (manifest?.version !== targetVersion) {
-          return {
-            success: false,
-            error: `Bundled template version is ${manifest?.version ?? 'unknown'}, not ${targetVersion}`,
-          };
-        }
-      } catch {
-        return {
-          success: false,
-          error: `Bundled template "${metadata.templateSlug}" not found`,
-        };
-      }
-    } else {
-      // Registry template: validate target version is cached
-      const cached = await this.cacheService.getTemplate(metadata.templateSlug, targetVersion);
-      if (!cached) {
-        logger.warn(
-          { projectId, templateSlug: metadata.templateSlug, targetVersion },
-          'Upgrade attempted with uncached version',
-        );
-        return {
-          success: false,
-          error: `Version ${targetVersion} is not cached. Please download it first from the Registry page.`,
-        };
-      }
-      templateContent = cached.content as Record<string, unknown>;
     }
 
     // Create backup before upgrade
@@ -235,43 +323,52 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
     } catch (error) {
       return {
         success: false,
+        mutationStarted: false,
         error: `Failed to create backup: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
 
     try {
-      // Apply template (imports over existing project).
-      // Pass empty familyProviderMappings so the import auto-selects available providers
-      // instead of hard-failing when some template providers are missing.
-      // This is an upgrade of a working project — provider validation is not needed.
       const importResult = await this.projectsService.importProject({
         projectId,
         payload: templateContent,
         dryRun: false,
-        familyProviderMappings: {},
+        ...(input.selectedProviderNames !== undefined
+          ? { selectedProviderNames: input.selectedProviderNames }
+          : {}),
+        ...(input.familyProviderMappings !== undefined
+          ? { familyProviderMappings: input.familyProviderMappings }
+          : {}),
+        ...(input.presetName !== undefined ? { presetName: input.presetName } : {}),
+        ...(input.agentOverrides !== undefined ? { agentOverrides: input.agentOverrides } : {}),
+        ...(input.teamOverrides !== undefined ? { teamOverrides: input.teamOverrides } : {}),
+        ...(input.statusMappings !== undefined ? { statusMappings: input.statusMappings } : {}),
       });
 
-      // Validate import succeeded - importProject can return { success: false } without throwing
-      // Type guard: dryRun=false means result always has 'success' property, but TS needs help
       if (!('success' in importResult) || !importResult.success) {
-        // Generic import failure
         logger.error({ projectId, targetVersion, importResult }, 'Import returned failure status');
-        const mutationStarted =
-          'mutationStarted' in importResult && importResult.mutationStarted === false
-            ? false
-            : undefined;
-        return {
-          success: false,
-          error:
-            'error' in importResult && typeof importResult.error === 'string'
-              ? importResult.error
-              : 'Template import failed',
-          backupId, // Keep backup for manual recovery
-          ...(mutationStarted === false ? { mutationStarted } : {}),
-          ...('promptReferenceValidation' in importResult
-            ? { promptReferenceValidation: importResult.promptReferenceValidation }
-            : {}),
-        };
+
+        let importError = 'Template import failed';
+        if ('error' in importResult && typeof importResult.error === 'string') {
+          importError = importResult.error;
+        }
+
+        const failure: UpgradeResult = { success: false, error: importError };
+        const mutationDidNotStart =
+          'mutationStarted' in importResult && importResult.mutationStarted === false;
+        if (mutationDidNotStart) {
+          this.backups.delete(backupId);
+          failure.mutationStarted = false;
+        } else {
+          failure.backupId = backupId;
+        }
+        if ('promptReferenceValidation' in importResult) {
+          failure.promptReferenceValidation = importResult.promptReferenceValidation;
+        }
+        if ('readiness' in importResult) {
+          failure.readiness = importResult.readiness;
+        }
+        return failure;
       }
 
       // Update metadata with new version
@@ -287,7 +384,7 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
       logger.info(
         {
           projectId,
-          source: isBundled ? 'bundled' : 'registry',
+          source,
           fromVersion: metadata.installedVersion,
           toVersion: targetVersion,
         },
@@ -384,7 +481,9 @@ export class ProjectTemplateUpgradeService implements OnModuleInit, OnModuleDest
       installedAt: new Date().toISOString(),
     });
 
-    // Remove backup after restore
+    await this.settingsService.setProjectActivePreset(backup.projectId, backup.activePreset);
+
+    // Remove backup only after every restored sidecar has been persisted.
     this.backups.delete(backupId);
 
     logger.info(

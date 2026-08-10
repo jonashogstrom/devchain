@@ -1,10 +1,11 @@
 import { ExportSchema } from '@devchain/shared';
-import { ConflictError, StorageError, ValidationError } from '../../../common/errors/error-types';
+import { StorageError } from '../../../common/errors/error-types';
 import { createLogger } from '../../../common/logging/logger';
 import {
   buildPromptReferenceValidationFailure,
   findSkippedTemplatePromptReferences,
   type PromptReferenceIssue,
+  type PromptReferenceValidationFailure,
 } from '../../../common/prompt-references';
 import {
   PROMPT_TRANSFER_POLICY,
@@ -21,6 +22,7 @@ import type { UnifiedTemplateService } from '../../registry/services/unified-tem
 import {
   buildProviderConfigLookupKey,
   collectReferencedProviderNames,
+  derivePresetProviderCoverage,
   resolveProvidersFromStorage,
   selectProfilesForFamilies,
   type FamilyAlternative,
@@ -28,7 +30,7 @@ import {
   type ProjectSettingsTemplateInput,
 } from './profile-mapping.helpers';
 import {
-  ensureNoDuplicateAgentNames,
+  findDuplicateAgentNames,
   planAndApplySessionPreservation,
 } from './project-import-sessions';
 import type { PresetAgentConfig } from './project-presets.helpers';
@@ -59,6 +61,50 @@ type UnmatchedStatus = {
   epicCount: number;
 };
 
+export type ActiveSessionSummary = { id: string; agentId: string | null };
+
+export type ImportReadinessIssue =
+  | {
+      code: 'prompt_reference_validation';
+      message: string;
+      details: PromptReferenceValidationFailure['promptReferenceValidation'];
+    }
+  | {
+      code: 'selected_providers_not_installed';
+      message: string;
+      details: { providerNames: string[] };
+    }
+  | {
+      code: 'preset_not_found';
+      message: string;
+      details: { presetName: string };
+    }
+  | {
+      code: 'provider_mapping_required';
+      message: string;
+      details: ReturnType<typeof buildProviderMappingRequired>;
+    }
+  | {
+      code: 'selected_profiles_unavailable';
+      message: string;
+      details: { providerNames: string[] };
+    }
+  | {
+      code: 'active_sessions';
+      message: string;
+      details: { activeSessions: ActiveSessionSummary[] };
+    }
+  | {
+      code: 'duplicate_agent_names';
+      message: string;
+      details: { agentNames: string[] };
+    };
+
+export interface ImportReadiness {
+  ready: boolean;
+  issues: ImportReadinessIssue[];
+}
+
 type ImportPreparation = {
   isDryRun: boolean;
   promptTransferPolicy: PromptTransferPolicy;
@@ -67,7 +113,7 @@ type ImportPreparation = {
   promptReferenceIssues: PromptReferenceIssue[];
   payload: ParsedTemplatePayload;
   familyResult: FamilyAlternativesResult;
-  needsMapping: boolean;
+  providerMappingRequired: ReturnType<typeof buildProviderMappingRequired> | null;
   /** Full installed-provider map (name(lowercased) → id) — for persistence + validation. */
   installedProviders: Map<string, string>;
   /** Installed map narrowed to the Step-1 allowlist (≡ installed when none) — binding eligibility. */
@@ -76,6 +122,7 @@ type ImportPreparation = {
   selectedProfilesByFamily: SelectedProfilesByFamily;
   existing: ExistingProjectData;
   unmatchedStatuses: UnmatchedStatus[];
+  readiness: ImportReadiness;
 };
 
 export interface ImportProjectInputLike {
@@ -86,6 +133,8 @@ export interface ImportProjectInputLike {
   promptTransferPolicy?: PromptTransferPolicy;
   statusMappings?: Record<string, string>;
   familyProviderMappings?: Record<string, string>;
+  /** Template preset to apply after the imported presets have been persisted. */
+  presetName?: string;
   /**
    * Wizard/API per-agent config overrides. NEW import capability: import previously applied no
    * per-agent configuration. Applied after the profiles+agents batch via `applyAgentConfigs`;
@@ -174,6 +223,14 @@ interface ImportProjectDeps {
       configLookupMap: Map<string, string>;
     },
   ) => Promise<{ applied: number; warnings: string[] }>;
+  applyPreset: (
+    projectId: string,
+    presetName: string,
+    nameMaps: {
+      agentNameToId: Map<string, string>;
+      configLookupMap: Map<string, string>;
+    },
+  ) => Promise<{ applied: number; warnings: string[] }>;
   teamsService?: {
     createTeam: (data: {
       projectId: string;
@@ -210,28 +267,21 @@ export async function importProjectWithHelper(
 
   const context = await prepareImportContext(input, deps);
 
-  const promptReferenceFailure = buildPromptReferenceValidationFailure(
-    context.promptReferenceIssues,
-  );
-  if (promptReferenceFailure) {
-    return promptReferenceFailure;
-  }
-
   if (context.isDryRun) {
     return buildDryRunResponse(context);
   }
 
-  if (context.needsMapping && !input.familyProviderMappings) {
-    return {
-      success: false,
-      providerMappingRequired: buildProviderMappingRequired(context.familyResult),
-    };
+  if (!context.readiness.ready) {
+    return buildReadinessFailure(context.readiness, context.providerMappingRequired);
   }
 
-  ensureFamilyCanImport(context.familyResult);
-  ensureSelectedProvidersAvailable(context.selectedProfilesByFamily, context.installedProviders);
-  ensureNoActiveSessions(input.projectId, deps);
-  ensureNoDuplicateAgentNames(context.payload.agents);
+  // Recheck the mutable session condition immediately before the first write. The preparation
+  // result powers dry-run and normal preflight; this second guard closes the preflight-to-mutation
+  // race and remains a structured, explicitly non-mutating outcome.
+  const lateActiveSessions = getActiveSessions(input.projectId, deps);
+  if (lateActiveSessions.length > 0) {
+    return buildReadinessFailure(buildActiveSessionReadiness(lateActiveSessions), null);
+  }
 
   try {
     const oldAgentIdToName = buildOldAgentIdToNameMap(context.existing.agents.items);
@@ -298,6 +348,9 @@ export async function importProjectWithHelper(
     );
     const statusIdMap = pipelineCtx.get('statusIdMap');
     const promptIdMap = pipelineCtx.get('promptIdMap');
+    const statusesDeleted =
+      (promptSectionResults.find((result) => result.section === 'statuses')?.log
+        ?.statusesDeleted as number | undefined) ?? 0;
     const appliedPrompts = getPromptApplyCounts(promptSectionResults);
 
     // profiles (with embedded provider configs) + agents codecs.
@@ -410,6 +463,16 @@ export async function importProjectWithHelper(
       codecRuntime,
     );
 
+    // Apply only after the presets codec has stored the target presets. The fresh maps constrain
+    // lookup to the agents/configs created by this run; applyPresetWithHelper alone decides whether
+    // the full-match rule is satisfied and activePreset may be set.
+    if (input.presetName) {
+      await deps.applyPreset(input.projectId, input.presetName, {
+        agentNameToId: new Map(Object.entries(agentNameToId)),
+        configLookupMap: pipelineCtx.get('selectionEligibleConfigLookupMap'),
+      });
+    }
+
     // providerSettings + providerModels + providerEfforts codecs (matrix rows 19–21):
     // additive provider-catalog mutations, no ImportContext products. providerSettings
     // resolves against live provider storage (threshold/env merge); the other two
@@ -438,6 +501,7 @@ export async function importProjectWithHelper(
       teamsImported,
       scheduledEpicsImported,
       sessionPreservation,
+      statusesDeleted,
       promptTransfer: {
         ...appliedPrompts,
         ...clearedPrompts,
@@ -463,8 +527,6 @@ async function prepareImportContext(
     payload.agents,
     input.selectedProviderNames,
   );
-  const needsMapping = familyResult.alternatives.some((alt) => !alt.defaultProviderAvailable);
-
   const referencedProviderNames = collectReferencedProviderNames(payload.profiles);
   const {
     installed,
@@ -476,6 +538,28 @@ async function prepareImportContext(
     input.selectedProviderNames,
   );
 
+  const selectedPreset = input.presetName
+    ? payload.presets.find((preset) => preset.name === input.presetName)
+    : undefined;
+  const presetCoverage = selectedPreset
+    ? derivePresetProviderCoverage(
+        payload.presets,
+        payload.profiles,
+        payload.agents,
+        new Set(selected.keys()),
+        { selectedPresetName: input.presetName },
+      )[0]
+    : undefined;
+  const presetCoversAllAgents = presetCoverage?.coversAllAgents ?? false;
+
+  const providerMappingRequired = hasUnresolvedFamilySelection(
+    familyResult,
+    input.familyProviderMappings,
+    presetCoversAllAgents,
+  )
+    ? buildProviderMappingRequired(familyResult)
+    : null;
+
   // Validate against the FULL installed map: an installed-but-deselected provider is available for
   // profile creation/binding (deselection only narrows wizard family choices, not persistence).
   const selectedProfilesByFamily = selectProfilesForFamilies(
@@ -483,6 +567,12 @@ async function prepareImportContext(
     payload.agents,
     input.familyProviderMappings,
     installed,
+    presetCoverage
+      ? {
+          presetCoveredAgentNames: presetCoverage.coveredAgentNames,
+          presetAgentResolvedProviders: presetCoverage.agentResolvedProviders,
+        }
+      : undefined,
   );
 
   const existing = await loadExistingProjectData(input.projectId, deps.storage);
@@ -508,6 +598,26 @@ async function prepareImportContext(
     deps.storage,
   );
 
+  const activeSessions = getActiveSessions(input.projectId, deps);
+  const unavailableSelectedProviderNames = (input.selectedProviderNames ?? []).filter(
+    (name) => !installed.has(name.trim().toLowerCase()),
+  );
+  const unavailableSelectedProfiles = getUnavailableSelectedProfileProviders(
+    selectedProfilesByFamily,
+    installed,
+  );
+  const duplicateAgentNames = findDuplicateAgentNames(payload.agents);
+  const readiness = buildImportReadiness({
+    promptReferenceIssues,
+    unavailableSelectedProviderNames,
+    presetName: input.presetName,
+    presetFound: !input.presetName || Boolean(selectedPreset),
+    providerMappingRequired,
+    unavailableSelectedProfiles,
+    activeSessions,
+    duplicateAgentNames,
+  });
+
   return {
     isDryRun,
     promptTransferPolicy,
@@ -521,13 +631,14 @@ async function prepareImportContext(
     },
     payload,
     familyResult,
-    needsMapping,
+    providerMappingRequired,
     installedProviders: installed,
     selectedProviders: selected,
     missingProviders,
     selectedProfilesByFamily,
     existing,
     unmatchedStatuses,
+    readiness,
   };
 }
 
@@ -579,6 +690,11 @@ async function collectUnmatchedStatuses(
 function buildDryRunResponse(context: ImportPreparation) {
   const response: {
     dryRun: true;
+    success?: false;
+    mutationStarted?: false;
+    error?: string;
+    readiness: ImportReadiness;
+    promptReferenceValidation?: PromptReferenceValidationFailure['promptReferenceValidation'];
     missingProviders: string[];
     unmatchedStatuses: UnmatchedStatus[];
     templateStatuses: { label: string; color: string }[];
@@ -610,6 +726,7 @@ function buildDryRunResponse(context: ImportPreparation) {
     promptTransfer: PromptTransferCounts;
   } = {
     dryRun: true,
+    readiness: context.readiness,
     missingProviders: context.missingProviders,
     unmatchedStatuses: context.unmatchedStatuses,
     templateStatuses: context.payload.statuses.map((status) => ({
@@ -630,7 +747,7 @@ function buildDryRunResponse(context: ImportPreparation) {
         prompts: context.promptTransfer.deleted,
         profiles: context.existing.profiles.total,
         agents: context.existing.agents.total,
-        statuses: context.existing.statuses.total,
+        statuses: context.unmatchedStatuses.length,
         watchers: context.existing.watchers.length,
         subscribers: context.existing.subscribers.length,
         scheduledEpics: context.existing.scheduledEpics?.total ?? 0,
@@ -639,8 +756,14 @@ function buildDryRunResponse(context: ImportPreparation) {
     promptTransfer: context.promptTransfer,
   };
 
-  if (context.needsMapping) {
-    response.providerMappingRequired = buildProviderMappingRequired(context.familyResult);
+  if (context.providerMappingRequired) {
+    response.providerMappingRequired = context.providerMappingRequired;
+  }
+  if (!context.readiness.ready) {
+    Object.assign(
+      response,
+      buildReadinessFailureProperties(context.readiness, context.providerMappingRequired),
+    );
   }
 
   return response;
@@ -654,49 +777,159 @@ function buildProviderMappingRequired(familyResult: FamilyAlternativesResult) {
   };
 }
 
-function ensureFamilyCanImport(familyResult: FamilyAlternativesResult) {
-  if (!familyResult.canImport) {
-    throw new ValidationError('Cannot import: some profile families have no available providers', {
-      hint: 'Install the required providers or use a different template',
-      missingProviders: familyResult.missingProviders,
-      familyAlternatives: familyResult.alternatives,
-    });
-  }
-}
-
-function ensureSelectedProvidersAvailable(
+function getUnavailableSelectedProfileProviders(
   selectedProfilesByFamily: SelectedProfilesByFamily,
   available: Map<string, string>,
-) {
+): string[] {
   const selectedProviderNames = new Set(
     selectedProfilesByFamily.profilesToCreate.map((profile) =>
       profile.provider.name.trim().toLowerCase(),
     ),
   );
 
-  const unavailableSelectedProviders = Array.from(selectedProviderNames).filter(
-    (name) => !available.has(name),
-  );
-
-  if (unavailableSelectedProviders.length > 0) {
-    throw new ValidationError('Import aborted: missing providers', {
-      missingProviders: unavailableSelectedProviders,
-      hint: 'Install/configure providers by name before importing profiles.',
-    });
-  }
+  return Array.from(selectedProviderNames).filter((name) => !available.has(name));
 }
 
-function ensureNoActiveSessions(projectId: string, deps: ImportProjectDeps) {
-  const activeSessions = deps.sessions.getActiveSessionsForProject(projectId);
-  if (activeSessions.length > 0) {
-    throw new ConflictError('Import aborted: active agent sessions detected', {
-      activeSessions: activeSessions.map((session) => ({
-        id: session.id,
-        agentId: session.agentId,
-      })),
-      hint: 'Terminate all running sessions for this project before importing.',
+function hasUnresolvedFamilySelection(
+  familyResult: FamilyAlternativesResult,
+  mappings: Record<string, string> | undefined,
+  presetCoversAllAgents: boolean,
+): boolean {
+  if (presetCoversAllAgents) return false;
+  if (!familyResult.canImport) return true;
+
+  const alternativesByFamily = new Map(
+    familyResult.alternatives.map((alternative) => [alternative.familySlug, alternative]),
+  );
+
+  for (const [familySlug, providerName] of Object.entries(mappings ?? {})) {
+    const alternative = alternativesByFamily.get(familySlug);
+    const normalizedProvider = providerName.trim().toLowerCase();
+    if (!alternative || !alternative.availableProviders.includes(normalizedProvider)) {
+      return true;
+    }
+  }
+
+  for (const alternative of familyResult.alternatives) {
+    if (alternative.defaultProviderAvailable) continue;
+    const mappedProvider = mappings?.[alternative.familySlug]?.trim().toLowerCase();
+    if (!mappedProvider || !alternative.availableProviders.includes(mappedProvider)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getActiveSessions(projectId: string, deps: ImportProjectDeps): ActiveSessionSummary[] {
+  return deps.sessions.getActiveSessionsForProject(projectId).map((session) => ({
+    id: session.id,
+    agentId: session.agentId,
+  }));
+}
+
+function buildImportReadiness(input: {
+  promptReferenceIssues: PromptReferenceIssue[];
+  unavailableSelectedProviderNames: string[];
+  presetName?: string;
+  presetFound: boolean;
+  providerMappingRequired: ReturnType<typeof buildProviderMappingRequired> | null;
+  unavailableSelectedProfiles: string[];
+  activeSessions: ActiveSessionSummary[];
+  duplicateAgentNames: string[];
+}): ImportReadiness {
+  const issues: ImportReadinessIssue[] = [];
+  const promptFailure = buildPromptReferenceValidationFailure(input.promptReferenceIssues);
+  if (promptFailure) {
+    issues.push({
+      code: 'prompt_reference_validation',
+      message: promptFailure.error,
+      details: promptFailure.promptReferenceValidation,
     });
   }
+  if (input.unavailableSelectedProviderNames.length > 0) {
+    issues.push({
+      code: 'selected_providers_not_installed',
+      message: `Selected providers are not installed: ${input.unavailableSelectedProviderNames.join(', ')}`,
+      details: { providerNames: input.unavailableSelectedProviderNames },
+    });
+  }
+  if (input.presetName && !input.presetFound) {
+    issues.push({
+      code: 'preset_not_found',
+      message: `Selected preset "${input.presetName}" was not found in the template`,
+      details: { presetName: input.presetName },
+    });
+  }
+  if (input.providerMappingRequired) {
+    issues.push({
+      code: 'provider_mapping_required',
+      message: input.providerMappingRequired.canImport
+        ? 'Provider selection requires a complete family mapping'
+        : 'Cannot import: some profile families have no available providers',
+      details: input.providerMappingRequired,
+    });
+  }
+  if (input.unavailableSelectedProfiles.length > 0) {
+    issues.push({
+      code: 'selected_profiles_unavailable',
+      message: `Import requires unavailable providers: ${input.unavailableSelectedProfiles.join(', ')}`,
+      details: { providerNames: input.unavailableSelectedProfiles },
+    });
+  }
+  if (input.activeSessions.length > 0) {
+    issues.push(buildActiveSessionIssue(input.activeSessions));
+  }
+  if (input.duplicateAgentNames.length > 0) {
+    issues.push({
+      code: 'duplicate_agent_names',
+      message: 'Template has duplicate agent names',
+      details: { agentNames: input.duplicateAgentNames },
+    });
+  }
+  return { ready: issues.length === 0, issues };
+}
+
+function buildActiveSessionIssue(activeSessions: ActiveSessionSummary[]): ImportReadinessIssue {
+  return {
+    code: 'active_sessions',
+    message: 'Import aborted: active agent sessions detected',
+    details: { activeSessions },
+  };
+}
+
+export function buildActiveSessionReadiness(
+  activeSessions: ActiveSessionSummary[],
+): ImportReadiness {
+  return { ready: false, issues: [buildActiveSessionIssue(activeSessions)] };
+}
+
+function buildReadinessFailure(
+  readiness: ImportReadiness,
+  providerMappingRequired: ReturnType<typeof buildProviderMappingRequired> | null,
+) {
+  return {
+    ...buildReadinessFailureProperties(readiness, providerMappingRequired),
+    readiness,
+  };
+}
+
+function buildReadinessFailureProperties(
+  readiness: ImportReadiness,
+  providerMappingRequired: ReturnType<typeof buildProviderMappingRequired> | null,
+) {
+  const firstIssue = readiness.issues[0];
+  const promptIssue = readiness.issues.find(
+    (issue): issue is Extract<ImportReadinessIssue, { code: 'prompt_reference_validation' }> =>
+      issue.code === 'prompt_reference_validation',
+  );
+  return {
+    success: false as const,
+    mutationStarted: false as const,
+    error: firstIssue?.message ?? 'Import readiness check failed',
+    ...(providerMappingRequired ? { providerMappingRequired } : {}),
+    ...(promptIssue ? { promptReferenceValidation: promptIssue.details } : {}),
+  };
 }
 
 function buildOldAgentIdToNameMap(existingAgents: ExistingProjectData['agents']['items']) {
@@ -1168,6 +1401,7 @@ function buildImportSuccessResponse(args: {
   teamsImported?: number;
   scheduledEpicsImported?: number;
   sessionPreservation: { preservedCount: number; removedCount: number };
+  statusesDeleted: number;
   promptTransfer: PromptTransferCounts;
 }) {
   return {
@@ -1190,7 +1424,7 @@ function buildImportSuccessResponse(args: {
         prompts: args.promptTransfer.deleted,
         profiles: args.existing.profiles.total,
         agents: args.existing.agents.total,
-        statuses: 0,
+        statuses: args.statusesDeleted,
         watchers: args.existing.watchers.length,
         subscribers: args.existing.subscribers.length,
         scheduledEpics: args.existing.scheduledEpics?.total ?? 0,

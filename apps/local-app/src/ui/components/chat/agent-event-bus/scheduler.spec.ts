@@ -11,7 +11,7 @@ import type {
   AgentEventBusAnchor,
   AgentEventBusGeometrySnapshot,
 } from './types';
-import type { AgentMessageEventFrame } from './useAgentEventBusStream';
+import type { AgentMessageEventFrame, ProjectMessageEventFrame } from './useAgentEventBusStream';
 
 // Layer: pure unit. The scheduler's injected timer environment and geometry
 // snapshots are the cheapest reliable proof of capacity, epochs, routing, and
@@ -108,6 +108,14 @@ function frame(
     recipients,
     ...overrides,
   };
+}
+
+function projectFrame(
+  direction: ProjectMessageEventFrame['direction'],
+  status: ProjectMessageEventFrame['status'] = 'delivered',
+  agentId = 'local-agent',
+): ProjectMessageEventFrame {
+  return { kind: 'project-message', direction, agentId, status };
 }
 
 const socketOne = {} as Socket;
@@ -335,6 +343,147 @@ describe('AgentEventBusScheduler', () => {
 
     scheduler.setReduceMotion(false);
     expect(routes[0].mode).toBe('static');
+  });
+
+  it.each(
+    (['outbound', 'inbound'] as const).flatMap((direction) =>
+      (['queued', 'delivered', 'failed', 'unconfirmed'] as const).map(
+        (status) => [direction, status] as const,
+      ),
+    ),
+  )('routes project %s status %s through the semantic boundary', (direction, status) => {
+    const scopeEpoch = scheduler.resetScope('project-1', socketOne);
+    scheduler.commitGeometry(
+      geometry(scopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+    );
+
+    expect(scheduler.enqueue(projectFrame(direction, status))).toBe(1);
+
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      eventKind: 'agent-message',
+      routeKind: direction === 'outbound' ? 'project-egress' : 'project-ingress',
+      projectDirection: direction,
+      feedback: { kind: 'delivery', status },
+      source:
+        direction === 'outbound'
+          ? { kind: 'agent', senderAgentId: 'local-agent' }
+          : { kind: 'project-boundary' },
+      recipient:
+        direction === 'outbound'
+          ? { kind: 'project-boundary' }
+          : { kind: 'agent', agentId: 'local-agent' },
+      path: {
+        source:
+          direction === 'outbound'
+            ? { kind: 'agent', key: 'local-agent' }
+            : { kind: 'project-boundary', key: 'project-boundary' },
+        recipient:
+          direction === 'outbound'
+            ? { kind: 'project-boundary', key: 'project-boundary' }
+            : { kind: 'agent', key: 'local-agent' },
+      },
+    });
+    if (direction === 'outbound') {
+      expect(routes[0]).not.toHaveProperty('recipientAgentId');
+    }
+  });
+
+  it('drops project routes without their local MAIN anchor and ignores unrelated anchors', () => {
+    const scopeEpoch = scheduler.resetScope('project-1', socketOne);
+    scheduler.commitGeometry(
+      geometry(scopeEpoch, 1, [anchor('unrelated', 'unrelated-agent', 80, 0)]),
+    );
+
+    expect(scheduler.enqueue(projectFrame('outbound'))).toBe(0);
+    expect(scheduler.enqueue(projectFrame('inbound'))).toBe(0);
+    expect(routes).toHaveLength(0);
+    expect(scheduler.totalCount).toBe(0);
+  });
+
+  it('applies shared active and total capacity bounds to project routes', () => {
+    const scopeEpoch = scheduler.resetScope('project-1', socketOne);
+    scheduler.commitGeometry(
+      geometry(scopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+    );
+
+    for (let index = 0; index < EVENT_BUS_MAX_TOTAL_ROUTES; index += 1) {
+      expect(scheduler.enqueue(projectFrame(index % 2 === 0 ? 'outbound' : 'inbound'))).toBe(1);
+    }
+
+    expect(scheduler.activeCount).toBe(EVENT_BUS_MAX_ACTIVE_ROUTES);
+    expect(scheduler.totalCount).toBe(EVENT_BUS_MAX_TOTAL_ROUTES);
+    expect(scheduler.enqueue(projectFrame('inbound'))).toBe(0);
+  });
+
+  it('rebuilds both project directions across geometry epochs and drops a collapsed local anchor', () => {
+    const scopeEpoch = scheduler.resetScope('project-1', socketOne);
+    scheduler.commitGeometry(
+      geometry(scopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+    );
+    scheduler.enqueue(projectFrame('outbound'));
+    scheduler.enqueue(projectFrame('inbound'));
+    const initialGenerations = routes.map((route) => route.generation);
+
+    scheduler.commitGeometry(
+      geometry(scopeEpoch, 2, [anchor('local-agent', 'local-agent', 120, 0)]),
+    );
+
+    expect(routes.map((route) => route.generation)).toEqual(
+      initialGenerations.map((generation) => generation + 1),
+    );
+    expect(routes[0].path.recipient.kind).toBe('project-boundary');
+    expect(routes[1].path.source.kind).toBe('project-boundary');
+
+    scheduler.commitGeometry(geometry(scopeEpoch, 3, []));
+    expect(routes).toHaveLength(0);
+    expect(scheduler.totalCount).toBe(0);
+  });
+
+  it.each(['outbound', 'inbound'] as const)(
+    'converts failed project %s travel into bounded static destination feedback',
+    (direction) => {
+      const scopeEpoch = scheduler.resetScope('project-1', socketOne);
+      scheduler.commitGeometry(
+        geometry(scopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+      );
+      scheduler.enqueue(projectFrame(direction, 'failed'));
+
+      scheduler.setReduceMotion(true);
+
+      expect(routes[0]).toMatchObject({
+        mode: 'static',
+        projectDirection: direction,
+        feedback: { kind: 'delivery', status: 'failed' },
+      });
+      expect(routes[0].path.recipient.kind).toBe(
+        direction === 'outbound' ? 'project-boundary' : 'agent',
+      );
+      timers.runDelay(280);
+      expect(routes).toHaveLength(0);
+    },
+  );
+
+  it('clears project routes and rejects stale callbacks after a socket scope reset', () => {
+    const oldScopeEpoch = scheduler.resetScope('project-1', socketOne);
+    scheduler.commitGeometry(
+      geometry(oldScopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+    );
+    scheduler.enqueue(projectFrame('inbound'));
+    const staleArrivals = timers.callbacksForDelay(EVENT_BUS_ROUTE_DURATION_MS);
+
+    const newScopeEpoch = scheduler.resetScope('project-1', socketTwo);
+    expect(routes).toHaveLength(0);
+    expect(scheduler.totalCount).toBe(0);
+
+    timers.forceCallbacks(staleArrivals);
+    expect(routes).toHaveLength(0);
+    expect(scheduler.commitGeometry(geometry(oldScopeEpoch, 2, []))).toBe(false);
+    expect(
+      scheduler.commitGeometry(
+        geometry(newScopeEpoch, 1, [anchor('local-agent', 'local-agent', 80, 0)]),
+      ),
+    ).toBe(true);
   });
 
   it('routes startup from the runtime origin with neutral feedback and minimal ordinals', () => {

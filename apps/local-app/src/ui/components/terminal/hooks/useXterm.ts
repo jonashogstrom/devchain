@@ -20,6 +20,7 @@ import { resolveTerminalSocket } from '../socket';
 import { resolveTerminalTheme } from '../terminal-themes';
 import type { ThemeValue } from '@/ui/components/ThemeSelect';
 import type { TerminalHistorySync } from '../terminal-history-sync';
+import { createTerminalInputIntentBinding } from '../terminal-input-intent-binding';
 
 /**
  * Buffered frame for sequence-based history deduplication
@@ -85,6 +86,7 @@ export function useXterm(
   appTheme: ThemeValue = 'dark',
   onTerminalChange?: (terminal: Terminal | null) => void,
   onScrollIntentController?: (controller: ScrollIntentController | null) => void,
+  isAuthorityRef?: React.MutableRefObject<boolean>,
 ) {
   useEffect(() => {
     // C1: Clamp scrollbackLines to valid range before using
@@ -217,9 +219,23 @@ export function useXterm(
     });
     onScrollIntentController?.(scrollIntent);
 
+    let inputIntentBinding: ReturnType<typeof createTerminalInputIntentBinding> | undefined;
+
     // Add direct TTY input handler for TTY mode
     if (inputMode === 'tty') {
       termLog('terminal_tty_mode_enabled', { sessionId });
+
+      const claimAuthorityForInputIntent = () => {
+        if (!activeSocket.connected) return;
+        if (isSubscribedRef?.current !== true || isAuthorityRef?.current !== false) return;
+        activeSocket.emit('terminal:focus', { sessionId });
+      };
+
+      inputIntentBinding = createTerminalInputIntentBinding({
+        terminal,
+        container,
+        onInputIntent: claimAuthorityForInputIntent,
+      });
 
       terminal.onData((data) => {
         // Filter out terminal-internal control sequences (OSC, DCS, etc.)
@@ -446,6 +462,7 @@ export function useXterm(
       if (selectionCopyTimer) clearTimeout(selectionCopyTimer);
       selectionDisposable.dispose();
       scrollDisposable?.dispose();
+      inputIntentBinding?.dispose();
       scrollIntent.dispose();
       onScrollIntentController?.(null);
       termLog('terminal_dispose', { sessionId });
@@ -468,6 +485,7 @@ export function useXterm(
     socket,
     onTerminalChange,
     onScrollIntentController,
+    isAuthorityRef,
   ]);
 
   // Live theme update — runs independently of the initialization effect so

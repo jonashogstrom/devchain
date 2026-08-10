@@ -19,6 +19,23 @@ function agentIdChange(payload: P): { previous: string | null; current: string |
   };
 }
 
+/**
+ * Project delivery is a single-owner route. Fail closed if a malformed event tries to
+ * represent more than one target rather than inventing a directional projection.
+ */
+function projectRecipient(payload: P): Record<string, unknown> {
+  const recipients = payload.recipients;
+  if (!Array.isArray(recipients) || recipients.length !== 1) {
+    throw new Error('Project message events require exactly one recipient');
+  }
+
+  const [recipient] = recipients;
+  if (typeof recipient !== 'object' || recipient === null || Array.isArray(recipient)) {
+    throw new Error('Project message events require a recipient record');
+  }
+  return recipient as Record<string, unknown>;
+}
+
 export const broadcastRegistry: Record<string, BroadcastRegistryTopicEntry<P>[]> = {
   // ── Activity ──
   'session.activity.changed': [
@@ -59,6 +76,26 @@ export const broadcastRegistry: Record<string, BroadcastRegistryTopicEntry<P>[]>
           status: recipient.status,
         })),
       }),
+      clientReaction: { kind: 'custom-handler', owner: 'useAgentEventBusStream' },
+    },
+    {
+      topic: (p) => `project/${p.sourceProjectId}/agent-messages`,
+      type: 'project.outbound',
+      shouldBroadcast: (p) => p.routingKind === 'project',
+      payloadProjection: (p) => ({
+        agentId: p.senderAgentId,
+        status: projectRecipient(p).status,
+      }),
+      clientReaction: { kind: 'custom-handler', owner: 'useAgentEventBusStream' },
+    },
+    {
+      topic: (p) => `project/${p.targetProjectId}/agent-messages`,
+      type: 'project.inbound',
+      shouldBroadcast: (p) => p.routingKind === 'project',
+      payloadProjection: (p) => {
+        const recipient = projectRecipient(p);
+        return { agentId: recipient.agentId, status: recipient.status };
+      },
       clientReaction: { kind: 'custom-handler', owner: 'useAgentEventBusStream' },
     },
   ],

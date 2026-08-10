@@ -1,6 +1,11 @@
 import type { Socket } from 'socket.io-client';
 import type { AgentEventBusStreamFrame } from './useAgentEventBusStream';
-import { selectAgentEventBusRoute, selectRuntimeEventBusRoute } from './geometry';
+import {
+  selectAgentEventBusRoute,
+  selectProjectEgressEventBusRoute,
+  selectProjectIngressEventBusRoute,
+  selectRuntimeEventBusRoute,
+} from './geometry';
 import type {
   AgentEventBusActiveRoute,
   AgentEventBusEventKind,
@@ -21,7 +26,6 @@ interface PendingRouteBase {
   id: string;
   frameId: string;
   eventKind: AgentEventBusEventKind;
-  recipientAgentId: string;
   ready: boolean;
   staggerTimer?: TimerHandle;
 }
@@ -29,14 +33,35 @@ interface PendingRouteBase {
 type PendingRoute = PendingRouteBase &
   (
     | {
+        routeKind: 'agent-to-agent';
         source: { kind: 'agent'; senderAgentId: string };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
         feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
         teamId?: string;
       }
     | {
+        routeKind: 'runtime-ingress';
         source: { kind: 'runtime' };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
         feedback: { kind: 'runtime-started' };
         runtimeOrdinal: number;
+      }
+    | {
+        routeKind: 'project-egress';
+        source: { kind: 'agent'; senderAgentId: string };
+        recipient: { kind: 'project-boundary' };
+        feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
+        projectDirection: 'outbound';
+      }
+    | {
+        routeKind: 'project-ingress';
+        source: { kind: 'project-boundary' };
+        recipient: { kind: 'agent'; agentId: string };
+        recipientAgentId: string;
+        feedback: { kind: 'delivery'; status: AgentEventBusDeliveryStatus };
+        projectDirection: 'inbound';
       }
   );
 
@@ -61,9 +86,14 @@ function publicRoute(route: InternalActiveRoute): AgentEventBusActiveRoute {
 }
 
 function pathSourceKey(path: AgentEventBusPath): string {
-  return path.source.kind === 'agent'
-    ? `agent:${path.source.key}`
-    : `runtime:${path.source.x}:${path.source.y}`;
+  switch (path.source.kind) {
+    case 'agent':
+      return `agent:${path.source.key}`;
+    case 'runtime':
+      return `runtime:${path.source.x}:${path.source.y}`;
+    case 'project-boundary':
+      return `project-boundary:${path.source.x}:${path.source.y}`;
+  }
 }
 
 function pathChanged(previous: AgentEventBusPath, next: AgentEventBusPath): boolean {
@@ -79,17 +109,23 @@ function selectRoute(
   snapshot: AgentEventBusGeometrySnapshot,
   route: PendingRoute | AgentEventBusActiveRoute,
 ): AgentEventBusPath | null {
-  if ('runtimeOrdinal' in route) {
-    return selectRuntimeEventBusRoute(snapshot, route.recipientAgentId)?.path ?? null;
+  switch (route.routeKind) {
+    case 'runtime-ingress':
+      return selectRuntimeEventBusRoute(snapshot, route.recipient.agentId)?.path ?? null;
+    case 'project-ingress':
+      return selectProjectIngressEventBusRoute(snapshot, route.recipient.agentId)?.path ?? null;
+    case 'project-egress':
+      return selectProjectEgressEventBusRoute(snapshot, route.source.senderAgentId)?.path ?? null;
+    case 'agent-to-agent':
+      return (
+        selectAgentEventBusRoute(
+          snapshot,
+          route.source.senderAgentId,
+          route.recipient.agentId,
+          route.teamId,
+        )?.path ?? null
+      );
   }
-  return (
-    selectAgentEventBusRoute(
-      snapshot,
-      route.source.senderAgentId,
-      route.recipientAgentId,
-      route.teamId,
-    )?.path ?? null
-  );
 }
 
 export class AgentEventBusScheduler {
@@ -184,6 +220,8 @@ export class AgentEventBusScheduler {
     switch (frame.kind) {
       case 'agent-message':
         return this.enqueueAgentMessage(frame);
+      case 'project-message':
+        return this.enqueueProjectMessage(frame);
       case 'session-started':
         return this.enqueueRuntimeStart(frame.agentId, 'session-started');
       case 'epic-assigned':
@@ -247,7 +285,9 @@ export class AgentEventBusScheduler {
         id: `${this.scopeEpoch}:route:${this.nextRouteId++}`,
         frameId,
         eventKind: 'agent-message',
+        routeKind: 'agent-to-agent',
         source: { kind: 'agent', senderAgentId: frame.senderAgentId },
+        recipient: { kind: 'agent', agentId: recipient.agentId },
         recipientAgentId: recipient.agentId,
         ...(frame.teamId ? { teamId: frame.teamId } : {}),
         feedback: { kind: 'delivery', status: recipient.status },
@@ -279,11 +319,56 @@ export class AgentEventBusScheduler {
       id: `${this.scopeEpoch}:route:${this.nextRouteId++}`,
       frameId: `${this.scopeEpoch}:frame:${this.nextFrameId++}`,
       eventKind: 'epic-assigned',
+      routeKind: 'agent-to-agent',
       source: { kind: 'agent', senderAgentId: fromAgentId },
+      recipient: { kind: 'agent', agentId: toAgentId },
       recipientAgentId: toAgentId,
       feedback: { kind: 'delivery', status: 'delivered' },
       ready: true,
     });
+
+    this.drain();
+    this.emitRoutes();
+    return 1;
+  }
+
+  private enqueueProjectMessage(
+    frame: Extract<AgentEventBusStreamFrame, { kind: 'project-message' }>,
+  ): number {
+    if (this.totalCount >= EVENT_BUS_MAX_TOTAL_ROUTES) return 0;
+
+    if (frame.direction === 'outbound') {
+      if (this.geometry && !selectProjectEgressEventBusRoute(this.geometry, frame.agentId)) {
+        return 0;
+      }
+      this.pending.push({
+        id: `${this.scopeEpoch}:route:${this.nextRouteId++}`,
+        frameId: `${this.scopeEpoch}:frame:${this.nextFrameId++}`,
+        eventKind: 'agent-message',
+        routeKind: 'project-egress',
+        source: { kind: 'agent', senderAgentId: frame.agentId },
+        recipient: { kind: 'project-boundary' },
+        feedback: { kind: 'delivery', status: frame.status },
+        projectDirection: 'outbound',
+        ready: true,
+      });
+    } else {
+      if (this.geometry && !selectProjectIngressEventBusRoute(this.geometry, frame.agentId)) {
+        return 0;
+      }
+      this.pending.push({
+        id: `${this.scopeEpoch}:route:${this.nextRouteId++}`,
+        frameId: `${this.scopeEpoch}:frame:${this.nextFrameId++}`,
+        eventKind: 'agent-message',
+        routeKind: 'project-ingress',
+        source: { kind: 'project-boundary' },
+        recipient: { kind: 'agent', agentId: frame.agentId },
+        recipientAgentId: frame.agentId,
+        feedback: { kind: 'delivery', status: frame.status },
+        projectDirection: 'inbound',
+        ready: true,
+      });
+    }
 
     this.drain();
     this.emitRoutes();
@@ -304,7 +389,9 @@ export class AgentEventBusScheduler {
       id: `${this.scopeEpoch}:route:${this.nextRouteId++}`,
       frameId: `${this.scopeEpoch}:frame:${this.nextFrameId++}`,
       eventKind,
+      routeKind: 'runtime-ingress',
       source: { kind: 'runtime' },
+      recipient: { kind: 'agent', agentId: recipientAgentId },
       recipientAgentId,
       feedback: { kind: 'runtime-started' },
       runtimeOrdinal,
@@ -326,10 +413,10 @@ export class AgentEventBusScheduler {
   private nextRuntimeOrdinal(): number {
     const occupied = new Set<number>();
     for (const route of this.pending) {
-      if ('runtimeOrdinal' in route) occupied.add(route.runtimeOrdinal);
+      if (route.routeKind === 'runtime-ingress') occupied.add(route.runtimeOrdinal);
     }
     for (const route of this.active) {
-      if ('runtimeOrdinal' in route) occupied.add(route.runtimeOrdinal);
+      if (route.routeKind === 'runtime-ingress') occupied.add(route.runtimeOrdinal);
     }
     let ordinal = 0;
     while (occupied.has(ordinal)) ordinal += 1;
@@ -357,7 +444,8 @@ export class AgentEventBusScheduler {
       this.pending
         .filter(
           (request) =>
-            !('runtimeOrdinal' in request) && !mountedSenders.has(request.source.senderAgentId),
+            (request.routeKind === 'agent-to-agent' || request.routeKind === 'project-egress') &&
+            !mountedSenders.has(request.source.senderAgentId),
         )
         .map((request) => request.frameId),
     );
@@ -370,8 +458,9 @@ export class AgentEventBusScheduler {
     }
     this.pending = this.pending.filter((request) => {
       if (
-        !('runtimeOrdinal' in request) ||
-        selectRuntimeEventBusRoute(snapshot, request.recipientAgentId)
+        request.routeKind === 'agent-to-agent' ||
+        request.routeKind === 'project-egress' ||
+        selectRoute(snapshot, request)
       ) {
         return true;
       }
@@ -387,34 +476,62 @@ export class AgentEventBusScheduler {
       const path = selectRoute(snapshot, request);
       if (!path) continue;
 
-      const route: InternalActiveRoute =
-        'runtimeOrdinal' in request
-          ? {
-              id: request.id,
-              frameId: request.frameId,
-              generation: 1,
-              eventKind: request.eventKind,
-              recipientAgentId: request.recipientAgentId,
-              source: request.source,
-              feedback: request.feedback,
-              runtimeOrdinal: request.runtimeOrdinal,
-              mode: this.reduceMotion ? 'static' : 'traveling',
-              path,
-            }
-          : {
-              id: request.id,
-              frameId: request.frameId,
-              generation: 1,
-              eventKind: request.eventKind,
-              recipientAgentId: request.recipientAgentId,
-              source: request.source,
-              feedback: request.feedback,
-              ...(request.teamId ? { teamId: request.teamId } : {}),
-              mode: this.reduceMotion ? 'static' : 'traveling',
-              path,
-            };
+      const route = this.activateRoute(request, path);
       this.scheduleRoutePhase(route);
       this.active.push(route);
+    }
+  }
+
+  private activateRoute(request: PendingRoute, path: AgentEventBusPath): InternalActiveRoute {
+    const base = {
+      id: request.id,
+      frameId: request.frameId,
+      generation: 1,
+      eventKind: request.eventKind,
+      mode: this.reduceMotion ? ('static' as const) : ('traveling' as const),
+      path,
+    };
+
+    switch (request.routeKind) {
+      case 'runtime-ingress':
+        return {
+          ...base,
+          routeKind: request.routeKind,
+          source: request.source,
+          recipient: request.recipient,
+          recipientAgentId: request.recipient.agentId,
+          feedback: request.feedback,
+          runtimeOrdinal: request.runtimeOrdinal,
+        };
+      case 'project-ingress':
+        return {
+          ...base,
+          routeKind: request.routeKind,
+          source: request.source,
+          recipient: request.recipient,
+          recipientAgentId: request.recipient.agentId,
+          feedback: request.feedback,
+          projectDirection: request.projectDirection,
+        };
+      case 'project-egress':
+        return {
+          ...base,
+          routeKind: request.routeKind,
+          source: request.source,
+          recipient: request.recipient,
+          feedback: request.feedback,
+          projectDirection: request.projectDirection,
+        };
+      case 'agent-to-agent':
+        return {
+          ...base,
+          routeKind: request.routeKind,
+          source: request.source,
+          recipient: request.recipient,
+          recipientAgentId: request.recipient.agentId,
+          feedback: request.feedback,
+          ...(request.teamId ? { teamId: request.teamId } : {}),
+        };
     }
   }
 

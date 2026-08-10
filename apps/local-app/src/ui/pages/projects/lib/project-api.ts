@@ -52,6 +52,32 @@ export interface SetupPreviewRequest {
   rawContent?: Record<string, unknown>;
 }
 
+export async function fetchUpgradeSetupPreview(
+  projectId: string,
+  targetVersion: string,
+): Promise<SetupPreviewResponse> {
+  const res = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/upgrade-template/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetVersion }),
+    },
+  );
+  const result = (await res.json().catch(() => ({
+    success: false,
+    mutationStarted: false,
+    error: 'Failed to load upgrade preview',
+  }))) as SetupPreviewResponse | ProjectPreMutationFailure;
+  if (isProjectPreMutationFailure(result)) {
+    throw new Error(result.error);
+  }
+  if (!res.ok) {
+    throw new Error('Failed to load upgrade preview');
+  }
+  return result;
+}
+
 export async function fetchSetupPreview(body: SetupPreviewRequest): Promise<SetupPreviewResponse> {
   const res = await fetch('/api/projects/setup-preview', {
     method: 'POST',
@@ -118,6 +144,66 @@ export interface ProvisioningWarning {
 
 export type ProjectPromptReferenceFailure = PromptReferenceValidationFailure;
 
+export type ImportReadinessIssue =
+  | {
+      code: 'prompt_reference_validation';
+      message: string;
+      details: ProjectPromptReferenceFailure['promptReferenceValidation'];
+    }
+  | {
+      code: 'selected_providers_not_installed';
+      message: string;
+      details: { providerNames: string[] };
+    }
+  | {
+      code: 'preset_not_found';
+      message: string;
+      details: { presetName: string };
+    }
+  | {
+      code: 'provider_mapping_required';
+      message: string;
+      details: unknown;
+    }
+  | {
+      code: 'selected_profiles_unavailable';
+      message: string;
+      details: { providerNames: string[] };
+    }
+  | {
+      code: 'active_sessions';
+      message: string;
+      details: { activeSessions: Array<{ id: string; agentId: string | null }> };
+    }
+  | {
+      code: 'duplicate_agent_names';
+      message: string;
+      details: { agentNames: string[] };
+    };
+
+export interface ImportReadiness {
+  ready: boolean;
+  issues: ImportReadinessIssue[];
+}
+
+export interface ProjectPreMutationFailure {
+  success: false;
+  mutationStarted: false;
+  error: string;
+  readiness?: ImportReadiness;
+  promptReferenceValidation?: ProjectPromptReferenceFailure['promptReferenceValidation'];
+}
+
+export function isProjectPreMutationFailure(value: unknown): value is ProjectPreMutationFailure {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ProjectPreMutationFailure>;
+  return (
+    candidate.success === false &&
+    candidate.mutationStarted === false &&
+    typeof candidate.error === 'string'
+  );
+}
+
 export function isProjectPromptReferenceFailure(
   value: unknown,
 ): value is ProjectPromptReferenceFailure {
@@ -142,6 +228,14 @@ export function formatProjectPromptReferenceFailure(
     )
     .join('; ');
   return details ? `${failure.error}. ${details}` : failure.error;
+}
+
+export function formatProjectPreMutationFailure(failure: ProjectPreMutationFailure): string {
+  if (isProjectPromptReferenceFailure(failure)) {
+    return formatProjectPromptReferenceFailure(failure);
+  }
+  const issueMessages = failure.readiness?.issues.map((issue) => issue.message) ?? [];
+  return issueMessages.length > 0 ? issueMessages.join(' ') : failure.error;
 }
 
 export interface ProviderMismatchWarning {
@@ -176,6 +270,11 @@ export type CreateFromTemplateResponse =
 
 export interface ImportDryRunSuccess {
   dryRun: true;
+  success?: false;
+  mutationStarted?: false;
+  error?: string;
+  readiness?: ImportReadiness;
+  promptReferenceValidation?: ProjectPromptReferenceFailure['promptReferenceValidation'];
   missingProviders: string[];
   unmatchedStatuses?: Array<{ id: string; label: string; color: string; epicCount: number }>;
   templateStatuses?: Array<{ label: string; color: string }>;
@@ -183,7 +282,7 @@ export interface ImportDryRunSuccess {
   promptTransfer?: PromptTransferCounts;
 }
 
-export type ImportDryRunResponse = ImportDryRunSuccess | ProjectPromptReferenceFailure;
+export type ImportDryRunResponse = ImportDryRunSuccess;
 
 export interface ImportProjectSuccess {
   success: true;
@@ -195,7 +294,7 @@ export interface ImportProjectSuccess {
   promptTransfer?: PromptTransferCounts;
 }
 
-export type ImportProjectResponse = ImportProjectSuccess | ProjectPromptReferenceFailure;
+export type ImportProjectResponse = ImportProjectSuccess | ProjectPreMutationFailure;
 
 export interface UpgradeProjectSuccess {
   success: true;
@@ -210,6 +309,7 @@ export interface UpgradeProjectFailure {
   promptReferenceValidation?: ProjectPromptReferenceFailure['promptReferenceValidation'];
   restored?: boolean;
   backupId?: string;
+  readiness?: ImportReadiness;
 }
 
 export type UpgradeProjectResponse = UpgradeProjectSuccess | UpgradeProjectFailure;

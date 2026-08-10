@@ -1,4 +1,4 @@
-import { type ChangeEventHandler, useCallback, useState } from 'react';
+import { type ChangeEventHandler, useCallback, useEffect, useState } from 'react';
 import { DeleteProjectDialog } from '@/ui/components/project/DeleteProjectDialog';
 import { ImportResultDialog } from '@/ui/components/project/ImportResultDialog';
 import { UpgradeDialog } from '@/ui/components/project/UpgradeDialog';
@@ -11,9 +11,16 @@ import { ProviderMappingModal } from '@/ui/components/project/ProviderMappingMod
 import { ProviderMismatchWarningModal } from '@/ui/components/project/ProviderMismatchWarningModal';
 import { ProjectSetupWizard } from '@/ui/components/project/ProjectSetupWizard';
 import { useCreateProjectWizard } from '@/ui/hooks/useCreateProjectWizard';
-import { useImportProjectWizard, type ImportResult } from '@/ui/hooks/useImportProjectWizard';
+import {
+  useImportProjectWizard,
+  useUpgradeProjectWizard,
+  type ImportResult,
+} from '@/ui/hooks/useImportProjectWizard';
 import { useToast } from '@/ui/hooks/use-toast';
-import type { SetupPreviewRequest } from '@/ui/pages/projects/lib/project-api';
+import type {
+  SetupPreviewRequest,
+  UpgradeProjectResponse,
+} from '@/ui/pages/projects/lib/project-api';
 import type { ProjectsPageController } from '@/ui/hooks/useProjectsPageController';
 
 interface ProjectsDialogsProps {
@@ -94,6 +101,25 @@ export function ProjectsDialogs({ controller }: ProjectsDialogsProps) {
     onImported: setImportResult,
     toast,
   });
+
+  const [upgradeResult, setUpgradeResult] = useState<UpgradeProjectResponse | null>(null);
+  const upgradeActionName =
+    upgradeTarget?.project.templateMetadata?.source === 'bundled' ? 'Update' : 'Upgrade';
+  const upgradeWizard = useUpgradeProjectWizard({
+    actionName: upgradeActionName,
+    onFinished: setUpgradeResult,
+    onClosed: handleCloseUpgradeDialog,
+    toast,
+  });
+
+  useEffect(() => {
+    if (!upgradeTarget || !upgradeTarget.project.templateMetadata || upgradeResult) return;
+    upgradeWizard.openUpgradeWizard({
+      id: upgradeTarget.project.id,
+      name: upgradeTarget.project.name,
+      targetVersion: upgradeTarget.targetVersion,
+    });
+  }, [upgradeResult, upgradeTarget, upgradeWizard.openUpgradeWizard]);
 
   // Source pick → open the import wizard. Template imports resolve via slug/version; file imports read
   // the JSON and pass it as setup-preview `rawContent` (Task 1's file mode).
@@ -212,6 +238,30 @@ export function ProjectsDialogs({ controller }: ProjectsDialogsProps) {
         }
       />
 
+      {/* Upgrade uses the same configured replace controller as import. The preview is resolved from
+          the target version and no current project configuration is passed into wizard state. */}
+      <ProjectSetupWizard
+        open={upgradeWizard.isOpen}
+        onOpenChange={upgradeWizard.onOpenChange}
+        controller={upgradeWizard.controller}
+        title={
+          upgradeWizard.upgradeTarget
+            ? `${upgradeActionName} ${upgradeWizard.upgradeTarget.name}`
+            : `${upgradeActionName} project`
+        }
+        description="Configure providers, agents, and teams from the target template, then review the replacement before applying it."
+        submitLabel={`Apply ${upgradeActionName}`}
+        isLoading={upgradeWizard.isLoading}
+        isSubmitting={upgradeWizard.isSubmitting}
+        errorContent={
+          upgradeWizard.isError ? (
+            <div className="rounded-md border border-destructive/50 p-4 text-sm text-destructive">
+              Failed to load the target template preview. Close and try again.
+            </div>
+          ) : undefined
+        }
+      />
+
       {/* Import Result Dialog — driven by the wizard's commit result. */}
       <ImportResultDialog
         open={importResult !== null}
@@ -266,17 +316,19 @@ export function ProjectsDialogs({ controller }: ProjectsDialogsProps) {
         }
       />
 
-      {/* Upgrade Dialog */}
-      {upgradeTarget && upgradeTarget.project.templateMetadata && (
+      {/* Upgrade result and recovery dialog — commit is owned by the shared wizard above. */}
+      {upgradeTarget && upgradeTarget.project.templateMetadata && upgradeResult && (
         <UpgradeDialog
           projectId={upgradeTarget.project.id}
           projectName={upgradeTarget.project.name}
-          templateSlug={upgradeTarget.project.templateMetadata.slug}
-          currentVersion={upgradeTarget.project.templateMetadata.version || ''}
           targetVersion={upgradeTarget.targetVersion}
           source={upgradeTarget.project.templateMetadata.source}
+          result={upgradeResult}
           open={true}
-          onClose={handleCloseUpgradeDialog}
+          onClose={() => {
+            setUpgradeResult(null);
+            handleCloseUpgradeDialog();
+          }}
         />
       )}
 

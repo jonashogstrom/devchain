@@ -42,8 +42,9 @@ Wrap at 72 chars. Blank line after the subject. Cover, in rough priority order:
 - Never invent rationale. If you did not do the work and cannot recover the "why" from
   the diff, prior commits, code comments, or the linked task, then either ask, or write
   only what you can verify. Plausible-sounding invented reasoning is worse than none.
-- Never claim verification you didn't run. Don't write "all tests pass" unless you ran
-  them and saw them pass.
+- Never claim verification you didn't run. CI records what passed; don't restate it.
+  Do record verification that was partial or manual — an untested path, a suite you
+  couldn't run locally, a browser you checked by hand.
 - No marketing language, no adjectives like "robust" / "improved" / "comprehensive".
   State the mechanism, let the reader judge.
 - No process narration. "First I tried X, then Y" belongs nowhere. State the resulting

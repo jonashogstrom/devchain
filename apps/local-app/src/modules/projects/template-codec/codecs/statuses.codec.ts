@@ -72,9 +72,15 @@ class StatusesCodec implements TemplateSectionCodec<StatusesSection> {
       existingStatusByLabel.set(status.label.trim().toLowerCase(), status);
     }
 
-    for (const status of existingStatuses) {
+    // Unmatched statuses survive replace imports, so some may already occupy a previous
+    // temporary range. Allocate above the live maximum instead of adding a fixed offset to each
+    // current position; otherwise a later import can collide while statuses are moved one by one.
+    const temporaryPositionBase =
+      existingStatuses.reduce((max, status) => Math.max(max, status.position), 0) +
+      TEMP_POSITION_OFFSET;
+    for (const [index, status] of existingStatuses.entries()) {
       await storage.updateStatus(status.id, {
-        position: status.position + TEMP_POSITION_OFFSET,
+        position: temporaryPositionBase + index,
       });
     }
 

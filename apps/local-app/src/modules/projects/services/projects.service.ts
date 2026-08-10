@@ -105,6 +105,7 @@ export interface ImportProjectInput {
   promptTransferPolicy?: PromptTransferPolicy;
   statusMappings?: Record<string, string>;
   familyProviderMappings?: Record<string, string>;
+  presetName?: string;
   agentOverrides?: PresetAgentConfig[];
   /** Transient Step-1 provider choice metadata. Narrows selection eligibility; not persisted. */
   selectedProviderNames?: string[];
@@ -235,7 +236,6 @@ export class ProjectsService {
   }
 
   async importProject(input: ImportProjectInput) {
-    await this.assertSelectedProvidersInstalled(input.selectedProviderNames);
     const result = await importProjectWithHelper(input, {
       storage: this.storage,
       snapshotPromptWriter: this.snapshotPromptWriter,
@@ -262,6 +262,13 @@ export class ProjectsService {
       getImportErrorMessage,
       applyAgentConfigs: (projectId, agentConfigs, nameMaps) =>
         applyAgentConfigs(projectId, agentConfigs, { storage: this.storage }, nameMaps),
+      applyPreset: (projectId, presetName, nameMaps) =>
+        applyPresetWithHelper(
+          projectId,
+          presetName,
+          { storage: this.storage, settings: this.settings },
+          nameMaps,
+        ),
       teamsService: this.teamsService,
       scheduledEpicsRefresh: this.scheduledEpicRunnerRefresh,
       computeNextRunAt: getNextRunAt,

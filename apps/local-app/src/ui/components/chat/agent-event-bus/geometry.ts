@@ -2,6 +2,7 @@ import type {
   AgentEventBusAnchor,
   AgentEventBusGeometrySnapshot,
   AgentEventBusPath,
+  AgentEventBusProjectBoundary,
   AgentEventBusRuntimeOrigin,
 } from './types';
 
@@ -84,7 +85,7 @@ export function createRoundedOrthogonalPath(
       durationMs: EVENT_BUS_ROUTE_DURATION_MS,
       radius,
       source: { ...source, kind: 'agent' },
-      recipient,
+      recipient: { ...recipient, kind: 'agent' },
     };
   }
 
@@ -117,21 +118,23 @@ export function createRoundedOrthogonalPath(
     durationMs: EVENT_BUS_ROUTE_DURATION_MS,
     radius,
     source: { ...source, kind: 'agent' },
-    recipient,
+    recipient: { ...recipient, kind: 'agent' },
   };
 }
 
-export function createRoundedSystemIngressPath(
+function createRoundedTopIngressPath(
   recipientInput: AgentEventBusAnchor,
   busXInput: number,
-  originYInput = RUNTIME_ORIGIN_Y,
-  radiusInput = EVENT_BUS_CORNER_RADIUS,
+  originYInput: number,
+  radiusInput: number,
+  sourceKind: 'runtime' | 'project-boundary',
 ): AgentEventBusPath {
-  const source: AgentEventBusRuntimeOrigin = {
-    kind: 'runtime',
-    x: roundSvgCoordinate(busXInput),
-    y: roundSvgCoordinate(originYInput),
-  };
+  const x = roundSvgCoordinate(busXInput);
+  const y = roundSvgCoordinate(originYInput);
+  const source: AgentEventBusRuntimeOrigin | AgentEventBusProjectBoundary =
+    sourceKind === 'runtime'
+      ? { kind: 'runtime', x, y }
+      : { kind: 'project-boundary', key: 'project-boundary', x, y };
   const recipient = {
     ...recipientInput,
     x: roundSvgCoordinate(recipientInput.x),
@@ -161,6 +164,90 @@ export function createRoundedSystemIngressPath(
         ].join(' ');
   const length = roundSvgCoordinate(
     verticalDistance + horizontalDistance - 2 * radius + (Math.PI * radius) / 2,
+  );
+
+  return {
+    d,
+    length,
+    durationMs: EVENT_BUS_ROUTE_DURATION_MS,
+    radius,
+    source,
+    recipient: { ...recipient, kind: 'agent' },
+  };
+}
+
+export function createRoundedSystemIngressPath(
+  recipientInput: AgentEventBusAnchor,
+  busXInput: number,
+  originYInput = RUNTIME_ORIGIN_Y,
+  radiusInput = EVENT_BUS_CORNER_RADIUS,
+): AgentEventBusPath {
+  return createRoundedTopIngressPath(
+    recipientInput,
+    busXInput,
+    originYInput,
+    radiusInput,
+    'runtime',
+  );
+}
+
+export function createRoundedProjectIngressPath(
+  recipientInput: AgentEventBusAnchor,
+  busXInput: number,
+  originYInput = RUNTIME_ORIGIN_Y,
+  radiusInput = EVENT_BUS_CORNER_RADIUS,
+): AgentEventBusPath {
+  return createRoundedTopIngressPath(
+    recipientInput,
+    busXInput,
+    originYInput,
+    radiusInput,
+    'project-boundary',
+  );
+}
+
+export function createRoundedProjectEgressPath(
+  sourceInput: AgentEventBusAnchor,
+  busXInput: number,
+  originYInput = RUNTIME_ORIGIN_Y,
+  radiusInput = EVENT_BUS_CORNER_RADIUS,
+): AgentEventBusPath {
+  const source = {
+    ...sourceInput,
+    x: roundSvgCoordinate(sourceInput.x),
+    y: roundSvgCoordinate(sourceInput.y),
+    kind: 'agent' as const,
+  };
+  const recipient: AgentEventBusProjectBoundary = {
+    kind: 'project-boundary',
+    key: 'project-boundary',
+    x: roundSvgCoordinate(busXInput),
+    y: roundSvgCoordinate(originYInput),
+  };
+  const horizontalDistance = Math.abs(recipient.x - source.x);
+  const verticalDistance = Math.abs(recipient.y - source.y);
+  const radius = roundSvgCoordinate(
+    Math.max(0, Math.min(radiusInput, horizontalDistance, verticalDistance)),
+  );
+  const horizontalDirection = Math.sign(recipient.x - source.x) || 1;
+  const verticalDirection = Math.sign(recipient.y - source.y) || 1;
+  const cornerStartX = roundSvgCoordinate(recipient.x - horizontalDirection * radius);
+  const cornerEndY = roundSvgCoordinate(source.y + verticalDirection * radius);
+  const sourceX = formatSvgNumber(source.x);
+  const sourceY = formatSvgNumber(source.y);
+  const recipientX = formatSvgNumber(recipient.x);
+  const recipientY = formatSvgNumber(recipient.y);
+  const d =
+    radius === 0
+      ? `M ${sourceX} ${sourceY} H ${recipientX} V ${recipientY}`
+      : [
+          `M ${sourceX} ${sourceY}`,
+          `H ${formatSvgNumber(cornerStartX)}`,
+          `Q ${recipientX} ${sourceY} ${recipientX} ${formatSvgNumber(cornerEndY)}`,
+          `V ${recipientY}`,
+        ].join(' ');
+  const length = roundSvgCoordinate(
+    horizontalDistance + verticalDistance - 2 * radius + (Math.PI * radius) / 2,
   );
 
   return {
@@ -254,6 +341,62 @@ export function selectRuntimeEventBusRoute(
       (path.length === selected.path.length && recipient.order < selected.recipient.order)
     ) {
       selected = { recipient, path };
+    }
+  }
+  return selected;
+}
+
+export interface SelectedProjectIngressEventBusRoute {
+  recipient: AgentEventBusAnchor;
+  path: AgentEventBusPath;
+}
+
+export function selectProjectIngressEventBusRoute(
+  snapshot: AgentEventBusGeometrySnapshot,
+  recipientAgentId: string,
+): SelectedProjectIngressEventBusRoute | null {
+  let selected: SelectedProjectIngressEventBusRoute | null = null;
+  for (const recipient of snapshot.anchors) {
+    if (recipient.agentId !== recipientAgentId) continue;
+    const path = createRoundedProjectIngressPath(
+      recipient,
+      snapshot.runtimeOrigin.x,
+      snapshot.runtimeOrigin.y,
+    );
+    if (
+      !selected ||
+      path.length < selected.path.length ||
+      (path.length === selected.path.length && recipient.order < selected.recipient.order)
+    ) {
+      selected = { recipient, path };
+    }
+  }
+  return selected;
+}
+
+export interface SelectedProjectEgressEventBusRoute {
+  source: AgentEventBusAnchor;
+  path: AgentEventBusPath;
+}
+
+export function selectProjectEgressEventBusRoute(
+  snapshot: AgentEventBusGeometrySnapshot,
+  sourceAgentId: string,
+): SelectedProjectEgressEventBusRoute | null {
+  let selected: SelectedProjectEgressEventBusRoute | null = null;
+  for (const source of snapshot.anchors) {
+    if (source.agentId !== sourceAgentId) continue;
+    const path = createRoundedProjectEgressPath(
+      source,
+      snapshot.runtimeOrigin.x,
+      snapshot.runtimeOrigin.y,
+    );
+    if (
+      !selected ||
+      path.length < selected.path.length ||
+      (path.length === selected.path.length && source.order < selected.source.order)
+    ) {
+      selected = { source, path };
     }
   }
   return selected;

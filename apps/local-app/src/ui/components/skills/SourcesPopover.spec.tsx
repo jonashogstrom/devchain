@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { SourcesPopover } from './SourcesPopover';
 
@@ -207,6 +207,39 @@ describe('SourcesPopover', () => {
       expect(removeLocalSourceMock).toHaveBeenCalledWith('local-1');
     });
     expect(removeCommunitySourceMock).not.toHaveBeenCalled();
+  });
+
+  it('renders one branded, linked, non-removable DevChain built-in source', async () => {
+    fetchSourcesMock.mockResolvedValue([
+      {
+        name: 'devchain',
+        kind: 'builtin',
+        enabled: true,
+        repoUrl: 'https://github.com/TwiTech-LAB/devchain/tree/main/apps/local-app/skills',
+        skillCount: 1,
+      },
+    ]);
+    fetchCommunitySourcesMock.mockResolvedValue([]);
+    fetchLocalSourcesMock.mockResolvedValue([]);
+
+    renderWithQueryClient(<SourcesPopover />);
+
+    const link = await screen.findByRole('link', { name: 'DevChain' });
+    const builtInSection = screen.getByText('Built-in Sources').parentElement;
+    const sourceRow = link.closest<HTMLElement>('.rounded-md.border');
+
+    expect(screen.getAllByRole('link', { name: 'DevChain' })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Sources (1/1)' })).toBeInTheDocument();
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/TwiTech-LAB/devchain/tree/main/apps/local-app/skills',
+    );
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(builtInSection).toContainElement(link);
+    expect(sourceRow).not.toBeNull();
+    if (!sourceRow) throw new Error('Expected DevChain built-in source row');
+    expect(sourceRow.querySelector('svg')).toHaveClass('text-sky-700');
+    expect(within(sourceRow).queryByRole('button', { name: /remove/i })).toBeNull();
   });
 
   it('routes add-source dialog local submissions to addLocalSource', async () => {

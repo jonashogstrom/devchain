@@ -329,6 +329,7 @@ describe('ProjectsService', () => {
 
       expect(result).toEqual({
         dryRun: true,
+        readiness: { ready: true, issues: [] },
         missingProviders: ['missing-provider'],
         unmatchedStatuses: [],
         templateStatuses: [{ label: 'Status 1', color: '#000' }],
@@ -347,7 +348,7 @@ describe('ProjectsService', () => {
             prompts: 1,
             profiles: 1,
             agents: 1,
-            statuses: 1,
+            statuses: 0,
             watchers: 0,
             subscribers: 0,
             scheduledEpics: 0,
@@ -1205,7 +1206,7 @@ describe('ProjectsService', () => {
         jest.restoreAllMocks();
       });
 
-      it('should throw ValidationError when canImport is false (no alternatives available)', async () => {
+      it('should return structured readiness when canImport is false', async () => {
         const payload = {
           prompts: [],
           profiles: [
@@ -1255,15 +1256,22 @@ describe('ProjectsService', () => {
         storage.listAgents.mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 });
         storage.listStatuses.mockResolvedValue({ items: [], total: 0, limit: 10000, offset: 0 });
 
-        // Even with mappings provided, should fail because canImport is false
-        await expect(
-          service.importProject({
-            projectId,
-            payload,
-            dryRun: false,
-            familyProviderMappings: { special: 'anything' },
-          }),
-        ).rejects.toThrow('Cannot import: some profile families have no available providers');
+        const result = await service.importProject({
+          projectId,
+          payload,
+          dryRun: false,
+          familyProviderMappings: { special: 'anything' },
+        });
+
+        expect(result).toMatchObject({
+          success: false,
+          mutationStarted: false,
+          readiness: {
+            ready: false,
+            issues: [{ code: 'provider_mapping_required' }],
+          },
+          providerMappingRequired: { canImport: false },
+        });
 
         jest.restoreAllMocks();
       });

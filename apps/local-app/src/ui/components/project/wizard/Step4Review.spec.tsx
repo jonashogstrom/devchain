@@ -44,6 +44,23 @@ describe('Step4Review', () => {
     expect(within(promptTransfer).getByText('skipped')).toBeInTheDocument();
     expect(within(promptTransfer).getByText('3')).toBeInTheDocument();
     expect(within(promptTransfer).getByText('4')).toBeInTheDocument();
+    expect(screen.getByText(/teams, watchers, subscribers, scheduled epics/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Only unmatched statuses mapped below will be deleted/),
+    ).toBeInTheDocument();
+  });
+
+  it('uses the active flow name while computing changes', () => {
+    render(
+      <Step4Review
+        review={null}
+        isLoading
+        statusMappings={{}}
+        onStatusMappingChange={jest.fn()}
+        operationName="upgrade"
+      />,
+    );
+    expect(screen.getByText('Computing upgrade changes…')).toBeInTheDocument();
   });
 
   it('renders the status-mapping section only when there are unmatched statuses', () => {

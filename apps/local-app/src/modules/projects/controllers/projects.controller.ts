@@ -70,10 +70,6 @@ const CreateProjectSchema = z.object({
 
 const UpdateProjectSchema = CreateProjectSchema.partial();
 
-const UpgradeTemplateRequestSchema = z.object({
-  targetVersion: z.string().regex(SEMVER_PATTERN, VALIDATION_MESSAGES.INVALID_VERSION),
-});
-
 const RestoreTemplateBackupRequestSchema = z.object({
   backupId: z
     .string()
@@ -119,6 +115,48 @@ function normalizeFamilyProviderMappings(
  * string. Unknown-provider rejection is enforced in the service (needs installed-provider storage).
  */
 const SelectedProviderNamesSchema = z.array(z.string().min(1)).min(1).optional();
+
+const TeamOverrideSchema = z
+  .object({
+    teamName: z.string().min(1),
+    allowTeamLeadCreateAgents: z.boolean().optional(),
+    maxMembers: z.number().int().min(2).max(10).optional(),
+    maxConcurrentTasks: z.number().int().min(1).max(10).optional(),
+    profileNames: z.array(z.string().min(1)).optional(),
+    profileSelections: z
+      .array(
+        z.object({
+          profileName: z.string().min(1),
+          configNames: z.array(z.string().min(1)),
+        }),
+      )
+      .optional(),
+  })
+  .strict();
+
+const TeamOverridesSchema = z
+  .array(TeamOverrideSchema)
+  .refine((arr) => new Set(arr.map((item) => item.teamName.toLowerCase())).size === arr.length, {
+    message: 'Duplicate teamName in teamOverrides',
+  })
+  .optional();
+
+const StatusMappingsSchema = z.record(z.string().min(1), z.string().min(1)).optional();
+
+const UpgradeTemplateRequestSchema = z
+  .object({
+    targetVersion: z.string().regex(SEMVER_PATTERN, VALIDATION_MESSAGES.INVALID_VERSION),
+    selectedProviderNames: SelectedProviderNamesSchema,
+    familyProviderMappings: FamilyProviderMappingsSchema,
+    presetName: z.string().min(1).optional(),
+    agentOverrides: z.array(TemplatePresetAgentConfigSchema).optional(),
+    teamOverrides: TeamOverridesSchema,
+    statusMappings: StatusMappingsSchema,
+  })
+  .refine((data) => !(data.presetName && data.agentOverrides), {
+    message: 'Provide either presetName or agentOverrides, but not both',
+    path: ['agentOverrides'],
+  });
 
 /**
  * Case-normalize + dedupe selectedProviderNames (lowercased, like familyProviderMappings values).
@@ -399,6 +437,31 @@ export class ProjectsController {
     return this.templateUpgrade.upgradeProject({
       projectId: id,
       targetVersion: parsed.targetVersion,
+      ...(parsed.selectedProviderNames !== undefined
+        ? { selectedProviderNames: normalizeSelectedProviderNames(parsed.selectedProviderNames) }
+        : {}),
+      ...(parsed.familyProviderMappings !== undefined
+        ? { familyProviderMappings: normalizeFamilyProviderMappings(parsed.familyProviderMappings) }
+        : {}),
+      ...(parsed.presetName !== undefined ? { presetName: parsed.presetName } : {}),
+      ...(parsed.agentOverrides !== undefined ? { agentOverrides: parsed.agentOverrides } : {}),
+      ...(parsed.teamOverrides !== undefined ? { teamOverrides: parsed.teamOverrides } : {}),
+      ...(parsed.statusMappings !== undefined ? { statusMappings: parsed.statusMappings } : {}),
+    });
+  }
+
+  @Post(':id/upgrade-template/preview')
+  @HttpCode(HttpStatus.OK)
+  async previewTemplateUpgrade(@Param('id') id: string, @Body() body: UpgradeTemplateDto) {
+    logger.info({ projectId: id }, 'POST /api/projects/:id/upgrade-template/preview');
+    const parsed = parseRequestBody(
+      UpgradeTemplateRequestSchema,
+      body,
+      'Invalid template upgrade preview request',
+    );
+    return this.templateUpgrade.previewUpgrade({
+      projectId: id,
+      targetVersion: parsed.targetVersion,
     });
   }
 
@@ -565,31 +628,7 @@ export class ProjectsController {
         agentOverrides: z.array(TemplatePresetAgentConfigSchema).optional(),
         // Transient provider choice metadata (Step-1 wizard). Non-empty when present.
         selectedProviderNames: SelectedProviderNamesSchema,
-        teamOverrides: z
-          .array(
-            z
-              .object({
-                teamName: z.string().min(1),
-                allowTeamLeadCreateAgents: z.boolean().optional(),
-                maxMembers: z.number().int().min(2).max(10).optional(),
-                maxConcurrentTasks: z.number().int().min(1).max(10).optional(),
-                profileNames: z.array(z.string().min(1)).optional(),
-                profileSelections: z
-                  .array(
-                    z.object({
-                      profileName: z.string().min(1),
-                      configNames: z.array(z.string().min(1)),
-                    }),
-                  )
-                  .optional(),
-              })
-              .strict(),
-          )
-          .optional()
-          .refine(
-            (arr) => !arr || new Set(arr.map((o) => o.teamName.toLowerCase())).size === arr.length,
-            { message: 'Duplicate teamName in teamOverrides' },
-          ),
+        teamOverrides: TeamOverridesSchema,
       })
       .refine(
         (data) => {
@@ -750,29 +789,6 @@ export class ProjectsController {
     // Validate teamOverrides if provided
     let teamOverrides: ImportProjectInput['teamOverrides'];
     if (rawTeamOverrides !== undefined) {
-      const TeamOverridesSchema = z
-        .array(
-          z
-            .object({
-              teamName: z.string().min(1),
-              allowTeamLeadCreateAgents: z.boolean().optional(),
-              maxMembers: z.number().int().min(2).max(10).optional(),
-              maxConcurrentTasks: z.number().int().min(1).max(10).optional(),
-              profileNames: z.array(z.string().min(1)).optional(),
-              profileSelections: z
-                .array(
-                  z.object({
-                    profileName: z.string().min(1),
-                    configNames: z.array(z.string().min(1)),
-                  }),
-                )
-                .optional(),
-            })
-            .strict(),
-        )
-        .refine((arr) => new Set(arr.map((o) => o.teamName.toLowerCase())).size === arr.length, {
-          message: 'Duplicate teamName in teamOverrides',
-        });
       const parseResult = TeamOverridesSchema.safeParse(rawTeamOverrides);
       if (!parseResult.success) {
         const errors = parseResult.error.errors
@@ -783,10 +799,20 @@ export class ProjectsController {
       teamOverrides = parseResult.data;
     }
 
-    // presetName XOR agentOverrides: reject when both are provided (import never applies a
-    // preset by name, but the guard is symmetric with the create endpoint).
+    // presetName XOR agentOverrides: both paths configure the same imported agents, so accepting
+    // both would make the final selection order-dependent.
     if (rawPresetName !== undefined && rawAgentOverrides !== undefined) {
       throw new BadRequestException('Provide either presetName or agentOverrides, but not both');
+    }
+
+    let presetName: ImportProjectInput['presetName'];
+    if (rawPresetName !== undefined) {
+      const parseResult = z.string().min(1).safeParse(rawPresetName);
+      if (!parseResult.success) {
+        const errors = parseResult.error.errors.map((e) => e.message).join('; ');
+        throw new BadRequestException(`Invalid presetName: ${errors}`);
+      }
+      presetName = parseResult.data;
     }
 
     // Validate agentOverrides if provided (exactly TemplatePresetAgentConfigSchema).
@@ -802,8 +828,8 @@ export class ProjectsController {
       agentOverrides = parseResult.data;
     }
 
-    // Validate selectedProviderNames if provided (non-empty list of non-empty strings). Unknown
-    // provider rejection happens in the service (needs installed-provider storage).
+    // Validate selectedProviderNames if provided (non-empty list of non-empty strings). The shared
+    // import readiness check reports names that are not installed after consulting storage.
     let selectedProviderNames: ImportProjectInput['selectedProviderNames'];
     if (rawSelectedProviderNames !== undefined) {
       const parseResult = SelectedProviderNamesSchema.safeParse(rawSelectedProviderNames);
@@ -822,6 +848,7 @@ export class ProjectsController {
       dryRun: isDryRun,
       statusMappings,
       familyProviderMappings,
+      ...(presetName ? { presetName } : {}),
       ...(agentOverrides ? { agentOverrides } : {}),
       ...(selectedProviderNames ? { selectedProviderNames } : {}),
       ...(teamOverrides ? { teamOverrides } : {}),

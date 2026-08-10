@@ -3,6 +3,7 @@ import type { Socket } from 'socket.io-client';
 import { useAppSocket } from '@/ui/hooks/useAppSocket';
 import {
   isAgentMessageEventPayload,
+  isProjectMessageEventPayload,
   isSessionStartedEventPayload,
   parseAgentEventBusEnvelope,
   useAgentEventBusStream,
@@ -56,6 +57,8 @@ const directPayload: AgentMessageEventPayload = {
   routingKind: 'direct',
   recipients: [{ agentId: 'recipient-1', status: 'delivered' }],
 };
+
+const projectPayload = { agentId: 'local-agent-1', status: 'delivered' as const };
 
 // Layer: pure unit. Calling the strict parsers directly is the cheapest reliable
 // proof of exact payload/envelope acceptance without mounting a hook or socket.
@@ -111,6 +114,41 @@ describe('strict event-bus payload parsing', () => {
     expect(isSessionStartedEventPayload({ agentId: 'agent-1' })).toBe(true);
     expect(isSessionStartedEventPayload({ agentId: '' })).toBe(false);
     expect(isSessionStartedEventPayload({ agentId: 'agent-1', sessionId: 'secret' })).toBe(false);
+  });
+
+  it.each(['queued', 'delivered', 'failed', 'unconfirmed'] as const)(
+    'accepts the exact project-message payload with %s status',
+    (status) => {
+      expect(isProjectMessageEventPayload({ agentId: 'local-agent-1', status })).toBe(true);
+    },
+  );
+
+  it.each([
+    ['missing agent id', { status: 'delivered' }],
+    ['empty agent id', { agentId: '', status: 'delivered' }],
+    ['invalid status', { agentId: 'local-agent-1', status: 'unknown' }],
+    ['wrong status type', { agentId: 'local-agent-1', status: 1 }],
+    ['foreign agent id', { ...projectPayload, foreignAgentId: 'foreign-agent' }],
+    ['agent name', { ...projectPayload, agentName: 'Local Owner' }],
+    ['message content', { ...projectPayload, content: 'secret' }],
+    ['project identifier', { ...projectPayload, projectId: 'foreign-project' }],
+  ])('rejects project payload with %s', (_caseName, value) => {
+    expect(isProjectMessageEventPayload(value)).toBe(false);
+  });
+
+  it('maps exact project wire types into directional project-message frames', () => {
+    expect(
+      parseAgentEventBusEnvelope(
+        envelope(projectPayload, undefined, 'project.outbound'),
+        'project/project-1/agent-messages',
+      ),
+    ).toEqual({ kind: 'project-message', direction: 'outbound', ...projectPayload });
+    expect(
+      parseAgentEventBusEnvelope(
+        envelope(projectPayload, undefined, 'project.inbound'),
+        'project/project-1/agent-messages',
+      ),
+    ).toEqual({ kind: 'project-message', direction: 'inbound', ...projectPayload });
   });
 
   it('parses only exact envelopes into the discriminated client union', () => {
@@ -173,6 +211,13 @@ describe('useAgentEventBusStream', () => {
 
     selectedSocket.emitMessage(envelope({ agentId: 'agent-1' }, undefined, 'session.starting'));
     expect(onFrame).toHaveBeenLastCalledWith({ kind: 'session-started', agentId: 'agent-1' });
+
+    selectedSocket.emitMessage(envelope(projectPayload, undefined, 'project.inbound'));
+    expect(onFrame).toHaveBeenLastCalledWith({
+      kind: 'project-message',
+      direction: 'inbound',
+      ...projectPayload,
+    });
   });
 
   it('accepts nothing while project scope is unresolved', () => {
@@ -190,6 +235,10 @@ describe('useAgentEventBusStream', () => {
     ['wrong type', envelope(directPayload, undefined, 'created')],
     ['non-object envelope', null],
     ['malformed payload', envelope({ ...directPayload, message: 'secret' })],
+    [
+      'malformed project payload',
+      envelope({ ...projectPayload, senderAgentId: 'foreign' }, undefined, 'project.outbound'),
+    ],
     [
       'extra session field',
       envelope({ agentId: 'agent-1', sessionId: 'secret' }, undefined, 'session.starting'),

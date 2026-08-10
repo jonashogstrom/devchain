@@ -45,7 +45,9 @@ describe('LocalSourcesService', () => {
       seedSourceProjectDisabled: jest.fn().mockResolvedValue(undefined),
     };
     skillsService = {
-      getReservedSourceNames: jest.fn().mockReturnValue(['anthropic', 'microsoft', 'openai']),
+      getReservedSourceNames: jest
+        .fn()
+        .mockReturnValue(['anthropic', 'microsoft', 'openai', 'devchain']),
     };
     skillSyncService = {
       syncSource: jest.fn().mockResolvedValue({
@@ -163,7 +165,7 @@ describe('LocalSourcesService', () => {
     expect(skillSyncService.syncSource).toHaveBeenCalledWith('local-sync-fail');
   });
 
-  it('rejects reserved built-in source names with validation error', async () => {
+  it.each(['openai', 'devchain'])('rejects reserved built-in source name %s', async (name) => {
     mockReadableDirectoryChecks();
     const service = new LocalSourcesService(
       storage as unknown as StorageService,
@@ -173,7 +175,7 @@ describe('LocalSourcesService', () => {
 
     await expect(
       service.createLocalSource({
-        name: 'openai',
+        name,
         folderPath: '/tmp/local-source',
       }),
     ).rejects.toThrow(ValidationError);

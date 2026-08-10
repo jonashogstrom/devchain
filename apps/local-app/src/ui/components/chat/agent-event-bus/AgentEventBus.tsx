@@ -124,6 +124,48 @@ function feedbackClassName(feedback: AgentEventBusFeedbackKind): string {
   return `agent-event-bus__feedback--${feedback}`;
 }
 
+function projectDirection(route: AgentEventBusActiveRoute): 'inbound' | 'outbound' | undefined {
+  return route.routeKind === 'project-egress' || route.routeKind === 'project-ingress'
+    ? route.projectDirection
+    : undefined;
+}
+
+function sourceFeedbackKind(route: AgentEventBusActiveRoute): AgentEventBusFeedbackKind {
+  // A project egress can fail only at the boundary destination; keep its local sender
+  // on the ordinary message color while the boundary receives destructive feedback.
+  return route.routeKind === 'project-egress' ? route.eventKind : routeFeedbackKind(route);
+}
+
+function originFeedbackKind(route: AgentEventBusActiveRoute): AgentEventBusFeedbackKind | null {
+  if (route.path.recipient.kind === 'project-boundary') return routeFeedbackKind(route);
+  if (route.path.source.kind === 'runtime' || route.path.source.kind === 'project-boundary') {
+    return route.eventKind;
+  }
+  return null;
+}
+
+function originTransientFeedbackKind(route: AgentEventBusActiveRoute): AgentEventBusFeedbackKind {
+  return route.mode === 'arrived' ? routeFeedbackKind(route) : route.eventKind;
+}
+
+function selectOriginRoute(
+  routes: AgentEventBusActiveRoute[],
+  feedbackFor: (route: AgentEventBusActiveRoute) => AgentEventBusFeedbackKind | null,
+): AgentEventBusActiveRoute | null {
+  let selected: AgentEventBusActiveRoute | null = null;
+  let selectedRank = -1;
+  for (const route of routes) {
+    const feedback = feedbackFor(route);
+    if (!feedback) continue;
+    const rank = AGENT_EVENT_BUS_FEEDBACK_RANK[feedback];
+    if (rank > selectedRank || (rank === selectedRank && (!selected || route.id < selected.id))) {
+      selected = route;
+      selectedRank = rank;
+    }
+  }
+  return selected;
+}
+
 interface MarkerSilhouetteProps {
   shape: AgentEventBusMarkerShape;
   x: number;
@@ -163,16 +205,23 @@ interface PulseMarkerProps {
 
 function PulseMarker({ route, kind, x, y, filter }: PulseMarkerProps): ReactElement {
   const feedback = kind === 'ignition' ? route.eventKind : routeFeedbackKind(route);
+  let markerClassName = `agent-event-bus__marker agent-event-bus__marker--${kind} ${feedbackClassName(feedback)}`;
+  if (kind === 'arrival' && feedback === 'failed') {
+    markerClassName += ' agent-event-bus__failed-anchor';
+  }
 
   return (
     <g key={route.id} data-route-parent={route.id} data-marker-parent={kind}>
       <g
-        className={`agent-event-bus__marker agent-event-bus__marker--${kind} ${feedbackClassName(feedback)}`}
+        className={markerClassName}
         filter={filter}
         data-route-animation={`${route.id}:${kind}`}
         data-animation-kind={kind}
         data-marker-kind={kind}
-        data-route-source={route.source.kind}
+        data-route-kind={route.routeKind}
+        data-route-source={route.path.source.kind}
+        data-route-target={route.path.recipient.kind}
+        data-project-direction={projectDirection(route)}
       >
         {/* Same material as the travelling pulse — graduated halo around a spark core —
             so ignition and arrival read as the same light rather than a separate ripple.
@@ -354,34 +403,35 @@ export function AgentEventBus({
     const activity = new Map<string, AgentEventBusFeedbackKind>();
     for (const route of activeRoutes) {
       const feedback = routeFeedbackKind(route);
-      if (
-        route.source.kind === 'agent' &&
-        route.mode === 'static' &&
-        route.path.source.kind === 'agent'
-      ) {
-        mergeAnchorFeedback(activity, route.path.source.key, feedback);
+      if (route.path.source.kind === 'agent' && route.mode === 'static') {
+        mergeAnchorFeedback(activity, route.path.source.key, sourceFeedbackKind(route));
       }
-      if (route.mode === 'arrived' || route.mode === 'static') {
+      if (
+        (route.mode === 'arrived' || route.mode === 'static') &&
+        route.path.recipient.kind === 'agent'
+      ) {
         mergeAnchorFeedback(activity, route.path.recipient.key, feedback);
       }
     }
     return activity;
   }, [activeRoutes]);
-  // The origin can host simultaneous static routes of different kinds, so it takes the
-  // highest-ranked identity rather than assuming every runtime route is a session start.
-  const runtimeOriginFeedback = useMemo<AgentEventBusEventKind | null>(() => {
-    let winner: AgentEventBusEventKind | null = null;
-    for (const route of activeRoutes) {
-      if (route.source.kind !== 'runtime' || route.mode !== 'static') continue;
-      if (
-        !winner ||
-        AGENT_EVENT_BUS_FEEDBACK_RANK[route.eventKind] > AGENT_EVENT_BUS_FEEDBACK_RANK[winner]
-      ) {
-        winner = route.eventKind;
-      }
-    }
-    return winner;
-  }, [activeRoutes]);
+  // Runtime and project-boundary endpoints share one physical coordinate. Keep one
+  // feedback slot there and rank the route identity instead of stacking markers.
+  const originStaticRoute = useMemo(
+    () =>
+      selectOriginRoute(
+        activeRoutes.filter(
+          (route) =>
+            route.mode === 'static' &&
+            (route.path.source.kind === 'runtime' ||
+              route.path.source.kind === 'project-boundary' ||
+              route.path.recipient.kind === 'project-boundary'),
+        ),
+        originFeedbackKind,
+      ),
+    [activeRoutes],
+  );
+  const runtimeOriginFeedback = originStaticRoute ? originFeedbackKind(originStaticRoute) : null;
   const conductorBounds = useMemo(() => {
     if (!geometry || geometry.anchors.length === 0) return null;
     const minimumY = geometry.runtimeOrigin.y;
@@ -419,6 +469,20 @@ export function AgentEventBus({
   const arrivedRoutes = useMemo(
     () => activeRoutes.filter((route) => route.mode === 'arrived'),
     [activeRoutes],
+  );
+  const originTransientRoute = useMemo(
+    () =>
+      selectOriginRoute(
+        [
+          ...ignitionRoutes.filter(
+            (route) =>
+              route.path.source.kind === 'runtime' || route.path.source.kind === 'project-boundary',
+          ),
+          ...arrivedRoutes.filter((route) => route.path.recipient.kind === 'project-boundary'),
+        ],
+        originTransientFeedbackKind,
+      ),
+    [arrivedRoutes, ignitionRoutes],
   );
 
   return (
@@ -520,6 +584,12 @@ export function AgentEventBus({
                 r="5"
                 filter={`url(#${filterId})`}
                 data-testid="agent-event-bus-runtime-origin-halo"
+                data-route-kind={originStaticRoute?.routeKind}
+                data-route-source={originStaticRoute?.path.source.kind}
+                data-route-target={originStaticRoute?.path.recipient.kind}
+                data-project-direction={
+                  originStaticRoute ? projectDirection(originStaticRoute) : undefined
+                }
               />
             ) : null}
             {flightRoutes.map(({ route, routeKey, layers, eventKind, className }) => {
@@ -529,7 +599,10 @@ export function AgentEventBus({
                   <g
                     key={`${routeKey}:tail`}
                     className={className}
-                    data-route-source={route.source.kind}
+                    data-route-kind={route.routeKind}
+                    data-route-source={route.path.source.kind}
+                    data-route-target={route.path.recipient.kind}
+                    data-project-direction={projectDirection(route)}
                     data-event-kind={eventKind}
                   >
                     <path
@@ -549,18 +622,16 @@ export function AgentEventBus({
                 </g>
               ) : null;
             })}
-            {ignitionRoutes
-              .filter((route) => route.source.kind === 'runtime')
-              .map((route) => (
-                <PulseMarker
-                  key={route.id}
-                  route={route}
-                  kind="ignition"
-                  x={route.path.source.x}
-                  y={route.path.source.y}
-                  filter={`url(#${filterId})`}
-                />
-              ))}
+            {originTransientRoute?.mode === 'traveling' ? (
+              <PulseMarker
+                key={originTransientRoute.id}
+                route={originTransientRoute}
+                kind="ignition"
+                x={originTransientRoute.path.source.x}
+                y={originTransientRoute.path.source.y}
+                filter={`url(#${filterId})`}
+              />
+            ) : null}
           </g>
         ) : null}
         {geometry && conductorBounds ? (
@@ -576,6 +647,12 @@ export function AgentEventBus({
                 cy={geometry.runtimeOrigin.y}
                 r="1.75"
                 data-testid="agent-event-bus-runtime-origin"
+                data-route-kind={originStaticRoute?.routeKind}
+                data-route-source={originStaticRoute?.path.source.kind}
+                data-route-target={originStaticRoute?.path.recipient.kind}
+                data-project-direction={
+                  originStaticRoute ? projectDirection(originStaticRoute) : undefined
+                }
               />
             ) : null}
             {geometry.anchors.map((anchor) => {
@@ -616,7 +693,10 @@ export function AgentEventBus({
               <g
                 key={`${routeKey}:connectors`}
                 className={className}
-                data-route-source={route.source.kind}
+                data-route-kind={route.routeKind}
+                data-route-source={route.path.source.kind}
+                data-route-target={route.path.recipient.kind}
+                data-project-direction={projectDirection(route)}
                 data-event-kind={eventKind}
               >
                 {layers
@@ -642,7 +722,7 @@ export function AgentEventBus({
         </g>
         <g className="agent-event-bus__marker-layer">
           {ignitionRoutes
-            .filter((route) => route.source.kind === 'agent')
+            .filter((route) => route.path.source.kind === 'agent')
             .map((route) => (
               <PulseMarker
                 key={route.id}
@@ -652,15 +732,26 @@ export function AgentEventBus({
                 y={route.path.source.y}
               />
             ))}
-          {arrivedRoutes.map((route) => (
+          {originTransientRoute?.mode === 'arrived' ? (
             <PulseMarker
-              key={route.id}
-              route={route}
+              key={originTransientRoute.id}
+              route={originTransientRoute}
               kind="arrival"
-              x={route.path.recipient.x}
-              y={route.path.recipient.y}
+              x={originTransientRoute.path.recipient.x}
+              y={originTransientRoute.path.recipient.y}
             />
-          ))}
+          ) : null}
+          {arrivedRoutes
+            .filter((route) => route.path.recipient.kind === 'agent')
+            .map((route) => (
+              <PulseMarker
+                key={route.id}
+                route={route}
+                kind="arrival"
+                x={route.path.recipient.x}
+                y={route.path.recipient.y}
+              />
+            ))}
         </g>
       </svg>
       <ContextMenu>

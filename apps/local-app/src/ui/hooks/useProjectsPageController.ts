@@ -236,7 +236,7 @@ export function useProjectsPageController() {
     },
     [allTemplates],
   );
-  // Handler for opening upgrade dialog
+  // The selected target drives the configured upgrade wizard and its result/recovery dialog.
   const handleOpenUpgradeDialog = useCallback(
     (project: ProjectWithStats, targetVersion: string) => {
       setUpgradeTarget({ project, targetVersion });
@@ -244,7 +244,6 @@ export function useProjectsPageController() {
     [],
   );
 
-  // Handler for closing upgrade dialog
   const handleCloseUpgradeDialog = useCallback(() => {
     setUpgradeTarget(null);
     // Refresh projects to reflect version change and remove upgrade badge

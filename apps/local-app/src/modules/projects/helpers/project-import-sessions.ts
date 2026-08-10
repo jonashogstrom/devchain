@@ -2,6 +2,16 @@ import { ValidationError } from '../../../common/errors/error-types';
 import type { StorageService } from '../../storage/interfaces/storage.interface';
 
 export function ensureNoDuplicateAgentNames(templateAgents: Array<{ name: string }>): void {
+  const duplicates = findDuplicateAgentNames(templateAgents);
+  if (duplicates.length > 0) {
+    throw new ValidationError('Template has duplicate agent names', {
+      duplicates,
+      hint: 'Template agent names (case-insensitive) must be unique for session preservation to work deterministically.',
+    });
+  }
+}
+
+export function findDuplicateAgentNames(templateAgents: Array<{ name: string }>): string[] {
   const seen = new Map<string, string>();
   const duplicates: string[] = [];
   for (const a of templateAgents) {
@@ -9,12 +19,7 @@ export function ensureNoDuplicateAgentNames(templateAgents: Array<{ name: string
     if (seen.has(lower)) duplicates.push(a.name);
     else seen.set(lower, a.name);
   }
-  if (duplicates.length > 0) {
-    throw new ValidationError('Template has duplicate agent names', {
-      duplicates,
-      hint: 'Template agent names (case-insensitive) must be unique for session preservation to work deterministically.',
-    });
-  }
+  return duplicates;
 }
 
 export async function planAndApplySessionPreservation(

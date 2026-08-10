@@ -58,6 +58,20 @@ function emptySetupPreview() {
   };
 }
 
+function upgradeSetupPreview() {
+  const response = emptySetupPreview();
+  response.payload.teams = [
+    {
+      name: 'Target Team',
+      teamLeadAgentName: 'Lead',
+      memberAgentNames: [],
+      allowTeamLeadCreateAgents: true,
+      profileNames: [],
+    },
+  ];
+  return response;
+}
+
 /**
  * Drive the create setup wizard for an empty template: "Continue" opens it (fetches setup-preview),
  * then step Providers → Agents (Teams skipped) and confirm with "Create". The final mutation only
@@ -888,7 +902,7 @@ describe('ProjectsPage — template creation and badge', () => {
     expect(screen.queryByTitle(/Upgrade to/)).not.toBeInTheDocument();
   });
 
-  it('clicking upgrade badge opens UpgradeDialog with correct props', async () => {
+  it('clicking upgrade badge opens the shared target-template setup wizard', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (global as unknown as { fetch: unknown }).fetch = jest.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -935,6 +949,9 @@ describe('ProjectsPage — template creation and badge', () => {
           }),
         } as Response;
       }
+      if (url.endsWith('/upgrade-template/preview')) {
+        return { ok: true, json: async () => upgradeSetupPreview() } as Response;
+      }
       return { ok: true, json: async () => ({}) } as Response;
     });
 
@@ -947,15 +964,17 @@ describe('ProjectsPage — template creation and badge', () => {
     const upgradeButton = screen.getByTitle('Upgrade to v2.0.0');
     fireEvent.click(upgradeButton);
 
-    // Verify UpgradeDialog opens with correct props
-    await waitFor(() => {
-      expect(screen.getByTestId('upgrade-dialog')).toBeInTheDocument();
-    });
-
-    const dialog = screen.getByTestId('upgrade-dialog');
-    expect(dialog).toHaveAttribute('data-project-id', 'p1');
-    expect(dialog).toHaveAttribute('data-target-version', '2.0.0');
-    expect(screen.getByText('Upgrade Dialog for Upgradeable Project')).toBeInTheDocument();
+    expect(await screen.findByText('Upgrade Upgradeable Project')).toBeInTheDocument();
+    const stepNavigation = await screen.findByRole('navigation', { name: 'Setup steps' });
+    expect(stepNavigation).toHaveTextContent('Providers');
+    expect(stepNavigation).toHaveTextContent('Agents');
+    expect(stepNavigation).toHaveTextContent('Teams');
+    expect(stepNavigation).toHaveTextContent('Review');
+    expect(screen.queryByTestId('upgrade-dialog')).not.toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/projects/p1/upgrade-template/preview',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ targetVersion: '2.0.0' }) }),
+    );
   });
 
   it('shows dash for projects without template metadata', async () => {
@@ -1007,7 +1026,7 @@ describe('ProjectsPage — template creation and badge', () => {
     expect(cells[3].textContent).toBe('—');
   });
 
-  it('closing UpgradeDialog clears upgrade target', async () => {
+  it('canceling the upgrade wizard closes the flow', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (global as unknown as { fetch: unknown }).fetch = jest.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -1054,6 +1073,9 @@ describe('ProjectsPage — template creation and badge', () => {
           }),
         } as Response;
       }
+      if (url.endsWith('/upgrade-template/preview')) {
+        return { ok: true, json: async () => upgradeSetupPreview() } as Response;
+      }
       return { ok: true, json: async () => ({}) } as Response;
     });
 
@@ -1062,20 +1084,13 @@ describe('ProjectsPage — template creation and badge', () => {
     // Wait for project to load
     await waitFor(() => expect(screen.getByText('Upgradeable Project')).toBeInTheDocument());
 
-    // Click upgrade button to open dialog
     const upgradeButton = screen.getByTitle('Upgrade to v2.0.0');
     fireEvent.click(upgradeButton);
 
+    expect(await screen.findByText('Upgrade Upgradeable Project')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => {
-      expect(screen.getByTestId('upgrade-dialog')).toBeInTheDocument();
-    });
-
-    // Click close button in dialog
-    fireEvent.click(screen.getByText('Close'));
-
-    // Verify dialog is closed
-    await waitFor(() => {
-      expect(screen.queryByTestId('upgrade-dialog')).not.toBeInTheDocument();
+      expect(screen.queryByText('Upgrade Upgradeable Project')).not.toBeInTheDocument();
     });
   });
 });

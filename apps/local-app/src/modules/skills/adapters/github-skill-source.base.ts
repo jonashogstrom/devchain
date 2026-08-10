@@ -34,6 +34,7 @@ export interface GitHubSkillSourceBaseConfig {
   userAgent?: string;
   storageRootDir?: string;
   githubToken?: string;
+  publicRepoUrl?: string;
 }
 
 export type { ParsedSkillMarkdown } from './skill-parsing.utils';
@@ -64,10 +65,11 @@ export abstract class GitHubSkillSourceBase {
     this.userAgent = config.userAgent ?? DEFAULT_USER_AGENT;
     this.storageRootDir = config.storageRootDir ?? DEFAULT_SKILLS_ROOT;
     this.githubToken = config.githubToken ?? process.env.GITHUB_TOKEN ?? null;
-    this.repoUrl =
+    const defaultRepoUrl =
       this.repoOwner && this.repoName
         ? `https://github.com/${this.repoOwner}/${this.repoName}`
         : 'https://github.com';
+    this.repoUrl = config.publicRepoUrl ?? defaultRepoUrl;
   }
 
   async downloadSkill(skillName: string, targetPath: string): Promise<string> {

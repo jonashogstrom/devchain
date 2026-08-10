@@ -194,20 +194,63 @@ describe('CatalogBroadcasterService', () => {
     expect(projected).not.toHaveProperty('teamId');
   });
 
-  it('suppresses project-routed agent.message.sent events from the browser catalog path', () => {
-    emitter.emit('agent.message.sent', {
-      projectId: 'source-project',
-      senderAgentId: 'sender-1',
-      senderAgentName: 'Source Owner',
-      routingKind: 'project',
-      sourceProjectId: 'source-project',
-      sourceProjectName: 'Source Project',
-      targetProjectId: 'target-project',
-      targetProjectName: 'Target Project',
-      recipients: [{ agentId: 'recipient-1', agentName: 'Target Owner', status: 'queued' }],
-      recipientCount: 1,
-      deliveryStatus: 'queued',
-    });
+  it.each(['queued', 'delivered', 'unconfirmed', 'failed'] as const)(
+    'fans out project-routed agent.message.sent with the recipient status (%s)',
+    (status) => {
+      emitter.emit('agent.message.sent', {
+        projectId: 'source-project',
+        senderAgentId: 'sender-1',
+        senderAgentName: 'Source Owner',
+        routingKind: 'project',
+        sourceProjectId: 'source-project',
+        sourceProjectName: 'Source Project',
+        targetProjectId: 'target-project',
+        targetProjectName: 'Target Project',
+        recipients: [{ agentId: 'recipient-1', agentName: 'Target Owner', status }],
+        recipientCount: 1,
+        deliveryStatus: status,
+      });
+
+      expect(mockBroadcaster.broadcastEvent).toHaveBeenCalledTimes(2);
+      expect(mockBroadcaster.broadcastEvent).toHaveBeenNthCalledWith(
+        1,
+        'project/source-project/agent-messages',
+        'project.outbound',
+        { agentId: 'sender-1', status },
+      );
+      expect(mockBroadcaster.broadcastEvent).toHaveBeenNthCalledWith(
+        2,
+        'project/target-project/agent-messages',
+        'project.inbound',
+        { agentId: 'recipient-1', status },
+      );
+
+      for (const [, type, payload] of mockBroadcaster.broadcastEvent.mock.calls) {
+        expect(type).not.toBe('sent');
+        expect(Object.keys(payload)).toEqual(['agentId', 'status']);
+      }
+    },
+  );
+
+  it('fails closed without broadcasting a malformed multi-recipient project event', () => {
+    expect(() =>
+      emitter.emit('agent.message.sent', {
+        projectId: 'source-project',
+        senderAgentId: 'sender-1',
+        senderAgentName: 'Source Owner',
+        routingKind: 'project',
+        sourceProjectId: 'source-project',
+        sourceProjectName: 'Source Project',
+        targetProjectId: 'target-project',
+        targetProjectName: 'Target Project',
+        recipients: [
+          { agentId: 'recipient-1', agentName: 'Target Owner', status: 'delivered' },
+          { agentId: 'recipient-2', agentName: 'Unexpected Owner', status: 'failed' },
+        ],
+        recipientCount: 2,
+        deliveryStatus: 'partial',
+      }),
+    ).not.toThrow();
 
     expect(mockBroadcaster.broadcastEvent).not.toHaveBeenCalled();
   });

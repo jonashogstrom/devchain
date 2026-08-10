@@ -7,7 +7,12 @@ import { EVENT_BUS_REDUCE_MOTION_STORAGE_KEY, readAgentEventBusReduceMotion } fr
 import type { AgentEventBusSchedulerEnvironment } from './scheduler';
 import type { AgentEventBusAnimationDriver, AgentEventBusAnimationHandle } from './types';
 import type { AgentEventBusLayoutEnvironment } from './useAgentEventBusLayout';
-import type { AgentEventBusStreamFrame, AgentMessageEventFrame } from './useAgentEventBusStream';
+import type {
+  AgentEventBusStreamFrame,
+  AgentMessageEventFrame,
+  AgentMessageRecipientStatus,
+  ProjectMessageEventFrame,
+} from './useAgentEventBusStream';
 
 // Layer: UI component (jsdom). Rendering with controlled stream, geometry,
 // timer, and animation seams is the cheapest reliable proof of React lifecycle,
@@ -265,6 +270,18 @@ function directFrame(status: 'delivered' | 'failed' = 'delivered'): AgentMessage
   };
 }
 
+function projectFrame(
+  direction: 'outbound' | 'inbound',
+  status: AgentMessageRecipientStatus = 'delivered',
+): ProjectMessageEventFrame {
+  return {
+    kind: 'project-message',
+    direction,
+    agentId: direction === 'outbound' ? 'sender' : 'recipient',
+    status,
+  };
+}
+
 function renderBus(overrides: Partial<HarnessProps> = {}): RenderResult & {
   layout: ReturnType<typeof createLayoutHarness>;
   scheduler: ReturnType<typeof createSchedulerHarness>;
@@ -486,6 +503,163 @@ describe('AgentEventBus', () => {
       expect(svg.querySelectorAll('[data-route-animation]')).toHaveLength(0);
     },
   );
+
+  it.each([
+    ['outbound', 'project-egress', 'agent', 'project-boundary'],
+    ['inbound', 'project-ingress', 'project-boundary', 'agent'],
+  ] as const)(
+    'renders %s project messages with truthful boundary topology and destination feedback',
+    (direction, routeKind, sourceKind, targetKind) => {
+      const rendered = renderBus();
+      const svg = screen.getByTestId('agent-event-bus-svg');
+
+      act(() => mockStreamHandler?.(projectFrame(direction, 'failed')));
+
+      const routeGroups = [...svg.querySelectorAll(`[data-route-kind="${routeKind}"]`)].filter(
+        (element) => element.hasAttribute('data-route-source'),
+      );
+      expect(routeGroups.length).toBeGreaterThan(0);
+      expect(
+        routeGroups.every(
+          (element) =>
+            element.getAttribute('data-route-source') === sourceKind &&
+            element.getAttribute('data-route-target') === targetKind,
+        ),
+      ).toBe(true);
+      expect(routeGroups[0]).toHaveAttribute('data-project-direction', direction);
+      expect(routeGroups[0]).toHaveClass('agent-event-bus__route--agent-message');
+
+      rendered.scheduler.runDelay(EVENT_BUS_ROUTE_DURATION_MS);
+
+      const arrival = svg.querySelector(
+        `[data-marker-kind="arrival"][data-route-kind="${routeKind}"]`,
+      );
+      expect(arrival).toHaveClass(
+        'agent-event-bus__feedback--failed',
+        'agent-event-bus__failed-anchor',
+      );
+      expect(
+        svg.querySelectorAll(`[data-marker-kind="arrival"][data-route-kind="${routeKind}"]`),
+      ).toHaveLength(1);
+
+      const [sourceAnchor, recipientAnchor] = [
+        ...svg.querySelectorAll('.agent-event-bus__idle-anchor'),
+      ];
+      if (direction === 'outbound') {
+        expect(sourceAnchor).not.toHaveClass('agent-event-bus__active-anchor');
+        expect(sourceAnchor).not.toHaveClass('agent-event-bus__failed-anchor');
+      } else {
+        expect(recipientAnchor).toHaveClass(
+          'agent-event-bus__active-anchor',
+          'agent-event-bus__failed-anchor',
+        );
+      }
+
+      rendered.scheduler.runDelay(240);
+
+      expect(svg.querySelectorAll('[data-route-animation]')).toHaveLength(0);
+      expect(
+        svg.querySelector(`[data-marker-kind="arrival"][data-route-kind="${routeKind}"]`),
+      ).toBeNull();
+    },
+  );
+
+  it.each(['outbound', 'inbound'] as const)(
+    'keeps %s project feedback bounded and simultaneous at both endpoints under Reduce motion',
+    (direction) => {
+      window.localStorage.setItem(EVENT_BUS_REDUCE_MOTION_STORAGE_KEY, 'true');
+      const rendered = renderBus();
+      const svg = screen.getByTestId('agent-event-bus-svg');
+
+      act(() => mockStreamHandler?.(projectFrame(direction, 'failed')));
+
+      expect(svg.querySelectorAll('[data-route-animation]')).toHaveLength(0);
+      const origin = screen.getByTestId('agent-event-bus-runtime-origin');
+      expect(origin).toHaveAttribute(
+        'data-route-kind',
+        direction === 'outbound' ? 'project-egress' : 'project-ingress',
+      );
+      expect(origin).toHaveAttribute(
+        'data-route-source',
+        direction === 'outbound' ? 'agent' : 'project-boundary',
+      );
+      expect(origin).toHaveAttribute(
+        'data-route-target',
+        direction === 'outbound' ? 'project-boundary' : 'agent',
+      );
+      expect(origin).toHaveClass(
+        direction === 'outbound'
+          ? 'agent-event-bus__feedback--failed'
+          : 'agent-event-bus__feedback--agent-message',
+      );
+
+      const [sourceAnchor, recipientAnchor] = [
+        ...svg.querySelectorAll('.agent-event-bus__idle-anchor'),
+      ];
+      if (direction === 'outbound') {
+        expect(sourceAnchor).toHaveClass('agent-event-bus__feedback--agent-message');
+        expect(sourceAnchor).not.toHaveClass('agent-event-bus__failed-anchor');
+      } else {
+        expect(recipientAnchor).toHaveClass(
+          'agent-event-bus__feedback--failed',
+          'agent-event-bus__failed-anchor',
+        );
+      }
+
+      rendered.scheduler.runDelay(280);
+
+      expect(screen.queryByTestId('agent-event-bus-runtime-origin')).not.toBeInTheDocument();
+      expect(sourceAnchor).not.toHaveClass('agent-event-bus__active-anchor');
+      expect(recipientAnchor).not.toHaveClass('agent-event-bus__active-anchor');
+    },
+  );
+
+  it('uses one ranked physical origin slot when runtime and project-boundary feedback coincide', () => {
+    window.localStorage.setItem(EVENT_BUS_REDUCE_MOTION_STORAGE_KEY, 'true');
+    renderBus();
+    const svg = screen.getByTestId('agent-event-bus-svg');
+
+    act(() => {
+      mockStreamHandler?.({ kind: 'session-started', agentId: 'recipient' });
+      mockStreamHandler?.(projectFrame('inbound'));
+    });
+
+    const origin = screen.getByTestId('agent-event-bus-runtime-origin');
+    const halo = screen.getByTestId('agent-event-bus-runtime-origin-halo');
+    expect(svg.querySelectorAll('[data-testid="agent-event-bus-runtime-origin"]')).toHaveLength(1);
+    expect(
+      svg.querySelectorAll('[data-testid="agent-event-bus-runtime-origin-halo"]'),
+    ).toHaveLength(1);
+    expect(origin).toHaveClass('agent-event-bus__feedback--agent-message');
+    expect(origin).not.toHaveClass('agent-event-bus__feedback--session-started');
+    expect(halo).toHaveAttribute('data-route-kind', 'project-ingress');
+    expect(halo).toHaveAttribute('data-project-direction', 'inbound');
+  });
+
+  it('does not stack a boundary arrival marker with a runtime ignition marker at the origin', () => {
+    const rendered = renderBus();
+    const svg = screen.getByTestId('agent-event-bus-svg');
+
+    act(() => mockStreamHandler?.(projectFrame('outbound')));
+    rendered.scheduler.runDelay(EVENT_BUS_ROUTE_DURATION_MS);
+    act(() => mockStreamHandler?.({ kind: 'session-started', agentId: 'recipient' }));
+
+    expect(
+      svg.querySelectorAll('[data-marker-kind="arrival"][data-route-kind="project-egress"]'),
+    ).toHaveLength(1);
+    expect(
+      svg.querySelector('[data-marker-kind="ignition"][data-route-kind="runtime-ingress"]'),
+    ).toBeNull();
+
+    rendered.scheduler.runDelay(240);
+
+    expect(
+      svg.querySelector('[data-marker-kind="arrival"][data-route-kind="project-egress"]'),
+    ).toBeNull();
+    expect(
+      svg.querySelector('[data-marker-kind="ignition"][data-route-kind="runtime-ingress"]'),
+    ).not.toBeNull();
+  });
 
   it('retains one arrival marker while geometry generations restart the three flight roles', () => {
     const rendered = renderBus();

@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import {
   fetchSetupPreview,
-  formatProjectPromptReferenceFailure,
-  isProjectPromptReferenceFailure,
+  fetchUpgradeSetupPreview,
+  formatProjectPreMutationFailure,
+  isProjectPreMutationFailure,
   type ImportDryRunResponse,
   type ImportDryRunSuccess,
   type ImportProjectResponse,
   type ImportProjectSuccess,
-  type ProjectPromptReferenceFailure,
+  type ProjectPreMutationFailure,
   type SetupPreviewRequest,
   type SetupPreviewResponse,
+  type UpgradeProjectFailure,
+  type UpgradeProjectResponse,
+  type UpgradeProjectSuccess,
 } from '@/ui/pages/projects/lib/project-api';
 import {
   useProjectSetupWizard,
@@ -29,7 +33,7 @@ import {
   useWizardConfigHandlers,
   type WizardConfigState,
 } from '@/ui/components/project/wizard/useWizardConfig';
-import { formatPromptTransferCounts } from '@/common/prompt-transfer';
+import { formatPromptTransferCounts, type PromptTransferCounts } from '@/common/prompt-transfer';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/components/ui/alert';
 
 type ToastFn = (args: { title: string; description: string; variant?: 'destructive' }) => void;
@@ -39,35 +43,66 @@ export interface ImportWizardTarget {
   name: string;
 }
 
+export interface UpgradeWizardTarget extends ImportWizardTarget {
+  targetVersion: string;
+}
+
 export type ImportDryRunResult = ImportDryRunSuccess;
 export type ImportResult = ImportProjectSuccess;
 
-/** Import wizard state = the shared Steps 1-3 config plus the import-only status mappings. */
-interface ImportWizardState extends WizardConfigState {
+interface ReplaceWizardState extends WizardConfigState {
   statusMappings: Record<string, string>;
 }
 
-interface UseImportProjectWizardArgs {
-  /** Called with the commit result so the page can show the ImportResultDialog. */
-  onImported: (result: ImportResult) => void;
-  toast: ToastFn;
+interface ReplaceFlowAdapter<
+  TTarget extends ImportWizardTarget,
+  TSuccess extends { success: true },
+> {
+  name: 'Import' | 'Upgrade' | 'Update';
+  previewQueryKey: (target: TTarget, request: SetupPreviewRequest | null) => QueryKey;
+  canLoadPreview: (request: SetupPreviewRequest | null) => boolean;
+  loadPreview: (
+    target: TTarget,
+    request: SetupPreviewRequest | null,
+  ) => Promise<SetupPreviewResponse>;
+  buildCommitBody: (
+    target: TTarget,
+    preview: SetupPreviewResponse,
+    state: ReplaceWizardState,
+  ) => Record<string, unknown>;
+  commit: (
+    target: TTarget,
+    body: Record<string, unknown>,
+  ) => Promise<TSuccess | ProjectPreMutationFailure | UpgradeProjectFailure>;
+  isTerminalFailure: (failure: ProjectPreMutationFailure | UpgradeProjectFailure) => boolean;
+  successDescription: (target: TTarget, result: TSuccess) => string;
+  invalidateOnClose: QueryKey[];
+  invalidateOnSuccess: QueryKey[];
 }
 
-export interface ImportProjectWizardResult {
+interface ConfiguredReplaceWizardResult<TTarget extends ImportWizardTarget> {
   isOpen: boolean;
-  /** Open the import wizard for a target project + a resolved setup-preview request (template/file). */
-  openImportWizard: (target: ImportWizardTarget, previewRequest: SetupPreviewRequest) => void;
+  openWizard: (target: TTarget, previewRequest?: SetupPreviewRequest) => void;
   onOpenChange: (open: boolean) => void;
   controller: ProjectSetupWizardController;
   isLoading: boolean;
   isError: boolean;
   isSubmitting: boolean;
   preview: SetupPreviewResponse | null;
-  importTarget: ImportWizardTarget | null;
-  preflightFailure: ProjectPromptReferenceFailure | null;
+  target: TTarget | null;
+  preflightFailure: ProjectPreMutationFailure | null;
 }
 
-/** Adapt the dry-run response to the Review component's shape (superset-compatible). */
+interface UseConfiguredReplaceWizardArgs<
+  TTarget extends ImportWizardTarget,
+  TSuccess extends { success: true },
+> {
+  adapter: ReplaceFlowAdapter<TTarget, TSuccess>;
+  onCompleted: (result: TSuccess | UpgradeProjectFailure) => void;
+  onClosed?: () => void;
+  toast: ToastFn;
+}
+
 function toReview(dry: ImportDryRunResult | null): ImportDryRunReview | null {
   if (!dry) return null;
   return {
@@ -79,37 +114,55 @@ function toReview(dry: ImportDryRunResult | null): ImportDryRunReview | null {
   };
 }
 
-/**
- * Import-flow controller: the SAME wizard as create (Providers → Agents → Teams via the shared config
- * module) plus a final Review & Confirm step. On entering Review it re-runs the server dry-run with all
- * wizard selections (selectedProviderNames + familyProviderMappings + presetName|agentOverrides +
- * teamOverrides); the step shows the to-import/will-delete counts and, when the dry-run reports
- * unmatched statuses, a status-mapping section. The destructive commit fires ONLY from the wizard's
- * final submit, gated on the dry-run having loaded and every required status mapping being filled —
- * preserving today's destructive-counts confirmation. File imports arrive via `rawContent` in the
- * setup-preview request; template imports via slug/version.
- */
-export function useImportProjectWizard({
-  onImported,
+async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.message || error.error || `Request failed with status ${res.status}`);
+  }
+  return res.json();
+}
+
+function withStatusMappings(
+  body: Record<string, unknown>,
+  statusMappings: Record<string, string>,
+): Record<string, unknown> {
+  return Object.keys(statusMappings).length > 0 ? { ...body, statusMappings } : body;
+}
+
+function formatPromptSummary(promptTransfer?: PromptTransferCounts): string {
+  return promptTransfer ? ` Prompts: ${formatPromptTransferCounts(promptTransfer)}.` : '';
+}
+
+function useConfiguredReplaceWizard<
+  TTarget extends ImportWizardTarget,
+  TSuccess extends { success: true },
+>({
+  adapter,
+  onCompleted,
+  onClosed,
   toast,
-}: UseImportProjectWizardArgs): ImportProjectWizardResult {
+}: UseConfiguredReplaceWizardArgs<TTarget, TSuccess>): ConfiguredReplaceWizardResult<TTarget> {
   const queryClient = useQueryClient();
   const [isOpen, setIsOpen] = useState(false);
-  const [importTarget, setImportTarget] = useState<ImportWizardTarget | null>(null);
+  const [target, setTarget] = useState<TTarget | null>(null);
   const [previewRequest, setPreviewRequest] = useState<SetupPreviewRequest | null>(null);
-  const [state, setState] = useState<ImportWizardState | null>(null);
+  const [state, setState] = useState<ReplaceWizardState | null>(null);
   const [dryRun, setDryRun] = useState<ImportDryRunResult | null>(null);
-  const [preflightFailure, setPreflightFailure] = useState<ProjectPromptReferenceFailure | null>(
-    null,
-  );
+  const [preflightFailure, setPreflightFailure] = useState<ProjectPreMutationFailure | null>(null);
   const [isDryRunPending, setIsDryRunPending] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
-  const submittedRef = useRef(false);
 
   const previewQuery = useQuery({
-    queryKey: ['setup-preview', previewRequest],
-    queryFn: () => fetchSetupPreview(previewRequest!),
-    enabled: isOpen && previewRequest !== null,
+    queryKey: target
+      ? adapter.previewQueryKey(target, previewRequest)
+      : ['configured-replace-preview', adapter.name, 'closed'],
+    queryFn: () => adapter.loadPreview(target!, previewRequest),
+    enabled: isOpen && target !== null && adapter.canLoadPreview(previewRequest),
     staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
@@ -126,10 +179,13 @@ export function useImportProjectWizard({
   const handlers = useWizardConfigHandlers(preview, setState);
 
   const onStatusMappingChange = useCallback((statusId: string, templateLabel: string) => {
-    setState((prev) =>
-      prev
-        ? { ...prev, statusMappings: { ...prev.statusMappings, [statusId]: templateLabel } }
-        : prev,
+    setState((previous) =>
+      previous
+        ? {
+            ...previous,
+            statusMappings: { ...previous.statusMappings, [statusId]: templateLabel },
+          }
+        : previous,
     );
   }, []);
 
@@ -137,175 +193,175 @@ export function useImportProjectWizard({
   const reviewReady =
     !isDryRunPending &&
     dryRun !== null &&
+    dryRun.readiness?.ready !== false &&
     preflightFailure === null &&
     !hasUnmappedStatuses(review, state?.statusMappings ?? {});
 
-  const steps = useMemo<WizardStep[]>(() => {
-    const configSteps = buildConfigSteps({ preview, state, handlers }).steps;
-    return [
-      ...configSteps,
-      {
-        id: 'review',
-        title: 'Review',
-        // The destructive commit is gated here: dry-run must have loaded and every required status
-        // mapping must be filled before the final "Import" enables.
-        canProceed: reviewReady,
-        render: () =>
-          state && preflightFailure ? (
-            <Alert variant="destructive" role="alert">
-              <AlertTitle>Import blocked by prompt references</AlertTitle>
-              <AlertDescription>
-                {formatProjectPromptReferenceFailure(preflightFailure)}
-              </AlertDescription>
-            </Alert>
-          ) : state ? (
-            <Step4Review
-              review={review}
-              isLoading={isDryRunPending || (dryRun === null && isOpen)}
-              statusMappings={state.statusMappings}
-              onStatusMappingChange={onStatusMappingChange}
-            />
-          ) : null,
-      },
-    ];
-  }, [
-    preview,
-    state,
-    handlers,
-    review,
-    reviewReady,
-    isDryRunPending,
-    dryRun,
-    preflightFailure,
-    isOpen,
-    onStatusMappingChange,
-  ]);
+  const invalidate = useCallback(
+    (queryKeys: QueryKey[]) => {
+      for (const queryKey of queryKeys) {
+        void queryClient.invalidateQueries({ queryKey });
+      }
+    },
+    [queryClient],
+  );
 
   const closeWizard = useCallback(() => {
     setIsOpen(false);
-  }, []);
+    invalidate(adapter.invalidateOnClose);
+    onClosed?.();
+  }, [adapter, invalidate, onClosed]);
 
-  const importBody = useCallback(
-    (extra?: Record<string, unknown>) => {
-      if (!preview || !state) return null;
-      // buildConfigEmission is the ONE shared emission path (config + familyProviderMappings),
-      // so create and import cannot drift on Step-1 family mapping.
-      return {
+  const dryRunBody = useCallback(() => {
+    if (!preview || !state) return null;
+    return withStatusMappings(
+      {
         ...(preview.payload as Record<string, unknown>),
         ...buildConfigEmission(preview, state),
-        ...(extra ?? {}),
-      };
-    },
-    [preview, state],
-  );
+      },
+      state.statusMappings,
+    );
+  }, [preview, state]);
 
   const runDryRun = useCallback(async () => {
-    const body = importBody();
-    if (!importTarget || !body) return;
+    const body = dryRunBody();
+    if (!target || !body) return;
     setIsDryRunPending(true);
     setPreflightFailure(null);
     try {
-      const res = await fetch(`/api/projects/${importTarget.id}/import?dryRun=true`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const error = await res.json().catch(() => ({}));
-        throw new Error(error.message || 'Precheck failed');
-      }
-      const result = (await res.json()) as ImportDryRunResponse;
-      if (isProjectPromptReferenceFailure(result)) {
-        setDryRun(null);
-        setPreflightFailure(result);
-        toast({
-          title: 'Import precheck failed',
-          description: formatProjectPromptReferenceFailure(result),
-          variant: 'destructive',
-        });
-        return;
-      }
+      const result = await postJson<ImportDryRunResponse>(
+        `/api/projects/${encodeURIComponent(target.id)}/import?dryRun=true`,
+        body,
+      );
       if (result.dryRun !== true || !result.counts) {
         throw new Error('Precheck returned an invalid result');
       }
       setDryRun(result);
+      if (isProjectPreMutationFailure(result)) {
+        setPreflightFailure(result);
+        toast({
+          title: `${adapter.name} precheck failed`,
+          description: formatProjectPreMutationFailure(result),
+          variant: 'destructive',
+        });
+      }
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to compute changes';
+      setPreflightFailure({
+        success: false,
+        mutationStarted: false,
+        error: message,
+      });
       toast({
-        title: 'Import precheck failed',
-        description: error instanceof Error ? error.message : 'Unable to compute changes',
+        title: `${adapter.name} precheck failed`,
+        description: message,
         variant: 'destructive',
       });
     } finally {
       setIsDryRunPending(false);
     }
-  }, [importBody, importTarget, toast]);
+  }, [adapter.name, dryRunBody, target, toast]);
 
   const submit = useCallback(async () => {
-    const body = importBody(
-      state && Object.keys(state.statusMappings).length > 0
-        ? { statusMappings: state.statusMappings }
-        : undefined,
-    );
-    if (!importTarget || !body) return;
-    submittedRef.current = true;
+    if (!target || !preview || !state) return;
+    const body = adapter.buildCommitBody(target, preview, state);
     setIsCommitting(true);
     try {
-      const res = await fetch(`/api/projects/${importTarget.id}/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        let message = `Import failed with status ${res.status}`;
-        try {
-          message = (await res.json()).message || message;
-        } catch {
-          /* keep status-based message */
-        }
-        throw new Error(message);
+      const result = await adapter.commit(target, body);
+      if (result.success === true) {
+        setIsOpen(false);
+        invalidate(adapter.invalidateOnSuccess);
+        toast({
+          title: `${adapter.name} complete`,
+          description: adapter.successDescription(target, result),
+        });
+        onCompleted(result);
+        return;
       }
-      const result = (await res.json()) as ImportProjectResponse;
-      if (result.success !== true) {
-        if (isProjectPromptReferenceFailure(result)) {
-          setPreflightFailure(result);
-          toast({
-            title: 'Import failed',
-            description: formatProjectPromptReferenceFailure(result),
-            variant: 'destructive',
-          });
-          return;
-        }
-        throw new Error('Import returned an invalid failure result');
+
+      if (result.mutationStarted === false) {
+        const failure: ProjectPreMutationFailure = {
+          ...result,
+          mutationStarted: false,
+          error: result.error || `${adapter.name} could not start`,
+        };
+        setPreflightFailure(failure);
+        toast({
+          title: `${adapter.name} failed`,
+          description: formatProjectPreMutationFailure(failure),
+          variant: 'destructive',
+        });
+        return;
       }
-      const successResult = result;
-      setIsOpen(false);
-      const promptSummary = successResult.promptTransfer
-        ? ` Prompts: ${formatPromptTransferCounts(successResult.promptTransfer)}.`
-        : '';
-      toast({
-        title: 'Import complete',
-        description: `${successResult.message || 'Project replaced.'}${promptSummary}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
-      onImported(successResult);
+
+      if (adapter.isTerminalFailure(result)) {
+        setIsOpen(false);
+        invalidate(adapter.invalidateOnSuccess);
+        onCompleted(result);
+        return;
+      }
+      throw new Error(result.error || `${adapter.name} returned an invalid failure result`);
     } catch (error) {
       toast({
-        title: 'Import failed',
-        description: error instanceof Error ? error.message : 'Unable to import project',
+        title: `${adapter.name} failed`,
+        description: error instanceof Error ? error.message : `${adapter.name} failed`,
         variant: 'destructive',
       });
     } finally {
       setIsCommitting(false);
-      submittedRef.current = false;
     }
-  }, [importBody, importTarget, state, toast, queryClient, onImported]);
+  }, [adapter, invalidate, onCompleted, preview, state, target, toast]);
+
+  const reviewStep = useMemo<WizardStep>(
+    () => ({
+      id: 'review',
+      title: 'Review',
+      canProceed: reviewReady,
+      render: () =>
+        state ? (
+          <Fragment>
+            {preflightFailure && (
+              <Alert variant="destructive" role="alert" className="mb-3">
+                <AlertTitle>{adapter.name} blocked before making changes</AlertTitle>
+                <AlertDescription>
+                  {formatProjectPreMutationFailure(preflightFailure)}
+                </AlertDescription>
+              </Alert>
+            )}
+            {(review || !preflightFailure) && (
+              <Step4Review
+                review={review}
+                isLoading={isDryRunPending || (dryRun === null && isOpen)}
+                statusMappings={state.statusMappings}
+                onStatusMappingChange={onStatusMappingChange}
+                operationName={adapter.name.toLowerCase()}
+              />
+            )}
+          </Fragment>
+        ) : null,
+    }),
+    [
+      adapter.name,
+      dryRun,
+      isDryRunPending,
+      isOpen,
+      onStatusMappingChange,
+      preflightFailure,
+      review,
+      reviewReady,
+      state,
+    ],
+  );
+
+  const steps = useMemo<WizardStep[]>(
+    () => [...buildConfigSteps({ preview, state, handlers }).steps, reviewStep],
+    [handlers, preview, reviewStep, state],
+  );
 
   const controller = useProjectSetupWizard({ steps, onSubmit: submit, onCancel: closeWizard });
-  const { reset, currentStep } = controller;
+  const { currentStep, reset } = controller;
   const currentStepId = currentStep?.id;
 
-  // Run the dry-run whenever the user is on the Review step without a fresh result. Leaving Review
-  // (Back) clears the stale result so returning after config edits recomputes with new selections.
   useEffect(() => {
     if (!isOpen) return;
     if (currentStepId === 'review') {
@@ -314,13 +370,12 @@ export function useImportProjectWizard({
       setDryRun(null);
       setPreflightFailure(null);
     }
-  }, [isOpen, currentStepId, dryRun, preflightFailure, isDryRunPending, runDryRun]);
+  }, [currentStepId, dryRun, isDryRunPending, isOpen, preflightFailure, runDryRun]);
 
-  const openImportWizard = useCallback(
-    (target: ImportWizardTarget, request: SetupPreviewRequest) => {
-      submittedRef.current = false;
-      setImportTarget(target);
-      setPreviewRequest(request);
+  const openWizard = useCallback(
+    (nextTarget: TTarget, request?: SetupPreviewRequest) => {
+      setTarget(nextTarget);
+      setPreviewRequest(request ?? null);
       setState(null);
       setDryRun(null);
       setPreflightFailure(null);
@@ -343,14 +398,124 @@ export function useImportProjectWizard({
 
   return {
     isOpen,
-    openImportWizard,
+    openWizard,
     onOpenChange,
     controller,
     isLoading,
     isError,
     isSubmitting: isCommitting,
     preview,
-    importTarget,
+    target,
     preflightFailure,
+  };
+}
+
+const importAdapter: ReplaceFlowAdapter<ImportWizardTarget, ImportProjectSuccess> = {
+  name: 'Import',
+  previewQueryKey: (_target, request) => ['setup-preview', request],
+  canLoadPreview: (request) => request !== null,
+  loadPreview: (_target, request) => fetchSetupPreview(request!),
+  buildCommitBody: (_target, preview, state) =>
+    withStatusMappings(
+      {
+        ...(preview.payload as Record<string, unknown>),
+        ...buildConfigEmission(preview, state),
+      },
+      state.statusMappings,
+    ),
+  commit: (target, body) =>
+    postJson<ImportProjectResponse>(`/api/projects/${encodeURIComponent(target.id)}/import`, body),
+  isTerminalFailure: () => false,
+  successDescription: (_target, result) => {
+    return `${result.message || 'Project replaced.'}${formatPromptSummary(result.promptTransfer)}`;
+  },
+  invalidateOnClose: [],
+  invalidateOnSuccess: [['projects']],
+};
+
+function upgradeAdapter(
+  actionName: 'Upgrade' | 'Update',
+): ReplaceFlowAdapter<UpgradeWizardTarget, UpgradeProjectSuccess> {
+  return {
+    name: actionName,
+    previewQueryKey: (target) => ['upgrade-template-preview', target.id, target.targetVersion],
+    canLoadPreview: () => true,
+    loadPreview: (target) => fetchUpgradeSetupPreview(target.id, target.targetVersion),
+    buildCommitBody: (target, preview, state) =>
+      withStatusMappings(
+        {
+          targetVersion: target.targetVersion,
+          ...buildConfigEmission(preview, state),
+        },
+        state.statusMappings,
+      ),
+    commit: (target, body) =>
+      postJson<UpgradeProjectResponse>(
+        `/api/projects/${encodeURIComponent(target.id)}/upgrade-template`,
+        body,
+      ),
+    isTerminalFailure: (failure) => failure.mutationStarted !== false,
+    successDescription: (target, result) => {
+      return `${target.name} ${actionName === 'Upgrade' ? 'upgraded' : 'updated'} to v${result.newVersion}.${formatPromptSummary(result.promptTransfer)}`;
+    },
+    invalidateOnClose: [['projects'], ['templates-for-upgrade']],
+    invalidateOnSuccess: [['projects'], ['templates-for-upgrade']],
+  };
+}
+
+interface UseImportProjectWizardArgs {
+  onImported: (result: ImportResult) => void;
+  toast: ToastFn;
+}
+
+export interface ImportProjectWizardResult
+  extends Omit<ConfiguredReplaceWizardResult<ImportWizardTarget>, 'openWizard' | 'target'> {
+  openImportWizard: (target: ImportWizardTarget, previewRequest: SetupPreviewRequest) => void;
+  importTarget: ImportWizardTarget | null;
+}
+
+export function useImportProjectWizard({
+  onImported,
+  toast,
+}: UseImportProjectWizardArgs): ImportProjectWizardResult {
+  const wizard = useConfiguredReplaceWizard({
+    adapter: importAdapter,
+    onCompleted: (result) => {
+      if (result.success) onImported(result);
+    },
+    toast,
+  });
+  return {
+    ...wizard,
+    openImportWizard: wizard.openWizard,
+    importTarget: wizard.target,
+  };
+}
+
+interface UseUpgradeProjectWizardArgs {
+  actionName: 'Upgrade' | 'Update';
+  onFinished: (result: UpgradeProjectResponse) => void;
+  onClosed: () => void;
+  toast: ToastFn;
+}
+
+export interface UpgradeProjectWizardResult
+  extends Omit<ConfiguredReplaceWizardResult<UpgradeWizardTarget>, 'openWizard' | 'target'> {
+  openUpgradeWizard: (target: UpgradeWizardTarget) => void;
+  upgradeTarget: UpgradeWizardTarget | null;
+}
+
+export function useUpgradeProjectWizard({
+  actionName,
+  onFinished,
+  onClosed,
+  toast,
+}: UseUpgradeProjectWizardArgs): UpgradeProjectWizardResult {
+  const adapter = useMemo(() => upgradeAdapter(actionName), [actionName]);
+  const wizard = useConfiguredReplaceWizard({ adapter, onCompleted: onFinished, onClosed, toast });
+  return {
+    ...wizard,
+    openUpgradeWizard: wizard.openWizard,
+    upgradeTarget: wizard.target,
   };
 }

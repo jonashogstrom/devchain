@@ -85,6 +85,7 @@ describe('ProjectsController', () => {
 
     templateUpgradeService = {
       upgradeProject: jest.fn(),
+      previewUpgrade: jest.fn(),
       restoreBackup: jest.fn(),
       getBackupInfo: jest.fn(),
       getProjectBackups: jest.fn(),
@@ -202,6 +203,12 @@ describe('ProjectsController', () => {
         Reflect.getMetadata(HTTP_CODE_METADATA, ProjectsController.prototype.upgradeTemplate),
       ).toBe(HttpStatus.OK);
       expect(
+        Reflect.getMetadata(
+          HTTP_CODE_METADATA,
+          ProjectsController.prototype.previewTemplateUpgrade,
+        ),
+      ).toBe(HttpStatus.OK);
+      expect(
         Reflect.getMetadata(HTTP_CODE_METADATA, ProjectsController.prototype.restoreTemplateBackup),
       ).toBe(HttpStatus.OK);
     });
@@ -226,6 +233,87 @@ describe('ProjectsController', () => {
         BadRequestException,
       );
       expect(templateUpgradeService.upgradeProject).not.toHaveBeenCalled();
+    });
+
+    it('returns the source-aligned upgrade preview through ProjectTemplateUpgradeService', async () => {
+      const preview = { manifest: { slug: 'starter', version: '2.0.0' } };
+      templateUpgradeService.previewUpgrade!.mockResolvedValue(preview as never);
+
+      await expect(
+        controller.previewTemplateUpgrade('p1', { targetVersion: '2.0.0' }),
+      ).resolves.toBe(preview);
+      expect(templateUpgradeService.previewUpgrade).toHaveBeenCalledWith({
+        projectId: 'p1',
+        targetVersion: '2.0.0',
+      });
+    });
+
+    it('validates and forwards every upgrade wizard selection', async () => {
+      templateUpgradeService.upgradeProject!.mockResolvedValue({
+        success: true,
+        newVersion: '2.0.0',
+      });
+      const body = {
+        targetVersion: '2.0.0',
+        selectedProviderNames: [' Claude ', 'CLAUDE', 'Codex'],
+        familyProviderMappings: { ' Anthropic ': ' Claude ' },
+        agentOverrides: [
+          {
+            agentName: 'Coder',
+            providerConfigName: 'Claude Default',
+            modelOverride: null,
+          },
+        ],
+        teamOverrides: [
+          {
+            teamName: 'Builders',
+            maxMembers: 4,
+            profileSelections: [{ profileName: 'Coder', configNames: ['Claude Default'] }],
+          },
+        ],
+        statusMappings: { Review: 'status-review' },
+      };
+
+      await controller.upgradeTemplate('p1', body);
+
+      expect(templateUpgradeService.upgradeProject).toHaveBeenCalledWith({
+        projectId: 'p1',
+        targetVersion: '2.0.0',
+        selectedProviderNames: ['claude', 'codex'],
+        familyProviderMappings: { anthropic: 'claude' },
+        agentOverrides: body.agentOverrides,
+        teamOverrides: body.teamOverrides,
+        statusMappings: body.statusMappings,
+      });
+    });
+
+    it('rejects presetName together with agentOverrides', async () => {
+      await expect(
+        controller.upgradeTemplate('p1', {
+          targetVersion: '2.0.0',
+          presetName: 'Balanced',
+          agentOverrides: [{ agentName: 'Coder', providerConfigName: 'Claude Default' }],
+        }),
+      ).rejects.toThrow('Provide either presetName or agentOverrides, but not both');
+      expect(templateUpgradeService.upgradeProject).not.toHaveBeenCalled();
+    });
+
+    it('forwards a preset selection when per-agent overrides are absent', async () => {
+      templateUpgradeService.upgradeProject!.mockResolvedValue({
+        success: true,
+        newVersion: '2.0.0',
+      });
+
+      await controller.upgradeTemplate('p1', {
+        targetVersion: '2.0.0',
+        presetName: 'Balanced',
+      });
+
+      expect(templateUpgradeService.upgradeProject).toHaveBeenCalledWith({
+        projectId: 'p1',
+        targetVersion: '2.0.0',
+        presetName: 'Balanced',
+      });
     });
 
     it('restores a scoped backup through ProjectTemplateUpgradeService', async () => {
@@ -1737,6 +1825,30 @@ describe('ProjectsController', () => {
           agentOverrides: [{ agentName: 'Coder', providerConfigName: 'claude-config' }],
         } as unknown as Record<string, unknown>),
       ).rejects.toThrow('Provide either presetName or agentOverrides, but not both');
+      expect(projectsService.importProject).not.toHaveBeenCalled();
+    });
+
+    it('validates, forwards, and strips presetName from the template payload', async () => {
+      (projectsService.importProject as jest.Mock).mockResolvedValue({
+        success: true,
+        counts: { imported: {}, deleted: {} },
+      });
+
+      await controller.importProject('p1', undefined, {
+        presetName: 'Fast',
+        agents: [{ name: 'Coder' }],
+      } as unknown as Record<string, unknown>);
+
+      const call = (projectsService.importProject as jest.Mock).mock.calls[0][0];
+      expect(call.presetName).toBe('Fast');
+      expect(call.payload.presetName).toBeUndefined();
+      expect(call.payload.agents).toEqual([{ name: 'Coder' }]);
+    });
+
+    it('rejects an empty presetName', async () => {
+      await expect(controller.importProject('p1', undefined, { presetName: '' })).rejects.toThrow(
+        'Invalid presetName',
+      );
       expect(projectsService.importProject).not.toHaveBeenCalled();
     });
 

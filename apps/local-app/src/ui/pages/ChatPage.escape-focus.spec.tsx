@@ -27,6 +27,7 @@ jest.mock('@xterm/xterm', () => {
     reset: jest.fn(),
     write: jest.fn(),
     attachCustomKeyEventHandler: jest.fn(),
+    onKey: jest.fn(() => ({ dispose: jest.fn() })),
     onData: jest.fn(() => ({ dispose: jest.fn() })),
     onResize: jest.fn(() => ({ dispose: jest.fn() })),
     onTitleChange: jest.fn(() => ({ dispose: jest.fn() })),

@@ -18,6 +18,11 @@ export const SOURCE_DISPLAY_BY_NAME: Record<string, SourceDisplay> = {
     label: 'Anthropic',
     className: 'text-orange-700',
   },
+  devchain: {
+    icon: Bot,
+    label: 'DevChain',
+    className: 'text-sky-700',
+  },
 };
 
 export function getSourceDisplay(source: string, kind?: SkillSourceKind): SourceDisplay {

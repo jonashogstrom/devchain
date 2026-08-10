@@ -1,9 +1,10 @@
 import * as fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import matter from 'gray-matter';
 import { ValidationError } from '../../../common/errors/error-types';
 
 const CONTROL_CHAR_REGEX = /[\u0000-\u001f\u007f]/;
+const WINDOWS_ABSOLUTE_PATH_REGEX = /^[A-Za-z]:\//;
 const SAFE_SKILL_SEGMENT_REGEX = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_SKILL_MARKDOWN_FILE = 'SKILL.md';
 const DEFAULT_SKILL_DIRECTORY_CANDIDATES = ['', 'skills', 'library'] as const;
@@ -132,6 +133,51 @@ export function validatePathSegment(segment: string, fieldName: string): string 
     );
   }
   return trimmed;
+}
+
+export function validateRepositoryRelativePath(
+  repositoryPath: string,
+  fieldName: string,
+): readonly string[] {
+  if (repositoryPath.length === 0) {
+    throw new ValidationError(`Invalid ${fieldName}: value cannot be empty.`, { fieldName });
+  }
+  if (repositoryPath.includes('\\')) {
+    throw new ValidationError(`Invalid ${fieldName}: backslashes are not allowed.`, {
+      fieldName,
+      repositoryPath,
+    });
+  }
+  if (isAbsolute(repositoryPath) || WINDOWS_ABSOLUTE_PATH_REGEX.test(repositoryPath)) {
+    throw new ValidationError(`Invalid ${fieldName}: absolute paths are not allowed.`, {
+      fieldName,
+      repositoryPath,
+    });
+  }
+
+  const segments = repositoryPath.split('/');
+  for (const segment of segments) {
+    if (segment.length === 0) {
+      throw new ValidationError(`Invalid ${fieldName}: empty path segments are not allowed.`, {
+        fieldName,
+        repositoryPath,
+      });
+    }
+    if (segment === '.' || segment === '..') {
+      throw new ValidationError(`Invalid ${fieldName}: dot path segments are not allowed.`, {
+        fieldName,
+        repositoryPath,
+      });
+    }
+    if (CONTROL_CHAR_REGEX.test(segment)) {
+      throw new ValidationError(`Invalid ${fieldName}: control characters are not allowed.`, {
+        fieldName,
+        repositoryPath,
+      });
+    }
+  }
+
+  return segments;
 }
 
 export function pickString(

@@ -1,8 +1,15 @@
 import { useEffect, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
-import { useImportProjectWizard } from './useImportProjectWizard';
+import { useImportProjectWizard, useUpgradeProjectWizard } from './useImportProjectWizard';
 import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+
+(global as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+Element.prototype.scrollIntoView = jest.fn();
 
 function preview(over: Partial<SetupPreviewResponse['payload']> = {}): SetupPreviewResponse {
   return {
@@ -19,6 +26,50 @@ function preview(over: Partial<SetupPreviewResponse['payload']> = {}): SetupPrev
     familyAlternatives: [],
     presetProviderCoverage: [],
     localAvailability: { installedProviders: [] },
+  };
+}
+
+function configuredPreview(): SetupPreviewResponse {
+  return {
+    payload: {
+      description: 'target-only marker',
+      profiles: [
+        {
+          id: 'profile-1',
+          name: 'Coder',
+          provider: { name: 'claude' },
+          providerConfigs: [{ name: 'claude-config', providerName: 'claude', env: {} }],
+        },
+      ],
+      agents: [{ name: 'Captain', profileId: 'profile-1', providerConfigName: 'claude-config' }],
+      teams: [
+        {
+          name: 'Target Team',
+          teamLeadAgentName: 'Captain',
+          memberAgentNames: [],
+          allowTeamLeadCreateAgents: true,
+          profileNames: ['Coder'],
+        },
+      ],
+      presets: [
+        {
+          name: 'Target Default',
+          agentConfigs: [{ agentName: 'Captain', providerConfigName: 'claude-config' }],
+        },
+      ],
+    } as unknown as SetupPreviewResponse['payload'],
+    providerSummary: [{ name: 'claude', available: true, families: [], agentCount: 1 }],
+    familyAlternatives: [],
+    presetProviderCoverage: [
+      {
+        presetName: 'Target Default',
+        referencedProviders: ['claude'],
+        coversAllAgents: true,
+        coveredAgentNames: ['Captain'],
+        agentResolvedProviders: { Captain: 'claude' },
+      },
+    ],
+    localAvailability: { installedProviders: [{ id: 'provider-1', name: 'claude' }] },
   };
 }
 
@@ -151,7 +202,24 @@ describe('useImportProjectWizard', () => {
   });
 
   it('keeps dry-run failures out of the counts review and displays their details', async () => {
-    const log = mockFetch({ dryRunResponse: PROMPT_PREFLIGHT_FAILURE });
+    const log = mockFetch({
+      dryRunResponse: {
+        ...PROMPT_PREFLIGHT_FAILURE,
+        dryRun: true,
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: 'prompt_reference_validation',
+              message: PROMPT_PREFLIGHT_FAILURE.error,
+              details: PROMPT_PREFLIGHT_FAILURE.promptReferenceValidation,
+            },
+          ],
+        },
+        missingProviders: [],
+        counts: { toImport: { agents: 1 }, toDelete: { statuses: 0 } },
+      },
+    });
     const toast = jest.fn();
     let wizard: ReturnType<typeof useImportProjectWizard> | null = null;
 
@@ -168,9 +236,10 @@ describe('useImportProjectWizard', () => {
     act(() => wizard!.controller.goNext());
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Import blocked by prompt references',
+      'Import blocked before making changes',
     );
     expect(screen.getByRole('alert')).toHaveTextContent('"Private SOP" (profiles: Coder)');
+    expect(screen.getByTestId('wizard-review-import-counts')).toHaveTextContent('agents1');
     expect(log.dryRun).toBe(1);
     expect(wizard!.controller.canProceed).toBe(false);
     expect(wizard!.isOpen).toBe(true);
@@ -230,7 +299,9 @@ describe('useImportProjectWizard', () => {
           json: async () => ({
             dryRun: true,
             missingProviders: [],
-            counts: { toImport: {}, toDelete: {} },
+            counts: { toImport: {}, toDelete: { statuses: 1 } },
+            unmatchedStatuses: [{ id: 'status-1', label: 'Backlog', color: '#111', epicCount: 2 }],
+            templateStatuses: [{ label: 'Todo', color: '#222' }],
           }),
         };
       }
@@ -251,13 +322,7 @@ describe('useImportProjectWizard', () => {
       useEffect(() => {
         hook.openImportWizard(TARGET, { slug: 'demo' });
       }, []);
-      return (
-        <div>
-          {hook.controller.currentStep?.id === 'providers'
-            ? hook.controller.currentStep.render()
-            : null}
-        </div>
-      );
+      return <div>{hook.controller.currentStep?.render()}</div>;
     }
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -274,6 +339,9 @@ describe('useImportProjectWizard', () => {
     act(() => wiz!.controller.goNext());
     await waitFor(() => expect(wiz!.controller.currentStep?.id).toBe('review'));
     await waitFor(() => expect(log.dryRun).toBeGreaterThanOrEqual(1));
+    fireEvent.click(await screen.findByTestId('wizard-status-map-status-1'));
+    fireEvent.click(await screen.findByRole('option', { name: /Todo/ }));
+    await waitFor(() => expect(wiz!.controller.canProceed).toBe(true));
 
     await act(async () => {
       wiz!.controller.submit();
@@ -282,5 +350,182 @@ describe('useImportProjectWizard', () => {
     expect(
       (log.lastCommitBody as { selectedProviderNames?: string[] }).selectedProviderNames,
     ).toEqual(['claude']);
+    expect(
+      (log.lastCommitBody as { statusMappings?: Record<string, string> }).statusMappings,
+    ).toEqual({ 'status-1': 'Todo' });
+  });
+});
+
+describe('useUpgradeProjectWizard', () => {
+  it('uses target preview, replace dry-run, and source-aligned configured commit adapters', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    global.fetch = jest.fn(async (url: string, init?: RequestInit) => {
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      calls.push({ url, body });
+      if (url.endsWith('/upgrade-template/preview')) {
+        return {
+          ok: true,
+          json: async () => configuredPreview(),
+        };
+      }
+      if (url.endsWith('/import?dryRun=true')) {
+        return {
+          ok: true,
+          json: async () => ({
+            dryRun: true,
+            readiness: { ready: true, issues: [] },
+            missingProviders: [],
+            counts: { toImport: { agents: 0 }, toDelete: { statuses: 0 } },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true, newVersion: '2.0.0' }) };
+    }) as unknown as typeof fetch;
+    const onFinished = jest.fn();
+    const onClosed = jest.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = jest.spyOn(queryClient, 'invalidateQueries');
+    const upgradeWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(
+      () =>
+        useUpgradeProjectWizard({
+          actionName: 'Upgrade',
+          onFinished,
+          onClosed,
+          toast: jest.fn(),
+        }),
+      { wrapper: upgradeWrapper },
+    );
+
+    act(() =>
+      result.current.openUpgradeWizard({
+        id: 'proj-1',
+        name: 'My Project',
+        targetVersion: '2.0.0',
+      }),
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(calls[0]).toEqual({
+      url: '/api/projects/proj-1/upgrade-template/preview',
+      body: { targetVersion: '2.0.0' },
+    });
+
+    act(() => result.current.controller.goNext());
+    act(() => result.current.controller.goNext());
+    act(() => result.current.controller.goNext());
+    await waitFor(() => expect(result.current.controller.currentStep?.id).toBe('review'));
+    await waitFor(() => expect(result.current.controller.canProceed).toBe(true));
+    const dryRunCall = calls.find((call) => call.url.endsWith('/import?dryRun=true'))!;
+    expect(dryRunCall.body).toEqual(expect.objectContaining({ description: 'target-only marker' }));
+
+    await act(async () => result.current.controller.submit());
+    await waitFor(() =>
+      expect(onFinished).toHaveBeenCalledWith({ success: true, newVersion: '2.0.0' }),
+    );
+    const commitCall = calls.find((call) => call.url === '/api/projects/proj-1/upgrade-template')!;
+    expect(commitCall.body).toEqual(
+      expect.objectContaining({
+        targetVersion: '2.0.0',
+        selectedProviderNames: ['claude'],
+        presetName: 'Target Default',
+        teamOverrides: [
+          expect.objectContaining({ teamName: 'Target Team', allowTeamLeadCreateAgents: true }),
+        ],
+      }),
+    );
+    expect(commitCall.body).not.toHaveProperty('agentOverrides');
+    expect(commitCall.body).not.toHaveProperty('description');
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['projects'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['templates-for-upgrade'] });
+  });
+
+  it('shows readiness issues with counts and blocks final confirmation', async () => {
+    global.fetch = jest.fn(async (url: string) => {
+      if (url.endsWith('/upgrade-template/preview')) {
+        return { ok: true, json: async () => preview() };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          dryRun: true,
+          success: false,
+          mutationStarted: false,
+          error: 'Active sessions block replacement',
+          readiness: {
+            ready: false,
+            issues: [
+              {
+                code: 'active_sessions',
+                message: 'Stop active sessions before replacing this project.',
+                details: { activeSessions: [{ id: 'session-1', agentId: null }] },
+              },
+            ],
+          },
+          missingProviders: [],
+          counts: { toImport: { agents: 2 }, toDelete: { statuses: 1 } },
+        }),
+      };
+    }) as unknown as typeof fetch;
+    let wizard: ReturnType<typeof useUpgradeProjectWizard> | null = null;
+    function Harness() {
+      const hook = useUpgradeProjectWizard({
+        actionName: 'Upgrade',
+        onFinished: jest.fn(),
+        onClosed: jest.fn(),
+        toast: jest.fn(),
+      });
+      wizard = hook;
+      useEffect(() => {
+        hook.openUpgradeWizard({ id: 'proj-1', name: 'My Project', targetVersion: '2.0.0' });
+      }, []);
+      return <>{hook.controller.currentStep?.render()}</>;
+    }
+    render(<Harness />, { wrapper });
+    await waitFor(() => expect(wizard?.isLoading).toBe(false));
+    act(() => wizard!.controller.goNext());
+    act(() => wizard!.controller.goNext());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Stop active sessions/);
+    expect(screen.getByTestId('wizard-review-import-counts')).toHaveTextContent('agents2');
+    expect(wizard!.controller.canProceed).toBe(false);
+  });
+
+  it('invalidates upgrade discovery queries when canceled', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => preview(),
+    })) as unknown as typeof fetch;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = jest.spyOn(queryClient, 'invalidateQueries');
+    const onClosed = jest.fn();
+    const upgradeWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(
+      () =>
+        useUpgradeProjectWizard({
+          actionName: 'Upgrade',
+          onFinished: jest.fn(),
+          onClosed,
+          toast: jest.fn(),
+        }),
+      { wrapper: upgradeWrapper },
+    );
+
+    act(() =>
+      result.current.openUpgradeWizard({
+        id: 'proj-1',
+        name: 'My Project',
+        targetVersion: '2.0.0',
+      }),
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    act(() => result.current.controller.cancel());
+
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['projects'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['templates-for-upgrade'] });
   });
 });
