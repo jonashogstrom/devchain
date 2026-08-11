@@ -1,6 +1,6 @@
 # ASD-STE100 Skill — Simplified Technical English for Agent Output
 
-A Claude Code skill that rewrites dense, ambiguous English into [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) (STE) — the controlled-language standard the aerospace and defense industry built so aircraft maintenance instructions cannot be misread.
+A DevChain first-party skill that rewrites dense, ambiguous English into [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) (STE) — the controlled-language standard the aerospace and defense industry built so aircraft maintenance instructions cannot be misread.
 
 This skill repurposes that same discipline for a different reader: an **AI agent** parsing another agent's output, a tool description, an error message, or an inter-agent instruction, with no human in the loop to resolve ambiguity.
 
@@ -32,9 +32,29 @@ Exactly where it falls short of certified STE: [`references/writing-rules.md`](r
 
 ## Installation
 
+The skill is self-contained: `SKILL.md` reads its two supporting files by relative path and
+calls no DevChain tool. Copy the directory into `~/.claude/skills/` and Claude Code picks it
+up. Use `~/.claude/skills/asd-ste100-skill/` as the target — the directory name should match
+the frontmatter `name`.
+
+Download just this directory out of the monorepo, with [degit](https://github.com/Rich-Harris/degit):
+
 ```bash
-git clone https://github.com/danyuchn/asd-ste100-skill ~/.claude/skills/asd-ste100
+npx degit TwiTech-LAB/devchain/apps/local-app/skills/asd-ste100-skill \
+  ~/.claude/skills/asd-ste100-skill
 ```
+
+Or with `curl` and `tar`, if you would rather not install anything:
+
+```bash
+mkdir -p ~/.claude/skills/asd-ste100-skill && \
+curl -sL https://codeload.github.com/TwiTech-LAB/devchain/tar.gz/refs/heads/main \
+  | tar -xz -C ~/.claude/skills/asd-ste100-skill --strip-components=5 \
+    "devchain-main/apps/local-app/skills/asd-ste100-skill"
+```
+
+Both commands track `main`. There is no separate release tag for this skill — to update, run
+the same command again and overwrite.
 
 ## Usage
 
@@ -48,8 +68,8 @@ STE rewrite this instruction
 
 Or paste text and ask Claude to "reduce ambiguity in this output."
 
-> Do not trigger this with `/simplify` — that is a separate built-in skill for simplifying
-> *code*. Say "STE" or "ASD-STE100" so the right skill loads.
+> Do not trigger this with "simplify" alone — `devchain/code-simplifier` (and Claude Code's
+> built-in `/simplify`) handle *code*. Say "STE" or "ASD-STE100" so the right skill loads.
 
 ## Scope
 
@@ -64,6 +84,11 @@ Not built for: creative writing, marketing copy, or anything where voice and nua
 - [ASD Europe — Simplified Technical English](https://www.asd-europe.org/standards-specifications/simplified-technical-english/)
 - [Simplified Technical English — Wikipedia](https://en.wikipedia.org/wiki/Simplified_Technical_English)
 - [TechScribe — ASD-STE100 Simplified Technical English](https://www.techscribe.co.uk/techw/asd-simplified-technical-english.htm)
+
+## Credits
+
+Adapted for DevChain from [`danyuchn/asd-ste100-skill`](https://github.com/danyuchn/asd-ste100-skill)
+by Dustin Yuchen Teng.
 
 ## License
 

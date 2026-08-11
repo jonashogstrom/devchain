@@ -3,7 +3,10 @@ name: asd-ste100-skill
 displayName: Simplified Technical English (ASD-STE100)
 description: "Simplify English into readable, unambiguous text using ASD-STE100 Simplified Technical English rules: one meaning per word, active voice, simple tenses, one instruction per sentence. Use for user-facing messages and reports, tool descriptions, error messages, system prompts, and inter-agent instructions — any text a reader must understand with no follow-up questions. Triggers: STE, ASD-STE100, make this readable, reduce ambiguity, simplify this text."
 version: 0.2.0
-license: "MIT"
+license: "MIT — adapted from danyuchn/asd-ste100-skill (https://github.com/danyuchn/asd-ste100-skill)"
+resources:
+  - references/writing-rules.md
+  - examples/before-after.md
 ---
 
 # Simplified Technical English (ASD-STE100)
