@@ -66,7 +66,7 @@ describe('CodexPluginProfileMaterializerService (unit)', () => {
     await expect(stat(privateRoot)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('builds path-safe bounded names with project collision and policy revision digests', async () => {
+  it('builds path-safe session target names and shares immutable policy revisions', async () => {
     const policy = [{ pluginId: 'gmail@openai-curated', enabled: false }];
     const first = await prepare(service, {
       projectId: PROJECT_ID,
@@ -91,15 +91,23 @@ describe('CodexPluginProfileMaterializerService (unit)', () => {
       pluginPolicy: [{ pluginId: 'gmail@openai-curated', enabled: true }],
       nonce: 'attempt_nonce_0011223344556677',
     });
+    const otherSession = await prepare(service, {
+      projectId: PROJECT_ID,
+      projectName: '../../Málaga Project !'.repeat(20),
+      pluginPolicy: policy,
+      sessionId: 'session-22222222',
+      nonce: 'attempt_nonce_7766554433221100',
+    });
 
-    expect(first.profileName).toMatch(
-      /^devchain-malaga-project-[a-z0-9-]*-[0-9a-f]{16}-[0-9a-f]{64}$/,
-    );
+    expect(first.profileName).toMatch(/^devchain-[0-9a-f]{16}-[0-9a-f]{16}$/);
     expect(first.profileName.length).toBeLessThanOrEqual(255);
     expect(reordered.profileName).toBe(first.profileName);
     expect(reordered.sourceRevisionPath).toBe(first.sourceRevisionPath);
     expect(sameNameOtherProject.profileName).not.toBe(first.profileName);
-    expect(changedPolicy.profileName).not.toBe(first.profileName);
+    expect(changedPolicy.profileName).toBe(first.profileName);
+    expect(changedPolicy.sourceRevisionPath).not.toBe(first.sourceRevisionPath);
+    expect(otherSession.profileName).not.toBe(first.profileName);
+    expect(otherSession.sourceRevisionPath).toBe(first.sourceRevisionPath);
     expect(first.providerOptionArgs).toEqual(['--profile', first.profileName]);
   });
 
@@ -296,17 +304,23 @@ describe('CodexPluginProfileMaterializerService (unit)', () => {
     ).resolves.toBeDefined();
   });
 
-  it('reuses the same immutable target for a later attempt with the same project policy', async () => {
+  it('refreshes a Codex-mutated session target for a later policy revision', async () => {
     const first = await prepare(service);
     const secondNonce = 'attempt_nonce_second_123456789';
-    const second = await prepare(service, { nonce: secondNonce });
+    const second = await prepare(service, {
+      nonce: secondNonce,
+      pluginPolicy: [{ pluginId: 'gmail@openai-curated', enabled: true }],
+    });
     const fakeCodex = await createFakeCodex(temporaryRoot, 'reuse-codex');
     const codexHome = join(temporaryRoot, 'reuse-home');
 
-    for (const [prepared, nonce] of [
-      [first, NONCE],
-      [second, secondNonce],
-    ] as const) {
+    const target = join(codexHome, `${first.profileName}.config.toml`);
+    for (const [index, [prepared, nonce]] of (
+      [
+        [first, NONCE],
+        [second, secondNonce],
+      ] as const
+    ).entries()) {
       const helperArgv = service.buildHelperArgv(prepared, fakeCodex, [], {
         projectId: PROJECT_ID,
         attemptNonce: nonce,
@@ -316,23 +330,34 @@ describe('CodexPluginProfileMaterializerService (unit)', () => {
         encoding: 'utf8',
       });
       expect(result.status).toBe(0);
+      if (index === 0) {
+        await writeFile(
+          target,
+          'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "xhigh"\n\n' +
+            (await readFile(first.sourceRevisionPath, 'utf8')),
+        );
+      }
     }
 
     expect(second.profileName).toBe(first.profileName);
-    expect(second.sourceRevisionPath).toBe(first.sourceRevisionPath);
+    expect(second.sourceRevisionPath).not.toBe(first.sourceRevisionPath);
     expect(second.acknowledgementPath).not.toBe(first.acknowledgementPath);
     expect(second.locatorPath).not.toBe(first.locatorPath);
     expect(second.referencePath).not.toBe(first.referencePath);
-    expect(await readFile(join(codexHome, `${first.profileName}.config.toml`), 'utf8')).toBe(
-      await readFile(first.sourceRevisionPath, 'utf8'),
-    );
+    expect(await readFile(target, 'utf8')).toBe(await readFile(second.sourceRevisionPath, 'utf8'));
+
+    const secondLocator = JSON.parse(await readFile(second.locatorPath, 'utf8'));
+    await service.cleanupPrepared(first);
+    await writeFile(target, 'model = "provider-mutated"\n');
+    await service.cleanupPrepared(second);
+    await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(secondLocator.markerPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('serializes a same-target launch racing cleanup and preserves the live reference', async () => {
     const first = await prepare(service);
     const second = await prepare(service, {
       nonce: 'attempt_nonce_racing_123456789',
-      sessionId: 'session-22222222',
     });
     const fakeCodex = await createFakeCodex(temporaryRoot, 'racing-codex');
     const codexHome = join(temporaryRoot, 'racing-home');
@@ -353,7 +378,8 @@ describe('CodexPluginProfileMaterializerService (unit)', () => {
     await expect(stat(second.referencePath)).resolves.toBeDefined();
     await service.reconcileStartup(new Set());
     await expect(stat(target)).resolves.toBeDefined();
-    await service.reconcileStartup(new Set(['session-22222222']));
+    await writeFile(target, 'model = "provider-mutated-before-reconciliation"\n');
+    await service.reconcileStartup(new Set([SESSION_ID]));
     await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

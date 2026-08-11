@@ -68,6 +68,11 @@ interface CodexProfileAcknowledgement {
   nonce: string;
 }
 
+type CodexProfileTargetMarker = Pick<
+  CodexProfileAcknowledgement,
+  'version' | 'canonicalTargetPath' | 'projectId' | 'sessionId' | 'projectDigest' | 'profileName'
+>;
+
 interface CodexProfileLocator extends CodexProfileAcknowledgement {
   referencePath: string;
   acknowledgementPath: string;
@@ -256,32 +261,39 @@ function acquireTargetLock(locksRoot, canonicalTargetPath, attemptNonce) {
   fail("lock_timeout");
 }
 
-function writeOrValidateMarker(markerPath, marker) {
+function validateTargetMarker(markerPath, marker) {
   try {
     const metadata = fs.lstatSync(markerPath);
     if (!metadata.isFile() || metadata.isSymbolicLink()) fail("unsafe_target_marker");
     const existing = JSON.parse(fs.readFileSync(markerPath, "utf8"));
     if (
+      existing.version !== marker.version ||
       existing.canonicalTargetPath !== marker.canonicalTargetPath ||
-      existing.profileName !== marker.profileName ||
-      existing.policyHash !== marker.policyHash
+      existing.projectId !== marker.projectId ||
+      existing.sessionId !== marker.sessionId ||
+      existing.projectDigest !== marker.projectDigest ||
+      existing.profileName !== marker.profileName
     ) {
       fail("target_marker_mismatch");
     }
-    return;
+    return true;
   } catch (error) {
     if (!error || error.code !== "ENOENT") throw error;
   }
-  writeExclusive(markerPath, JSON.stringify(marker));
+  return false;
 }
 
-function materializeProfile(destination, content) {
+function materializeProfile(destination, content, markerOwned) {
+  let replaceExisting = false;
   try {
     const stat = fs.lstatSync(destination);
     if (!stat.isFile() || stat.isSymbolicLink()) fail("unsafe_profile_target");
-    if (fs.readFileSync(destination, "utf8") !== content) fail("profile_content_mismatch");
-    fs.chmodSync(destination, FILE_MODE);
-    return;
+    if (fs.readFileSync(destination, "utf8") === content) {
+      fs.chmodSync(destination, FILE_MODE);
+      return;
+    }
+    if (!markerOwned) fail("profile_content_mismatch");
+    replaceExisting = true;
   } catch (error) {
     if (!error || error.code !== "ENOENT") throw error;
   }
@@ -294,17 +306,19 @@ function materializeProfile(destination, content) {
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;
-    try {
-      fs.linkSync(temporary, destination);
-    } catch (error) {
-      if (!error || error.code !== "EEXIST") throw error;
-      const stat = fs.lstatSync(destination);
-      if (
-        !stat.isFile() ||
-        stat.isSymbolicLink() ||
-        fs.readFileSync(destination, "utf8") !== content
-      ) {
-        fail("profile_content_mismatch");
+    if (replaceExisting) {
+      fs.renameSync(temporary, destination);
+    } else {
+      try {
+        fs.linkSync(temporary, destination);
+      } catch (error) {
+        if (!error || error.code !== "EEXIST") throw error;
+        const stat = fs.lstatSync(destination);
+        if (!stat.isFile() || stat.isSymbolicLink()) fail("unsafe_profile_target");
+        if (fs.readFileSync(destination, "utf8") !== content) {
+          if (!markerOwned) fail("profile_content_mismatch");
+          fs.renameSync(temporary, destination);
+        }
       }
     }
     fs.chmodSync(destination, FILE_MODE);
@@ -339,12 +353,15 @@ function main() {
   const profileName = values["--profile"];
   const projectDigest = values["--project-digest"];
   const policyHash = values["--policy-hash"];
+  const sessionId = values["--session-id"];
   const nonce = values["--nonce"];
   if (!PROFILE_NAME.test(profileName)) fail("invalid_profile_name");
   if (!DIGEST.test(projectDigest) || !DIGEST.test(policyHash)) fail("invalid_digest");
   if (!NONCE.test(nonce)) fail("invalid_nonce");
   if (sha256(values["--project-id"]) !== projectDigest) fail("project_digest_mismatch");
-  if (!profileName.endsWith("-" + projectDigest.slice(0, 16) + "-" + policyHash)) {
+  const expectedProfileName =
+    "devchain-" + projectDigest.slice(0, 16) + "-" + sha256(sessionId).slice(0, 16);
+  if (profileName !== expectedProfileName) {
     fail("profile_identity_mismatch");
   }
 
@@ -358,7 +375,13 @@ function main() {
   ensureDirectory(locksRoot);
   ensureDirectory(targetsRoot);
   const sourcePath = containedRegularFile(values["--source"], sourceRoot, "unsafe_source_path");
-  if (path.basename(sourcePath) !== profileName + ".config.toml") fail("source_identity_mismatch");
+  if (
+    !path.basename(sourcePath).endsWith(
+      "-" + projectDigest.slice(0, 16) + "-" + policyHash + ".config.toml"
+    )
+  ) {
+    fail("source_identity_mismatch");
+  }
   const referencePath = containedDestination(
     values["--reference"],
     lifecycleRoot,
@@ -405,23 +428,31 @@ function main() {
   if (typeof process.execve !== "function") fail("exec_unavailable");
   const targetLock = acquireTargetLock(locksRoot, canonicalTargetPath, nonce);
   try {
-    materializeProfile(canonicalTargetPath, content);
-    if (sha256(fs.readFileSync(canonicalTargetPath, "utf8")) !== policyHash) {
-      fail("target_hash_mismatch");
-    }
-
     const acknowledgement = {
       version: 1,
       canonicalTargetPath,
       projectId: values["--project-id"],
-      sessionId: values["--session-id"],
+      sessionId,
       projectDigest,
       profileName,
       policyHash,
       nonce
     };
+    const targetMarker = {
+      version: 1,
+      canonicalTargetPath,
+      projectId: values["--project-id"],
+      sessionId,
+      projectDigest,
+      profileName
+    };
     const markerPath = path.join(targetsRoot, targetLock.lockKey + ".target.json");
-    writeOrValidateMarker(markerPath, acknowledgement);
+    const markerOwned = validateTargetMarker(markerPath, targetMarker);
+    materializeProfile(canonicalTargetPath, content, markerOwned);
+    if (sha256(fs.readFileSync(canonicalTargetPath, "utf8")) !== policyHash) {
+      fail("target_hash_mismatch");
+    }
+    if (!markerOwned) writeExclusive(markerPath, JSON.stringify(targetMarker));
     writeExclusive(referencePath, JSON.stringify({
       ...acknowledgement,
       acknowledgementPath,
@@ -470,8 +501,10 @@ export class CodexPluginProfileMaterializerService {
     const profileToml = this.serializePolicy(input.pluginPolicy);
     const projectDigest = this.sha256(input.projectId);
     const policyHash = this.sha256(profileToml);
+    const sessionDigest = this.sha256(input.sessionId);
     const projectSlug = this.toProjectSlug(input.projectName);
-    const profileName = `devchain-${projectSlug}-${projectDigest.slice(0, 16)}-${policyHash}`;
+    const sourceProfileName = `devchain-${projectSlug}-${projectDigest.slice(0, 16)}-${policyHash}`;
+    const profileName = `devchain-${projectDigest.slice(0, 16)}-${sessionDigest.slice(0, 16)}`;
     if (!PROFILE_NAME_PATTERN.test(profileName) || profileName.length > 255) {
       throw new ValidationError('Codex plugin profile name is not filesystem-safe.', {
         field: 'projectName',
@@ -493,7 +526,7 @@ export class CodexPluginProfileMaterializerService {
     ]);
 
     const helperHash = this.sha256(CODEX_PROFILE_HELPER_SOURCE);
-    const sourceRevisionPath = join(sourceRoot, `${profileName}.config.toml`);
+    const sourceRevisionPath = join(sourceRoot, `${sourceProfileName}.config.toml`);
     const helperPath = join(helperRoot, `devchain-codex-profile-helper-${helperHash}`);
     const attemptKey = this.sha256(`${input.projectId}\0${input.attemptNonce}`);
     const referencePath = join(lifecycleRoot, `${attemptKey}.reference.json`);
@@ -694,16 +727,21 @@ export class CodexPluginProfileMaterializerService {
     try {
       await rm(locator.referencePath, { force: true });
       if (!(await this.hasLiveReference(locator.canonicalTargetPath))) {
-        const marker = await this.readJsonFile<CodexProfileAcknowledgement>(locator.markerPath);
-        const targetHash = await this.hashRegularFile(locator.canonicalTargetPath);
+        const marker = await this.readJsonFile<CodexProfileTargetMarker>(locator.markerPath);
+        const targetState = await this.getTargetFileState(locator.canonicalTargetPath);
         if (
           marker &&
+          marker.version === 1 &&
           marker.canonicalTargetPath === locator.canonicalTargetPath &&
+          marker.projectId === locator.projectId &&
+          marker.sessionId === locator.sessionId &&
+          marker.projectDigest === locator.projectDigest &&
           marker.profileName === locator.profileName &&
-          marker.policyHash === locator.policyHash &&
-          targetHash === locator.policyHash
+          targetState !== 'unsafe'
         ) {
-          await rm(locator.canonicalTargetPath, { force: true });
+          if (targetState === 'regular') {
+            await rm(locator.canonicalTargetPath, { force: true });
+          }
           await rm(locator.markerPath, { force: true });
         }
       }
@@ -804,13 +842,12 @@ export class CodexPluginProfileMaterializerService {
     }
   }
 
-  private async hashRegularFile(path: string): Promise<string | null> {
+  private async getTargetFileState(path: string): Promise<'missing' | 'regular' | 'unsafe'> {
     try {
       const metadata = await lstat(path);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) return null;
-      return this.sha256(await readFile(path, 'utf8'));
-    } catch {
-      return null;
+      return metadata.isFile() && !metadata.isSymbolicLink() ? 'regular' : 'unsafe';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unsafe';
     }
   }
 

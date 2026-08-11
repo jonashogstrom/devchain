@@ -1,6 +1,6 @@
 {
   "name": "devchain-cli",
-  "version": "0.20.2",
+  "version": "0.20.3",
   "description": "AI driven development platform",
   "homepage": "https://devchain.cc/",
   "repository": {
@@ -8,6 +8,9 @@
     "url": "https://github.com/twitech-lab/devchain.git"
   },
   "changelog": {
+    "0.20.3": [
+      "[Bug Fix] Plugins: Codex sessions with plugin policy launch again on Codex CLI 0.147 and newer"
+    ],
     "0.20.2": [
       "[Impr] Projects: template upgrades now open the same configuration wizard as imports",
       "[Impr] Skills: DevChain's own skills ship as a built-in source that is enabled by default in every project",

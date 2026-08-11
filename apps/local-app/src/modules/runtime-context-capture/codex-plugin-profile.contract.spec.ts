@@ -5,12 +5,14 @@ import { resolve, join } from 'path';
 import { CodexPluginProfileMaterializerService } from './codex-plugin-profile-materializer.service';
 
 const codexVersion = spawnSync('codex', ['--version'], { encoding: 'utf8' });
-const describeCodex0146 =
-  codexVersion.status === 0 && codexVersion.stdout.trim() === 'codex-cli 0.146.0'
-    ? describe
-    : describe.skip;
+const codexVersionMatch = /^codex-cli (\d+)\.(\d+)\.(\d+)$/.exec(codexVersion.stdout.trim());
+const codexVersionAtLeast0147 =
+  codexVersion.status === 0 &&
+  codexVersionMatch !== null &&
+  (Number(codexVersionMatch[1]) > 0 || Number(codexVersionMatch[2]) >= 147);
+const describeCodex0147OrNewer = codexVersionAtLeast0147 ? describe : describe.skip;
 
-describeCodex0146('Codex 0.146 plugin profile effect contract', () => {
+describeCodex0147OrNewer('Codex 0.147+ plugin profile effect contract', () => {
   let codexHome: string;
 
   beforeEach(async () => {
