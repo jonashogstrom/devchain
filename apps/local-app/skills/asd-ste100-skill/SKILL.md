@@ -2,7 +2,7 @@
 name: asd-ste100-skill
 displayName: Simplified Technical English (ASD-STE100)
 description: "Simplify English into readable, unambiguous text using ASD-STE100 Simplified Technical English rules: one meaning per word, active voice, simple tenses, one instruction per sentence. Use for user-facing messages and reports, tool descriptions, error messages, system prompts, and inter-agent instructions — any text a reader must understand with no follow-up questions. Triggers: STE, ASD-STE100, make this readable, reduce ambiguity, simplify this text."
-version: 0.2.0
+version: 0.3.0
 license: "MIT — adapted from danyuchn/asd-ste100-skill (https://github.com/danyuchn/asd-ste100-skill)"
 resources:
   - references/writing-rules.md
@@ -42,20 +42,26 @@ literal by design.
 1. Read the whole input for meaning before you rewrite anything.
 2. Walk it sentence by sentence and flag each rule the sentence breaks.
 3. Rewrite each flagged sentence. Keep the meaning exact.
-4. Output the full rewritten text, then the table below, then one line on anything you
-   left alone and why.
+4. Output the rewritten text only.
 
 ## Output format
 
-```markdown
-**Rewritten:**
-> The full rewritten text, ready to use.
+Output the rewritten text, ready to use, and nothing else. Steps 1 to 3 are your working
+method. They are not output.
 
-| Rule broken | Original | Simplified |
-|---|---|---|
-| Present perfect tense | "We have received your request." | "We received your request." |
-| Noun cluster (4+ words) | "the agent task queue priority handler" | "the handler that sets task-queue priority" |
-```
+Do not add any of these:
+- a table of the changes you made
+- a list of the rules each sentence broke
+- a summary, a preamble, or a count of the edits
+- a note about text you left unchanged
+
+Keep the format of the input. If the input is a Markdown document, the output is the same
+document with the same headings, tables, lists, and code blocks.
+
+There are two exceptions. Each one is a single line, after the text:
+- If the input already obeys the rules, say so. Do not force changes onto compliant text.
+- If you could not rewrite a sentence and keep every fact, condition, or hedge, name that
+  sentence. Report only this type of trade-off.
 
 ## Limits
 
