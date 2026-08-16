@@ -1,4 +1,3 @@
-import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Edit, GitBranch, ListChecks, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import EpicPreview from '@/ui/components/shared/EpicPreview';
@@ -15,8 +14,8 @@ export interface BoardColumnProps {
   onDeleteEpic: (epic: Epic) => void;
   onDragStart: (epic: Epic) => void;
   onDragEnd: () => void;
-  onDragOver: (e: React.DragEvent) => void;
-  onDrop: (statusId: string) => void;
+  onDragOver: () => void;
+  onDrop: () => void;
   isActiveDrop: boolean;
   draggedEpic: Epic | null;
   onKeyboardMove: (epic: Epic, direction: 'left' | 'right') => void;
@@ -24,9 +23,9 @@ export interface BoardColumnProps {
   activeParentId: string | null;
   statusOrder: Status[];
   getAgentName: (agentId: string | null) => string | null;
-  onCollapseColumn: (statusId: string) => void;
+  onCollapseColumn: () => void;
   onBulkEdit: (epic: Epic) => void;
-  onViewDetails: (epic: Epic) => void;
+  onOpenEpicDetails: (epic: Epic) => void;
   onMoveToWorktree?: (epic: Epic) => void;
   hasRunningWorktrees?: boolean;
   isLightColor: (hex: string) => boolean;
@@ -52,18 +51,19 @@ export function BoardColumn({
   getAgentName,
   onCollapseColumn,
   onBulkEdit,
-  onViewDetails,
+  onOpenEpicDetails,
   onMoveToWorktree,
   hasRunningWorktrees = false,
   isLightColor,
   getSubEpicCountsByStatus,
 }: BoardColumnProps) {
-  const navigate = useNavigate();
-
   return (
     <div
-      onDragOver={onDragOver}
-      onDrop={() => onDrop(status.id)}
+      onDragOver={(event) => {
+        event.preventDefault();
+        onDragOver();
+      }}
+      onDrop={onDrop}
       className={cn(
         'flex flex-col bg-muted/30 rounded-lg border transition-colors snap-start',
         (draggedEpic || isActiveDrop) && 'border-primary/50',
@@ -73,7 +73,7 @@ export function BoardColumn({
     >
       <div
         className="flex items-center justify-between p-3 border-b bg-card rounded-t-lg cursor-pointer select-none"
-        onDoubleClick={() => onCollapseColumn(status.id)}
+        onDoubleClick={onCollapseColumn}
         title="Double-click to collapse this column"
       >
         <div className="flex items-center gap-2">
@@ -134,6 +134,7 @@ export function BoardColumn({
               onKeyboardMove={onKeyboardMove}
               onToggleParentFilter={onToggleParentFilter}
               isActiveParent={activeParentId === epic.id}
+              onOpenEpicDetails={onOpenEpicDetails}
               statuses={statusOrder}
               subEpicCountsByStatus={getSubEpicCountsByStatus?.(epic.id)}
               renderPreview={() => {
@@ -150,7 +151,7 @@ export function BoardColumn({
                       aria-label="Open epic details"
                       onClick={(e) => {
                         e.stopPropagation();
-                        navigate(`/epics/${epic.id}`);
+                        onOpenEpicDetails(epic);
                       }}
                     >
                       <Search className="h-4 w-4" />
@@ -227,10 +228,6 @@ export function BoardColumn({
               onBulkEdit={(e) => {
                 e.stopPropagation();
                 onBulkEdit(epic);
-              }}
-              onViewDetails={(e) => {
-                e.stopPropagation();
-                onViewDetails(epic);
               }}
               onMoveToWorktree={
                 epic.parentId === null && hasRunningWorktrees && onMoveToWorktree

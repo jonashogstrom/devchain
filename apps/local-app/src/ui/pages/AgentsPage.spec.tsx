@@ -4,7 +4,6 @@ import { AgentsPage } from './AgentsPage';
 
 const toastSpy = jest.fn();
 const useSelectedProjectMock = jest.fn();
-const openTerminalWindowSpy = jest.fn();
 
 jest.mock('@/ui/hooks/use-toast', () => ({
   useToast: () => ({ toast: toastSpy }),
@@ -28,10 +27,6 @@ jest.mock('@/ui/hooks/useAppSocket', () => ({
     capturedSocketHandlers = handlers;
     return mockSocket;
   },
-}));
-
-jest.mock('@/ui/terminal-windows', () => ({
-  useTerminalWindowManager: () => openTerminalWindowSpy,
 }));
 
 const baseProfile = {
@@ -93,7 +88,6 @@ function createWrapper() {
 }
 
 function buildFetchMock(overrides?: {
-  onLaunch?: () => Promise<Response> | Response;
   onUpdate?: () => Promise<Response> | Response;
   agents?: Array<typeof baseAgent>;
 }) {
@@ -141,52 +135,6 @@ function buildFetchMock(overrides?: {
       } as Response;
     }
 
-    if (url.startsWith('/api/preflight')) {
-      return {
-        ok: true,
-        json: async () => ({
-          overall: 'pass',
-          checks: [],
-          providers: [
-            {
-              id: baseProvider.id,
-              name: baseProvider.name,
-              status: 'pass',
-              message: 'Provider ready',
-              binPath: '/usr/bin/claude',
-              binaryStatus: 'pass',
-              binaryMessage: 'Binary found',
-              mcpStatus: 'pass',
-              mcpMessage: 'MCP configured',
-            },
-          ],
-          supportedMcpProviders: ['claude'],
-          timestamp: new Date().toISOString(),
-        }),
-      } as Response;
-    }
-
-    if (url === '/api/sessions/launch' && init?.method === 'POST') {
-      if (overrides?.onLaunch) {
-        return overrides.onLaunch();
-      }
-
-      return {
-        ok: true,
-        json: async () => ({
-          id: 'session-1',
-          epicId: null,
-          agentId: 'agent-1',
-          tmuxSessionId: 'tmux-1',
-          status: 'running',
-          startedAt: '2024-01-01T00:00:00.000Z',
-          endedAt: null,
-          createdAt: '2024-01-01T00:00:00.000Z',
-          updatedAt: '2024-01-01T00:00:00.000Z',
-        }),
-      } as Response;
-    }
-
     if (url.startsWith('/api/agents/') && init?.method === 'PATCH') {
       if (overrides?.onUpdate) {
         return overrides.onUpdate();
@@ -222,7 +170,6 @@ describe('AgentsPage', () => {
 
   beforeEach(() => {
     toastSpy.mockClear();
-    openTerminalWindowSpy.mockClear();
     mockSocketEmit.mockClear();
     mockSocket.connected = false;
     capturedSocketHandlers = {};
@@ -236,40 +183,6 @@ describe('AgentsPage', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete (global as unknown as { fetch?: unknown }).fetch;
     }
-  });
-
-  it('launches a session from the Agents page', async () => {
-    const fetchMock = buildFetchMock();
-    global.fetch = fetchMock as unknown as typeof fetch;
-    const dispatchSpy = jest.spyOn(window, 'dispatchEvent');
-
-    const { Wrapper, queryClient } = createWrapper();
-    render(<AgentsPage />, { wrapper: Wrapper });
-
-    await screen.findByText('Agent One');
-
-    const launchButton = screen.getByRole('button', { name: /launch session/i });
-    fireEvent.click(launchButton);
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/sessions/launch',
-        expect.objectContaining({
-          method: 'POST',
-        }),
-      );
-    });
-
-    expect(openTerminalWindowSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'session-1', agentId: 'agent-1' }),
-    );
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'devchain:terminal-dock:open' }),
-    );
-    expect(toastSpy).toHaveBeenCalledWith(expect.objectContaining({ title: 'Session launched' }));
-
-    dispatchSpy.mockRestore();
-    queryClient.clear();
   });
 
   it('saves edits and closes the dialog on success', async () => {

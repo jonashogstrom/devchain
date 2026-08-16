@@ -40,28 +40,10 @@ jest.mock('../../utils/tmux-naming.util', () => ({
   buildTmuxSessionName: (...args: string[]) => `tmux-${args.join('-')}`,
 }));
 
-jest.mock('../provider-launch-config', () => ({
-  resolve: jest.fn().mockImplementation((input: { providerSessionId?: string }) => {
-    const sessionId = input.providerSessionId ?? 'provider-session-1';
-    return {
-      argv: ['test-provider', '--resume', sessionId],
-      commandArgs: ['test-provider', '--resume', sessionId],
-      env: null,
-    };
-  }),
-  ProfileOptionsError: class ProfileOptionsError extends Error {},
-}));
-
 // ── Imports ────────────────────────────────────────────────────────────
 
-import {
-  createRestorePipelineHarness,
-  fakeProvider,
-  fakeAgent,
-  fakeProfileProviderConfig,
-} from './__test-utils__/pipeline-harness';
+import { createRestorePipelineHarness, fakeProvider } from './__test-utils__/pipeline-harness';
 import { ConflictError, ValidationError } from '../../../../common/errors/error-types';
-import { resolve as resolveLaunchConfig } from '../provider-launch-config';
 import { TerminalStreamService } from '../../../terminal/services/terminal-stream.service';
 import type { MetricsService } from '../../../metrics/services/metrics.service';
 
@@ -71,264 +53,90 @@ describe('SessionRestorePipeline', () => {
   const sessionId = 'session-1';
   const projectId = 'project-1';
 
-  describe('runtime context capture lifecycle', () => {
-    it('snapshots and rotates live context state before issuing the restore command', async () => {
-      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
-      stoppedSessionRow.provider_name_at_launch = 'claude';
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'claude' }));
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(mocks.runtimeContextCapture.snapshot).toHaveBeenCalledWith(sessionId);
-      expect(mocks.runtimeContextCapture.rotateEpoch).toHaveBeenCalledWith(sessionId, null);
-      expect(mocks.runtimeContextCapture.rotateEpoch.mock.invocationCallOrder[0]).toBeLessThan(
-        mocks.terminalIO.typeCommand.mock.invocationCallOrder[0],
-      );
-      expect(mocks.runtimeContextCapture.restoreSnapshot).not.toHaveBeenCalled();
-    });
-
-    it('restores the prior in-memory capture snapshot when restore fails', async () => {
-      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
-      stoppedSessionRow.provider_name_at_launch = 'claude';
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'claude' }));
-      const priorSnapshot = {
-        epoch: 'prior-epoch',
-        configuredOverride: null,
-        state: {
-          sessionId,
-          epoch: 'prior-epoch',
-          sequence: 7,
-          claudeSessionId: 'runtime-before-restore',
-          modelId: 'claude-sonnet-4-6',
-          contextWindowTokens: 1_000_000,
-        },
-      };
-      mocks.runtimeContextCapture.snapshot.mockReturnValue(priorSnapshot);
-      mocks.terminalIO.createEmptySession.mockRejectedValue(new Error('tmux failed'));
-
-      await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow('tmux failed');
-
-      expect(mocks.runtimeContextCapture.restoreSnapshot).toHaveBeenCalledWith(
-        sessionId,
-        priorSnapshot,
-      );
-    });
-
-    it('binds a newly resolved configured window on restore', async () => {
+  describe('prepared provider runtime', () => {
+    it('plans before flip and materializes after flip but before tmux creation', async () => {
       const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockReturnValueOnce({
-        argv: ['test-provider', '--resume', 'provider-session-1'],
-        commandArgs: ['test-provider', '--resume', 'provider-session-1'],
-        env: null,
-        contextWindowOverride: {
-          modelId: 'custom/model',
-          contextWindowTokens: 640_000,
-        },
-      });
 
       await pipeline.restore(sessionId, projectId);
 
-      expect(mocks.runtimeContextCapture.rotateEpoch).toHaveBeenCalledWith(sessionId, {
-        modelId: 'custom/model',
-        contextWindowTokens: 640_000,
-      });
-    });
-
-    it('prepares Claude settings after epoch rotation and re-resolves the restore overlay', async () => {
-      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      stoppedSessionRow.provider_name_at_launch = 'claude';
-      mocks.storage.getProvider.mockResolvedValue(
-        fakeProvider({ name: 'claude', claudeLaunchSettingsJson: '{"tui":"default"}' }),
+      expect(mocks.providerRuntimePreparation.createPlan.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.updateStmt.run.mock.invocationCallOrder[0],
       );
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ options: '--model sonnet' }),
-      ]);
-      mocks.claudeLaunchSettings.prepare.mockResolvedValue({
-        optionArgs: ['--settings', '/private/revision.json'],
-        runtimeEnv: { DEVCHAIN_STATUSLINE_LOCATOR: '/private/locator.json' },
-        captureEnabled: true,
-      });
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(mocks.claudeLaunchSettings.prepare).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerName: 'claude',
-          settingsJson: '{"tui":"default"}',
-          profileOptionArgs: ['--model', 'sonnet'],
-          sessionId,
-          epoch: 'capture-epoch',
-          projectRootPath: '/tmp/project',
-        }),
+      expect(mocks.updateStmt.run.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.providerRuntimePreparation.materialize.mock.invocationCallOrder[0],
       );
-      expect(resolveMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          mode: 'restore',
-          providerOptionArgs: ['--settings', '/private/revision.json'],
-          runtimeEnv: { DEVCHAIN_STATUSLINE_LOCATOR: '/private/locator.json' },
-        }),
+      expect(mocks.providerRuntimePreparation.materialize.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.terminalIO.createEmptySession.mock.invocationCallOrder[0],
       );
     });
 
-    it('uses the original restore command unchanged when preparation is inactive', async () => {
+    it('runs acknowledgement after the command and before session.restored', async () => {
       const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
 
       await pipeline.restore(sessionId, projectId);
 
-      expect(resolveMock).toHaveBeenCalledTimes(1);
-      expect(mocks.terminalIO.typeCommand).toHaveBeenCalledWith(expect.any(Object), [
-        'test-provider',
-        '--resume',
-        'provider-session-1',
-      ]);
-    });
-  });
-
-  describe('managed Codex policy restore', () => {
-    it('wraps the final restore argv and waits for the bound acknowledgement', async () => {
-      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      stoppedSessionRow.provider_name_at_launch = 'codex';
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'codex' }));
-      mocks.providerPluginPolicy.resolveAll.mockResolvedValue([
-        { providerId: 'provider-1', pluginId: 'plugin@market', enabled: false, source: 'project' },
-      ]);
-      mocks.codexPluginProfiles.prepare.mockImplementation(async (input) => ({
-        profileName: 'devchain-profile',
-        projectDigest: 'a'.repeat(64),
-        policyHash: 'b'.repeat(64),
-        sourceRevisionPath: '/private/source.toml',
-        helperPath: '/private/helper',
-        sessionId: input.sessionId,
-        attemptNonce: input.attemptNonce,
-        referencePath: '/private/reference.json',
-        locatorPath: '/private/locator.json',
-        acknowledgementPath: '/private/ack.json',
-        providerOptionArgs: ['--profile', 'devchain-profile'],
-      }));
-      mocks.codexPluginProfiles.buildHelperArgv.mockReturnValue([
-        '/private/helper',
-        '--',
-        '/usr/bin/test-provider',
-      ]);
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(resolveMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          mode: 'restore',
-          providerOptionArgs: ['--profile', 'devchain-profile'],
-        }),
+      const restoredCall = mocks.eventsService.publish.mock.calls.findIndex(
+        ([event]: [string]) => event === 'session.restored',
       );
-      expect(mocks.terminalIO.typeCommand).toHaveBeenCalledWith(expect.anything(), [
-        'env',
-        '-u',
-        'DEVCHAIN_CONTEXT_WINDOW_TOKENS',
-        '/private/helper',
-        '--',
-        '/usr/bin/test-provider',
-      ]);
-      expect(mocks.codexPluginProfiles.awaitAcknowledgement).toHaveBeenCalled();
+      expect(mocks.terminalIO.typeCommand.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.preparedProviderRuntime.afterCommand.mock.invocationCallOrder[0],
+      );
+      expect(mocks.preparedProviderRuntime.afterCommand.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.eventsService.publish.mock.invocationCallOrder[restoredCall],
+      );
     });
 
-    it('destroys tmux before profile cleanup when acknowledgement validation fails', async () => {
-      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
-      stoppedSessionRow.provider_name_at_launch = 'codex';
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'codex' }));
-      mocks.providerPluginPolicy.resolveAll.mockResolvedValue([
-        { providerId: 'provider-1', pluginId: 'plugin@market', enabled: true, source: 'default' },
-      ]);
-      mocks.codexPluginProfiles.prepare.mockImplementation(async (input) => ({
-        profileName: 'devchain-profile',
-        projectDigest: 'a'.repeat(64),
-        policyHash: 'b'.repeat(64),
-        sourceRevisionPath: '/private/source.toml',
-        helperPath: '/private/helper',
-        sessionId: input.sessionId,
-        attemptNonce: input.attemptNonce,
-        referencePath: '/private/reference.json',
-        locatorPath: '/private/locator.json',
-        acknowledgementPath: '/private/ack.json',
-        providerOptionArgs: ['--profile', 'devchain-profile'],
-      }));
-      mocks.codexPluginProfiles.buildHelperArgv.mockReturnValue(['/private/helper']);
-      mocks.codexPluginProfiles.awaitAcknowledgement.mockRejectedValue(new Error('foreign ack'));
+    it('destroys tmux before provider-runtime rollback when acknowledgement fails', async () => {
+      const { pipeline, mocks } = createRestorePipelineHarness();
+      mocks.preparedProviderRuntime.afterCommand.mockRejectedValue(new Error('foreign ack'));
 
       await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow('foreign ack');
 
       expect(mocks.terminalIO.destroyExpectedSession).toHaveBeenCalled();
-      expect(mocks.codexPluginProfiles.cleanupPrepared).toHaveBeenCalled();
+      expect(mocks.preparedProviderRuntime.rollback).toHaveBeenCalled();
       expect(mocks.terminalIO.destroyExpectedSession.mock.invocationCallOrder[0]).toBeLessThan(
-        mocks.codexPluginProfiles.cleanupPrepared.mock.invocationCallOrder[0],
-      );
-    });
-  });
-
-  // ── Effective model/effort resolution (restore parity with launch) ───────
-  // Restore must apply the same effective model/effort as a fresh launch. Layer:
-  // pipeline unit test with the shared harness (resolve is mocked) — asserts the
-  // pipeline passes the resolved values; argv strip/inject is proven at the
-  // resolver layer (provider-launch-config.spec).
-  describe('effective model/effort resolution (parity with launch)', () => {
-    it('passes agent.effortOverride when set (highest precedence)', async () => {
-      const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ effortOverride: 'high' }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ effort: 'low' }),
-      ]);
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ mode: 'restore', effortOverride: 'high' }),
+        mocks.preparedProviderRuntime.rollback.mock.invocationCallOrder[0],
       );
     });
 
-    it('falls back to config.effort when the agent override is null', async () => {
+    it('does not flip, create tmux, or publish success when planning fails', async () => {
       const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ effort: 'medium' }),
-      ]);
+      mocks.providerRuntimePreparation.createPlan.mockRejectedValue(new Error('planning failed'));
 
-      await pipeline.restore(sessionId, projectId);
+      await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow('planning failed');
 
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ effortOverride: 'medium' }),
+      expect(mocks.updateStmt.run).not.toHaveBeenCalled();
+      expect(mocks.providerRuntimePreparation.materialize).not.toHaveBeenCalled();
+      expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
+      expect(mocks.eventsService.publish).not.toHaveBeenCalledWith(
+        'session.restored',
+        expect.anything(),
       );
     });
 
-    it('passes effortOverride null when neither agent nor config sets an effort', async () => {
-      const { pipeline } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ effortOverride: null }));
-    });
-
-    it('BEHAVIOR CHANGE: config.model set + raw --model in options → structured model wins', async () => {
+    it('restores the prior row without creating tmux when materialization fails', async () => {
       const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ modelOverride: null }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ model: 'opus', options: '--model sonnet' }),
-      ]);
+      mocks.providerRuntimePreparation.materialize.mockRejectedValue(
+        new Error('materialization failed'),
+      );
 
-      await pipeline.restore(sessionId, projectId);
+      await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow(
+        'materialization failed',
+      );
 
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ modelOverride: 'opus' }));
+      expect(mocks.updateStmt.run).toHaveBeenCalledTimes(2);
+      expect(mocks.updateStmt.run).toHaveBeenLastCalledWith(
+        'stopped',
+        '2025-01-01T01:00:00Z',
+        null,
+        expect.any(String),
+        sessionId,
+      );
+      expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
+      expect(mocks.eventsService.publish).not.toHaveBeenCalledWith(
+        'session.restored',
+        expect.anything(),
+      );
     });
   });
 
@@ -362,10 +170,6 @@ describe('SessionRestorePipeline', () => {
   });
 
   // Scenario 6: Restore typeCommand fails after bindStreaming
-  // NOTE: May FAIL until R2 lands — R2 needs to reorder bind before typeCommand.
-  // Current code: typeCommand is called BEFORE bindStreaming (line 187 vs 190).
-  // So if typeCommand fails, the bindStreaming compensator would NOT be in the
-  // cleanup stack yet — registry.dispose would NOT be called.
   describe('Scenario 6: typeCommand fails after bindStreaming', () => {
     it('registry disposed, tmux destroyed, status flipped back', async () => {
       const { pipeline, createTrackedPrepare, mocks } = createRestorePipelineHarness();
@@ -392,11 +196,41 @@ describe('SessionRestorePipeline', () => {
       );
       expect(statusFlipBacks.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('rolls back registry, tmux, provider runtime, durable row, then replay retention', async () => {
+      const { pipeline, createTrackedPrepare, mocks } = createRestorePipelineHarness();
+      const order: string[] = [];
+      const trackedPrepare = createTrackedPrepare();
+      mocks.sqliteMock.prepare.mockImplementation((sql: string) => {
+        const statement = trackedPrepare(sql);
+        const run = statement.run;
+        return {
+          ...statement,
+          run: jest.fn((...args: unknown[]) => {
+            if (args.includes('stopped')) order.push('durable');
+            return run(...args);
+          }),
+        };
+      });
+      mocks.streamService.cancelScheduledClear.mockReturnValue(60_000);
+      mocks.streamService.scheduleClear.mockImplementation(() => order.push('retention'));
+      mocks.terminalSessionRegistry.dispose.mockImplementation(() => order.push('registry'));
+      mocks.terminalIO.destroyExpectedSession.mockImplementation(async () => {
+        order.push('tmux');
+        return { outcome: 'destroyed' };
+      });
+      mocks.preparedProviderRuntime.rollback.mockImplementation(async () => {
+        order.push('provider');
+      });
+      mocks.terminalIO.typeCommand.mockRejectedValue(new Error('send-keys failed'));
+
+      await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow('send-keys failed');
+
+      expect(order).toEqual(['registry', 'tmux', 'provider', 'durable', 'retention']);
+    });
   });
 
   // Scenario 7: Call ordering — registry.create before typeCommand
-  // NOTE: May FAIL until R2 lands. Current code calls typeCommand at line 187
-  // then registry.create at line 190, which is the wrong order.
   describe('Scenario 7: call ordering — registry.create before typeCommand', () => {
     it('terminalSessionRegistry.create is called before terminalIO.typeCommand', async () => {
       const { pipeline, createTrackedPrepare, mocks } = createRestorePipelineHarness();
@@ -458,7 +292,7 @@ describe('SessionRestorePipeline', () => {
   // Restore MUST apply the same alt-screen policy as launch (the tmux window is
   // freshly created on restore too). This is GATE 1 of the two-gate invariant;
   // the PTY strip (GATE 2) reads the SAME adapter field — see
-  // sessions.service.spec.ts → usesAlternateScreenFor.
+  // session-terminal-runtime.service.spec.ts → getDescriptor.
   // Layer: pipeline unit test with the shared restore harness.
   describe('per-provider alternate-screen policy (restore matrix)', () => {
     it('enables alternate-screen for a full-screen TUI adapter (usesAlternateScreen: true)', async () => {
@@ -562,54 +396,23 @@ describe('SessionRestorePipeline', () => {
     });
   });
 
-  describe('provider env scope filtering', () => {
-    it('calls getProviderEnvForProject with provider.id and projectId', async () => {
-      const { pipeline, mocks } = createRestorePipelineHarness();
-
-      mocks.storage.getProviderEnvForProject.mockReturnValue({ FILTERED_KEY: 'filtered-value' });
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(mocks.storage.getProviderEnvForProject).toHaveBeenCalledWith(
-        'provider-1',
-        'project-1',
-      );
-    });
-
-    it('passes filtered env to resolveLaunchConfig instead of raw provider.env', async () => {
-      const { pipeline, mocks } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-
-      const filteredEnv = { SCOPED_KEY: 'scoped-value' };
-      mocks.storage.getProviderEnvForProject.mockReturnValue(filteredEnv);
-
-      await pipeline.restore(sessionId, projectId);
-
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ providerEnv: filteredEnv }),
-      );
-    });
-  });
-
   // Scenario 10: opencode restore — verifies the ses_ provider_session_id
-  // threads from the DB row through resolveLaunchConfig into the typed restore
+  // threads from the DB row through provider runtime planning into the typed restore
   // command, and that a missing id fails clearly (NO_PROVIDER_SESSION_ID) with
   // zero side effects — never a silent wrong-session attach. The opencode
   // `--session` arg-building itself is covered by opencode.adapter.spec.ts
   // (providerSessionIdRequiredForRestore = true); this block proves the
   // pipeline seam that hands that id to the adapter contract.
   describe('Scenario 10: opencode restore — ses_ threading & missing-id gating', () => {
-    it('passes the stored ses_ provider_session_id into resolveLaunchConfig with mode=restore', async () => {
-      const { pipeline, stoppedSessionRow } = createRestorePipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
+    it('passes the stored ses_ provider_session_id into planning with mode=restore', async () => {
+      const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
 
       const sesId = 'ses_opencode-abc-123';
       stoppedSessionRow.provider_session_id = sesId;
 
       await pipeline.restore(sessionId, projectId);
 
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'restore', providerSessionId: sesId }),
       );
     });
@@ -618,11 +421,11 @@ describe('SessionRestorePipeline', () => {
       const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
       const sesId = 'ses_opencode-abc-123';
       stoppedSessionRow.provider_session_id = sesId;
+      mocks.preparedProviderRuntime.config.commandArgs = ['test-provider', '--resume', sesId];
 
       await pipeline.restore(sessionId, projectId);
 
-      // resolve mock yields ['test-provider', '--resume', sesId]; the pipeline
-      // types exactly that argv — proving the correct ses_ reaches the command.
+      // The prepared runtime supplies the exact command, including the stored identity.
       expect(mocks.terminalIO.typeCommand).toHaveBeenCalledWith(
         expect.anything(),
         expect.arrayContaining([sesId]),
@@ -663,17 +466,15 @@ describe('SessionRestorePipeline', () => {
     it('throws ValidationError when restore argv omits the provider_session_id (no silent attach)', async () => {
       const { pipeline, stoppedSessionRow, mocks } = createRestorePipelineHarness();
       stoppedSessionRow.provider_session_id = 'ses_opencode-guard';
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      // Adapter/resolve contract violation: argv drops the provider session id.
-      resolveMock.mockImplementationOnce(() => ({
-        argv: ['opencode'],
-        commandArgs: ['opencode'],
-        env: null,
-      }));
+      mocks.providerRuntimePreparation.createPlan.mockRejectedValueOnce(
+        new ValidationError(
+          'Restore argv does not include provider session ID — adapter contract violation',
+        ),
+      );
 
       await expect(pipeline.restore(sessionId, projectId)).rejects.toThrow(ValidationError);
 
-      // The pipeline's own guard (L137-142) fires before flipToRunning — zero side effects.
+      // Planning rejects the adapter contract before flipToRunning — zero side effects.
       expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
       expect(mocks.terminalIO.typeCommand).not.toHaveBeenCalled();
       expect(mocks.updateStmt.run).not.toHaveBeenCalled();
@@ -687,8 +488,8 @@ describe('SessionRestorePipeline', () => {
   // Scenario 11: restore re-emits providerSessionId in the discovered event.
   // DB-source watchers (agy/opencode) SKIP without it (transcript-watcher.service.ts DB
   // branch), so a restored DB conversation would otherwise never receive live updates.
-  // This is the Phase-1 DoD "restore + live-update" seam. The watcher's own consumption of
-  // payload.providerSessionId is covered by transcript-watcher specs; this proves the
+  // The watcher's own consumption of payload.providerSessionId is covered by
+  // transcript-watcher specs; this proves the
   // restore pipeline threads the id into the event.
   describe('Scenario 11: discovered event re-emits providerSessionId (DB-source watcher fix)', () => {
     it('includes providerSessionId from the session row in session.transcript.discovered', async () => {

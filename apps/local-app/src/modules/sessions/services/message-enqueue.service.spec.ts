@@ -1,3 +1,7 @@
+/**
+ * Layer: backend unit. A narrow pool mock is the cheapest reliable boundary for
+ * verifying the delivery facade's typed argument and result adaptation.
+ */
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { SessionsDeliveryModule } from '../sessions-delivery.module';
@@ -75,6 +79,7 @@ describe('MessageEnqueueService', () => {
       preKeys: undefined,
       preDelayMs: undefined,
       senderAgentId: 'sender-1',
+      deliveryMode: undefined,
       immediate: false,
       projectId: 'project-1',
       agentName: 'Agent One',
@@ -87,6 +92,7 @@ describe('MessageEnqueueService', () => {
       preKeys: undefined,
       preDelayMs: undefined,
       senderAgentId: undefined,
+      deliveryMode: undefined,
       immediate: true,
       projectId: undefined,
       agentName: undefined,
@@ -112,6 +118,21 @@ describe('MessageEnqueueService', () => {
     ).resolves.toEqual([{ agentId: 'agent-1', status: 'delivered', logEntryId: 'log-1' }]);
 
     expect(pool.enqueue.mock.calls[0][2]).toMatchObject({ clientMessageId: 'client-1' });
+  });
+
+  it('threads deliveryMode through to the pool', async () => {
+    pool.enqueue.mockResolvedValueOnce({ status: 'queued', poolSize: 1 });
+
+    await service.enqueue([
+      {
+        agentId: 'agent-1',
+        text: 'hello',
+        source: 'subscriber',
+        deliveryMode: 'on_idle',
+      },
+    ]);
+
+    expect(pool.enqueue.mock.calls[0][2]).toMatchObject({ deliveryMode: 'on_idle' });
   });
 
   it('does not swallow enqueue rejections', async () => {

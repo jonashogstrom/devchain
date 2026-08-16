@@ -1,4 +1,5 @@
 import type { SQL } from 'drizzle-orm';
+import { and as andSync, count as countSync, eq as eqSync } from 'drizzle-orm';
 import type {
   ListResult,
   ListReviewCommentsOptions,
@@ -15,22 +16,15 @@ import type {
   UpdateReview,
   UpdateReviewComment,
 } from '../../models/domain.models';
-import { NotFoundError, OptimisticLockError } from '../../../../common/errors/error-types';
+import { NotFoundError } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
+import { reviewComments as reviewCommentsTable, reviews as reviewsTable } from '../../db/schema';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('ReviewStorageDelegate');
 
-export interface ReviewStorageDelegateDependencies {
-  getReview: (id: string) => Promise<Review>;
-  getReviewComment: (id: string) => Promise<ReviewComment>;
-}
-
 export class ReviewStorageDelegate extends BaseStorageDelegate {
-  constructor(
-    context: StorageDelegateContext,
-    private readonly dependencies: ReviewStorageDelegateDependencies,
-  ) {
+  constructor(context: StorageDelegateContext) {
     super(context);
   }
 
@@ -82,52 +76,66 @@ export class ReviewStorageDelegate extends BaseStorageDelegate {
   }
 
   async getReview(id: string): Promise<Review> {
-    const { reviews, reviewComments } = await import('../../db/schema');
-    const { eq, count } = await import('drizzle-orm');
+    return this.getReviewSync(id);
+  }
 
-    const result = await this.db.select().from(reviews).where(eq(reviews.id, id)).limit(1);
-    if (!result[0]) {
+  private getReviewSync(id: string): Review {
+    const row = this.db
+      .select()
+      .from(reviewsTable)
+      .where(eqSync(reviewsTable.id, id))
+      .limit(1)
+      .get();
+    if (!row) {
       throw new NotFoundError('Review', id);
     }
 
-    // Get comment count
-    const countResult = await this.db
-      .select({ count: count() })
-      .from(reviewComments)
-      .where(eq(reviewComments.reviewId, id));
+    const countResult = this.db
+      .select({ count: countSync() })
+      .from(reviewCommentsTable)
+      .where(eqSync(reviewCommentsTable.reviewId, id))
+      .get();
 
     return {
-      ...result[0],
-      commentCount: countResult[0]?.count ?? 0,
+      ...row,
+      commentCount: countResult?.count ?? 0,
     } as Review;
   }
 
   async updateReview(id: string, data: UpdateReview, expectedVersion: number): Promise<Review> {
-    const { reviews } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
-
-    const current = await this.dependencies.getReview(id);
-    if (current.version !== expectedVersion) {
-      throw new OptimisticLockError('Review', id, {
-        expectedVersion,
-        actualVersion: current.version,
-      });
-    }
-
-    const updateData: Record<string, unknown> = {};
-    if (data.title !== undefined) updateData.title = data.title;
-    if (data.description !== undefined) updateData.description = data.description;
-    if (data.status !== undefined) updateData.status = data.status;
-    if (data.headSha !== undefined) updateData.headSha = data.headSha;
-
-    await this.db
-      .update(reviews)
-      .set({ ...updateData, version: expectedVersion + 1, updatedAt: now })
-      .where(eq(reviews.id, id));
+    const result = await this.versionedMutationExecutor.execute({
+      resource: 'Review',
+      id,
+      expectedVersion,
+      loadCurrent: () => this.getReviewSync(id),
+      versionOf: (current) => current.version,
+      prepare: () => {
+        const updateData: Record<string, unknown> = {};
+        if (data.title !== undefined) updateData.title = data.title;
+        if (data.description !== undefined) updateData.description = data.description;
+        if (data.status !== undefined) updateData.status = data.status;
+        if (data.headSha !== undefined) updateData.headSha = data.headSha;
+        return {
+          kind: 'write' as const,
+          state: { updateData, now: new Date().toISOString() },
+        };
+      },
+      write: (context, state) =>
+        this.db
+          .update(reviewsTable)
+          .set({ ...state.updateData, version: context.nextVersion, updatedAt: state.now })
+          .where(
+            andSync(
+              eqSync(reviewsTable.id, id),
+              eqSync(reviewsTable.version, context.actualVersion),
+            ),
+          )
+          .run().changes,
+      loadResult: () => this.getReviewSync(id),
+    });
 
     logger.info({ reviewId: id }, 'Updated review');
-    return this.dependencies.getReview(id);
+    return result;
   }
 
   async deleteReview(id: string): Promise<void> {
@@ -265,19 +273,21 @@ export class ReviewStorageDelegate extends BaseStorageDelegate {
   }
 
   async getReviewComment(id: string): Promise<ReviewComment> {
-    const { reviewComments } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    return this.getReviewCommentSync(id);
+  }
 
-    const result = await this.db
+  private getReviewCommentSync(id: string): ReviewComment {
+    const row = this.db
       .select()
-      .from(reviewComments)
-      .where(eq(reviewComments.id, id))
-      .limit(1);
-    if (!result[0]) {
+      .from(reviewCommentsTable)
+      .where(eqSync(reviewCommentsTable.id, id))
+      .limit(1)
+      .get();
+    if (!row) {
       throw new NotFoundError('ReviewComment', id);
     }
 
-    return result[0] as ReviewComment;
+    return row as ReviewComment;
   }
 
   async updateReviewComment(
@@ -285,40 +295,48 @@ export class ReviewStorageDelegate extends BaseStorageDelegate {
     data: UpdateReviewComment,
     expectedVersion: number,
   ): Promise<ReviewComment> {
-    const { reviewComments } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
+    const result = await this.versionedMutationExecutor.execute({
+      resource: 'ReviewComment',
+      id,
+      expectedVersion,
+      loadCurrent: () => this.getReviewCommentSync(id),
+      versionOf: (current) => current.version,
+      prepare: (context) => {
+        const now = new Date().toISOString();
+        const updateData: Record<string, unknown> = {};
+        if (data.content !== undefined && data.content !== context.current.content) {
+          updateData.content = data.content;
+          updateData.editedAt = now;
+        }
+        if (data.status !== undefined && data.status !== context.current.status) {
+          updateData.status = data.status;
+        }
 
-    const current = await this.dependencies.getReviewComment(id);
-    if (current.version !== expectedVersion) {
-      throw new OptimisticLockError('ReviewComment', id, {
-        expectedVersion,
-        actualVersion: current.version,
-      });
-    }
+        if (Object.keys(updateData).length === 0) {
+          return { kind: 'no_change' as const, result: context.current };
+        }
+        return { kind: 'write' as const, state: { updateData, now } };
+      },
+      write: (context, state) =>
+        this.db
+          .update(reviewCommentsTable)
+          .set({ ...state.updateData, version: context.nextVersion, updatedAt: state.now })
+          .where(
+            andSync(
+              eqSync(reviewCommentsTable.id, id),
+              eqSync(reviewCommentsTable.version, context.actualVersion),
+            ),
+          )
+          .run().changes,
+      loadResult: () => this.getReviewCommentSync(id),
+    });
 
-    const updateData: Record<string, unknown> = {};
-    if (data.content !== undefined && data.content !== current.content) {
-      updateData.content = data.content;
-      updateData.editedAt = now;
-    }
-    if (data.status !== undefined && data.status !== current.status) {
-      updateData.status = data.status;
-    }
-
-    // No-op update: avoid bumping version/updatedAt when nothing changed.
-    if (Object.keys(updateData).length === 0) {
+    if (result.version === expectedVersion) {
       logger.info({ commentId: id }, 'Skipped review comment update (no changes)');
-      return current;
+    } else {
+      logger.info({ commentId: id }, 'Updated review comment');
     }
-
-    await this.db
-      .update(reviewComments)
-      .set({ ...updateData, version: expectedVersion + 1, updatedAt: now })
-      .where(eq(reviewComments.id, id));
-
-    logger.info({ commentId: id }, 'Updated review comment');
-    return this.dependencies.getReviewComment(id);
+    return result;
   }
 
   async listReviewComments(
@@ -415,7 +433,7 @@ export class ReviewStorageDelegate extends BaseStorageDelegate {
     const { reviewCommentTargets } = await import('../../db/schema');
 
     // Verify comment exists
-    await this.dependencies.getReviewComment(commentId);
+    this.getReviewCommentSync(commentId);
 
     const targets: ReviewCommentTarget[] = [];
     for (const agentId of agentIds) {

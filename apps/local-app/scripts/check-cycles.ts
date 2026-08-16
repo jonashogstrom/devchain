@@ -75,10 +75,6 @@ function parseAllowlist(): AllowlistEntry[] {
   if (!Array.isArray(parsed)) {
     throw new Error(`${ALLOWLIST_DISPLAY_PATH}: expected the top-level value to be an array`);
   }
-  if (parsed.length === 0) {
-    throw new Error(`${ALLOWLIST_DISPLAY_PATH}: expected at least one policy entry`);
-  }
-
   const firstIndexByPath = new Map<string, number>();
 
   return parsed.map((candidate, index) => {

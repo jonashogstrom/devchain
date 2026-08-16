@@ -1,6 +1,8 @@
 import type { ActionDefinition } from './action.interface';
 import { sendMessageAction } from './send-message.action';
 import { restartAgentAction } from './restart-agent.action';
+import { deleteAgentAction } from './delete-agent.action';
+import { terminateSessionAction } from './terminate-session.action';
 
 /**
  * Actions Registry
@@ -19,6 +21,8 @@ import { restartAgentAction } from './restart-agent.action';
 export const ACTIONS_REGISTRY: ActionDefinition[] = [
   sendMessageAction,
   restartAgentAction,
+  deleteAgentAction,
+  terminateSessionAction,
   // Future actions:
   // sendNotificationAction,
 ];

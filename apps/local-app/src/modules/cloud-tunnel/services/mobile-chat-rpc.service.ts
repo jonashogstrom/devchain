@@ -26,7 +26,9 @@ import {
 import { TeamsService } from '../../teams/services/teams.service';
 import { PendingAskUserQuestionService } from '../../hooks/services/pending-ask-user-question.service';
 import type { NormalizedAskUserQuestion } from '../../events/catalog/claude.hooks.ask_user_question.pending';
+import { E2eeTrustService } from '../../e2ee/services/e2ee-trust.service';
 import { LifecycleOperationTracker, type LifecycleOperation } from './lifecycle-operation-tracker';
+import type { RpcCryptoContext } from './tunnel-rpc-crypto.service';
 
 /** Per-agent item returned by `chat.listAgents` (serialized over the tunnel). */
 export interface MobileChatAgent {
@@ -203,11 +205,8 @@ function lifecycleErrorMessage(err: unknown): string {
  * dependencies out of the tunnel handler itself. The DI wiring goes through the
  * narrow facade modules only (no HTTP controllers, no `ChatModule`).
  *
- * Registration recipe for each new `chat.*` method:
- *   (a) allow-list it in `devchain-bridge` `relay/allowed-methods.ts`,
- *   (b) add a Zod schema to `METHOD_SCHEMAS` + a `handlers` entry in
- *       `tunnel-handler.service.ts` delegating to a method on this service,
- *   (c) add a mobile `bridge-client.ts` wrapper.
+ * Method membership and wire schemas come from the canonical generated contract;
+ * `TunnelHandlerService` retains the exhaustive, generated-typed implementation map.
  *
  * Errors thrown from these methods are translated to JSON-RPC via
  * `toJsonRpcError`, preserving the domain code under `error.data.code`.
@@ -225,6 +224,7 @@ export class MobileChatRpcService {
     private readonly operationTracker: LifecycleOperationTracker,
     private readonly teamsService: TeamsService,
     private readonly pendingAskUserQuestion: PendingAskUserQuestionService,
+    private readonly e2eeTrust: E2eeTrustService,
   ) {}
 
   /**
@@ -563,7 +563,10 @@ export class MobileChatRpcService {
    * recipient resolver is passthrough and downstream `getActiveSession` /
    * `enqueue` key on `agentId`, matching the canonical MCP send-to-tmux path.
    */
-  async sendMessage(params: Record<string, unknown>): Promise<SendMessageResult> {
+  async sendMessage(
+    params: Record<string, unknown>,
+    cryptoCtx?: RpcCryptoContext,
+  ): Promise<SendMessageResult> {
     const agentId = params['agentId'] as string;
     const projectId = params['projectId'] as string;
     const text = params['text'] as string;
@@ -571,7 +574,6 @@ export class MobileChatRpcService {
     // with the same key dedups instead of double-delivering. Absent for older
     // clients (additive-optional); echoed back so mobile can correlate.
     const clientMessageId = params['clientMessageId'] as string | undefined;
-
     // Ownership: the agent must belong to the requested project.
     const agent = await this.storage.getAgent(agentId);
     if (agent.projectId !== projectId) {
@@ -593,6 +595,10 @@ export class MobileChatRpcService {
       );
     }
 
+    const effectiveSenderName = cryptoCtx?.senderKid
+      ? this.e2eeTrust.resolveEffectiveDeviceName(cryptoCtx.senderKid)
+      : undefined;
+
     // If this send is answering an open AskUserQuestion picker, dismiss it with
     // ESC before the paste. A bracketed paste + Enter alone does NOT cancel the
     // picker — Enter just selects the highlighted option — so the typed answer
@@ -608,14 +614,12 @@ export class MobileChatRpcService {
         body: text,
         source: 'mobile',
         projectId,
-        senderName: MOBILE_SENDER_NAME,
+        senderName: effectiveSenderName ?? MOBILE_SENDER_NAME,
         senderType: 'user',
         clientMessageId,
-        // Plain framing: a human user's turn lands in the agent's tmux as raw
-        // text — no agent-oriented banner (devchain_send_message can't address a
-        // human and would pollute the agent's context). The formatter default
-        // stays 'agent-banner'; mobile opts into 'plain' explicitly here.
-        framing: 'plain',
+        // A paired-device footer is selected only from decrypt-authenticated
+        // device metadata. Plaintext and unresolved senders retain the raw body.
+        framing: effectiveSenderName !== undefined ? 'sender-footer' : 'plain',
       },
       {
         immediate: true,

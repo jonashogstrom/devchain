@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventsCoreModule } from '../events/events-core.module';
-import { SessionsModule } from '../sessions/sessions.module';
+import { SessionTerminalRuntimeModule } from '../session-terminal-runtime/session-terminal-runtime.module';
 import { ProcessExecutorModule } from './services/process-executor/process-executor.module';
 import { GuestDeliveryService } from './services/guest-delivery.service';
 import { TerminalDeliveryFacade } from './services/terminal-delivery-facade.service';
@@ -102,7 +102,6 @@ describe('TerminalDeliveryModule shape', () => {
     expect(imports).not.toEqual(
       expect.arrayContaining([
         TerminalModule,
-        SessionsModule,
         PtyService,
         TerminalGateway,
         TerminalSessionRegistry,
@@ -125,11 +124,17 @@ describe('TerminalDeliveryModule shape', () => {
   });
 
   it('TerminalModule does not provide TerminalIOService directly', () => {
+    const imports =
+      (Reflect.getMetadata(MODULE_METADATA.IMPORTS, TerminalModule) as unknown[]) ?? [];
     const providers =
       (Reflect.getMetadata(MODULE_METADATA.PROVIDERS, TerminalModule) as unknown[]) ?? [];
     const exports =
       (Reflect.getMetadata(MODULE_METADATA.EXPORTS, TerminalModule) as unknown[]) ?? [];
 
+    expect(imports).toEqual(expect.arrayContaining([SessionTerminalRuntimeModule]));
+    expect(
+      imports.map((entry) => (typeof entry === 'function' ? entry.name : String(entry))),
+    ).not.toContain('SessionsModule');
     expect(providers).not.toEqual(expect.arrayContaining([TerminalIOService]));
     expect(exports).toEqual(expect.arrayContaining([TerminalDeliveryModule]));
   });

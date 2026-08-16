@@ -1,7 +1,7 @@
 import type {
   AgentOverridePayload,
   SetupPreviewResponse,
-} from '@/ui/pages/projects/lib/project-api';
+} from '@/ui/pages/projects/lib/project-contracts';
 
 /**
  * Pure state + emission logic for wizard Step 2 (agent configuration). No React, no I/O — every

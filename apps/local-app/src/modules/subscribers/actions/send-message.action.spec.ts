@@ -44,6 +44,7 @@ describe('SendMessageAction', () => {
       sessionCoordinator: {} as ActionContext['sessionCoordinator'],
       amd: mockAmd as unknown as ActionContext['amd'],
       storage: mockStorage as unknown as ActionContext['storage'],
+      teamsService: {} as ActionContext['teamsService'],
       sessionId: 'session-123',
       agentId: 'agent-456',
       projectId: 'project-789',
@@ -123,13 +124,20 @@ describe('SendMessageAction', () => {
       expect(textInput?.allowedSources).toBeUndefined();
     });
 
-    it('should have immediate checkbox input', () => {
-      const immediateInput = sendMessageAction.inputs.find((i) => i.name === 'immediate');
-      expect(immediateInput).toBeDefined();
-      expect(immediateInput?.type).toBe('boolean');
-      expect(immediateInput?.required).toBe(false);
-      expect(immediateInput?.defaultValue).toBe(false);
-      expect(immediateInput?.allowedSources).toEqual(['custom']);
+    it('should expose the custom-only delivery mode select', () => {
+      const deliveryModeInput = sendMessageAction.inputs.find((i) => i.name === 'deliveryMode');
+      expect(deliveryModeInput).toMatchObject({
+        type: 'select',
+        required: false,
+        defaultValue: 'default',
+        allowedSources: ['custom'],
+        options: [
+          { value: 'default', label: 'Default (queue)' },
+          { value: 'immediate', label: 'Deliver Immediately' },
+          { value: 'on_idle', label: 'Delivery on Idle' },
+        ],
+      });
+      expect(sendMessageAction.inputs.find((i) => i.name === 'immediate')).toBeUndefined();
     });
   });
 
@@ -218,12 +226,12 @@ describe('SendMessageAction', () => {
         },
         {
           submitKeys: ['Enter'],
-          immediate: false,
+          deliveryMode: 'default',
         },
       );
       expect(result.data).toMatchObject({
         status: 'queued',
-        immediate: false,
+        deliveryMode: 'default',
       });
     });
 
@@ -242,17 +250,17 @@ describe('SendMessageAction', () => {
         }),
         {
           submitKeys: [],
-          immediate: false,
+          deliveryMode: 'default',
         },
       );
     });
 
-    it('should deliver immediately when immediate flag is true', async () => {
+    it('should honor an explicit delivery mode', async () => {
       mockAmd.deliver.mockResolvedValue({
-        status: 'delivered',
-        results: [{ agentId: 'agent-456', status: 'delivered' }],
+        status: 'queued',
+        results: [{ agentId: 'agent-456', status: 'queued' }],
       });
-      const inputs = { text: 'Urgent command', immediate: true };
+      const inputs = { text: 'Wait for idle', deliveryMode: 'on_idle' };
 
       const result = await sendMessageAction.execute(mockContext, inputs);
 
@@ -260,19 +268,67 @@ describe('SendMessageAction', () => {
       expect(mockAmd.deliver).toHaveBeenCalledWith(
         ['agent-456'],
         expect.objectContaining({
-          body: 'Urgent command',
+          body: 'Wait for idle',
           source: 'subscriber.action',
           projectId: 'project-789',
         }),
         {
           submitKeys: ['Enter'],
-          immediate: true,
+          deliveryMode: 'on_idle',
         },
       );
       expect(result.data).toMatchObject({
-        status: 'delivered',
+        status: 'queued',
+        deliveryMode: 'on_idle',
+      });
+    });
+
+    it.each([true, 'true'])('converts the legacy immediate value %p', async (immediate) => {
+      await sendMessageAction.execute(mockContext, { text: 'Urgent command', immediate });
+
+      expect(mockAmd.deliver).toHaveBeenCalledWith(['agent-456'], expect.any(Object), {
+        submitKeys: ['Enter'],
+        deliveryMode: 'immediate',
+      });
+    });
+
+    it.each([false, 'false', undefined])(
+      'converts the legacy non-immediate value %p to default',
+      async (immediate) => {
+        await sendMessageAction.execute(mockContext, { text: 'Normal message', immediate });
+
+        expect(mockAmd.deliver).toHaveBeenCalledWith(['agent-456'], expect.any(Object), {
+          submitKeys: ['Enter'],
+          deliveryMode: 'default',
+        });
+      },
+    );
+
+    it('prefers a valid explicit delivery mode over a legacy immediate value', async () => {
+      await sendMessageAction.execute(mockContext, {
+        text: 'Wait for idle',
+        deliveryMode: 'on_idle',
         immediate: true,
       });
+
+      expect(mockAmd.deliver).toHaveBeenCalledWith(['agent-456'], expect.any(Object), {
+        submitKeys: ['Enter'],
+        deliveryMode: 'on_idle',
+      });
+    });
+
+    it('rejects an unsupported explicit delivery mode', async () => {
+      const result = await sendMessageAction.execute(mockContext, {
+        text: 'Invalid mode',
+        deliveryMode: 'eventually',
+        immediate: true,
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'Unsupported delivery mode: eventually',
+      });
+      expect(mockAmd.deliver).not.toHaveBeenCalled();
     });
 
     it('should return error when text is empty', async () => {
@@ -320,6 +376,23 @@ describe('SendMessageAction', () => {
       expect(result.error).toContain('No active session');
     });
 
+    it('surfaces the disclosure-safe backend result when the idle lane is full', async () => {
+      mockAmd.deliver.mockResolvedValue({
+        status: 'failed',
+        results: [{ agentId: 'agent-456', status: 'failed', error: 'DELIVERY_FAILED' }],
+      });
+
+      const result = await sendMessageAction.execute(mockContext, {
+        text: 'Wait for idle',
+        deliveryMode: 'on_idle',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'Failed to send message: DELIVERY_FAILED',
+      });
+    });
+
     it('should handle delivery throwing error', async () => {
       mockAmd.deliver.mockRejectedValue(new Error('Connection failed'));
       const inputs = { text: 'Test message' };
@@ -332,7 +405,7 @@ describe('SendMessageAction', () => {
     });
 
     it('should return success data with correct fields', async () => {
-      const inputs = { text: 'Test message', submitKey: 'Enter', immediate: false };
+      const inputs = { text: 'Test message', submitKey: 'Enter', deliveryMode: 'default' };
 
       const result = await sendMessageAction.execute(mockContext, inputs);
 
@@ -343,7 +416,7 @@ describe('SendMessageAction', () => {
         resolvedBy: 'event',
         textLength: 12,
         submitKey: 'Enter',
-        immediate: false,
+        deliveryMode: 'default',
         status: 'queued',
       });
     });
@@ -368,7 +441,7 @@ describe('SendMessageAction', () => {
         status: 'delivered',
         results: [{ agentId: 'agent-456', status: 'delivered' }],
       });
-      const inputs = { text: 'Test message', immediate: true };
+      const inputs = { text: 'Test message', deliveryMode: 'immediate' };
 
       await sendMessageAction.execute(mockContext, inputs);
 

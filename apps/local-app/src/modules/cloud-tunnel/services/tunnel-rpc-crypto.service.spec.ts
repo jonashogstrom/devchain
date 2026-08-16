@@ -14,6 +14,7 @@ import {
   type JsonRpcResponseLike,
   type SealedRpcResult,
 } from './tunnel-rpc-crypto.service';
+import { TunnelHandlerService } from './tunnel-handler.service';
 
 // Test layer: module-unit. The crypto is the REAL shared `CryptoEnvelopeService` /
 // X25519 ECDH (resolved via the jest shim), with the keypair + device-store deps faked.
@@ -158,6 +159,156 @@ describe('TunnelRpcCryptoService', () => {
       ok: false,
       error: { code: -32004, message: 'Forbidden', data: { code: 'CROSS_PROJECT' } },
     });
+  });
+
+  it('keeps an invalid producer result sanitized and sealed away from the bridge', async () => {
+    const { svc } = makeService();
+    const method = 'terminal.viewport.unsubscribe';
+    const mobileSvc = mobileEnvelopeService();
+    const sealedParams = await mobileSvc.seal({ subscriptionId: 'vp-1' }, reqCtx(method));
+    const privateValue = 'producer-private-value';
+    const viewport = { unsubscribe: jest.fn().mockReturnValue({ ok: privateValue }) };
+    const handler = new TunnelHandlerService({}, {} as never, {} as never, viewport as never);
+
+    const resp = await svc.handle(
+      { jsonrpc: '2.0', id: 'invalid-sealed-result', method, params: sealedParams },
+      INSTANCE_ID,
+      (plain, cryptoCtx) =>
+        handler.handle(
+          {
+            ...plain,
+            params:
+              plain.params && typeof plain.params === 'object' && !Array.isArray(plain.params)
+                ? (plain.params as Record<string, unknown>)
+                : {},
+          },
+          cryptoCtx,
+        ),
+    );
+
+    expect(resp.error).toBeUndefined();
+    expect(JSON.stringify(resp)).not.toContain(privateValue);
+    const opened = (await mobileSvc.open(resp.result, resCtx(method))) as SealedRpcResult;
+    expect(opened).toEqual({
+      ok: false,
+      error: { code: -32603, message: 'Internal error' },
+    });
+  });
+
+  it('produces identical wire transcript fields on plaintext and sealed paths', async () => {
+    const { svc } = makeService();
+    const method = 'chat.getTranscriptTail';
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const projectId = '22222222-2222-4222-8222-222222222222';
+    const iso = '2026-08-11T08:00:00.000Z';
+    const message = {
+      id: 'message-1',
+      parentId: null,
+      role: 'assistant',
+      timestamp: new Date(iso),
+      content: [{ type: 'text', text: 'Done' }],
+      toolCalls: [],
+      toolResults: [],
+      isMeta: false,
+      isSidechain: false,
+    };
+    const step = {
+      id: 'step-1',
+      type: 'output',
+      startTime: new Date(iso),
+      durationMs: 1,
+      content: { outputText: 'Done' },
+      context: 'main',
+    };
+    const chunk = {
+      id: 'chunk-1',
+      type: 'ai',
+      startTime: new Date(iso),
+      endTime: new Date(iso),
+      messages: [message],
+      metrics: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 0,
+        messageCount: 1,
+        durationMs: 1,
+        costUsd: 0,
+      },
+      semanticSteps: [step],
+      turns: [
+        {
+          id: 'turn-1',
+          assistantMessageId: message.id,
+          timestamp: new Date(iso),
+          steps: [step],
+          summary: { thinkingCount: 0, toolCallCount: 0, subagentCount: 0, outputCount: 1 },
+          durationMs: 1,
+        },
+      ],
+    };
+    const metrics = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      totalContextConsumption: 0,
+      compactionCount: 0,
+      phaseBreakdowns: [],
+      visibleContextTokens: 0,
+      totalContextTokens: 0,
+      contextWindowTokens: 200_000,
+      costUsd: 0,
+      primaryModel: 'codex',
+      durationMs: 1,
+      messageCount: 1,
+      isOngoing: false,
+    };
+    const mobileChat = {
+      getTranscriptTail: jest.fn().mockResolvedValue({
+        kind: 'delta',
+        cursor: 'cursor-2',
+        replaceFromChunkId: chunk.id,
+        replaceFromChunkIndex: 0,
+        deltaChunks: [chunk],
+        deltaMessages: [message],
+        metrics,
+        totalChunkCount: 1,
+        totalMessageCount: 1,
+      }),
+    };
+    const handler = new TunnelHandlerService({}, mobileChat as never, {} as never, {} as never);
+    const params = { sessionId, projectId, since: 'cursor-1' };
+
+    const plaintext = await handler.handle({
+      jsonrpc: '2.0',
+      id: 'plain-transcript',
+      method,
+      params,
+    });
+    const mobileSvc = mobileEnvelopeService();
+    const sealedParams = await mobileSvc.seal(params, reqCtx(method));
+    const sealed = await svc.handle(
+      { jsonrpc: '2.0', id: 'sealed-transcript', method, params: sealedParams },
+      INSTANCE_ID,
+      (plain, cryptoCtx) =>
+        handler.handle(
+          {
+            ...plain,
+            params: plain.params as Record<string, unknown>,
+          },
+          cryptoCtx,
+        ),
+    );
+    const opened = (await mobileSvc.open(sealed.result, resCtx(method))) as SealedRpcResult;
+
+    expect(opened).toEqual({ ok: true, data: plaintext.result });
+    const wireTurn = (opened as { ok: true; data: { deltaChunks: Array<{ turns: unknown[] }> } })
+      .data.deltaChunks[0].turns[0] as { timestamp: string; steps: Array<{ startTime: string }> };
+    expect(wireTurn.timestamp).toBe(iso);
+    expect(wireTurn.steps[0].startTime).toBe(iso);
   });
 
   it('fails closed (no dispatch) when no device is paired for the envelope kid', async () => {

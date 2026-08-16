@@ -48,6 +48,7 @@ import { ProjectCommunicationService } from './project-communication.service';
 
 const SOURCE_ID = '11111111-1111-4111-8111-111111111111';
 const TARGET_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const WORKSPACE_ID = '10000000-0000-4000-8000-000000000001';
 const CALLER_ID = 'source-owner';
 const TARGET_OWNER_ID = 'target-owner';
 const RAW_SENTINEL = 'tmux failed at /tmp/tmux-1000/default provider=example';
@@ -66,11 +67,13 @@ describe('project delivery failure redaction workflow', () => {
 
   const sourceProject = createMockProject({
     id: SOURCE_ID,
+    workspaceId: WORKSPACE_ID,
     name: 'Source Project',
     rootPath: '/private/source',
   });
   const targetProject = createMockProject({
     id: TARGET_ID,
+    workspaceId: WORKSPACE_ID,
     name: 'Target Project',
     rootPath: '/private/target',
   });

@@ -15,7 +15,7 @@ import { cn } from '@/ui/lib/utils';
 import { getProviderIconDataUri } from '@/ui/lib/providers';
 import { shortModelName } from '@/ui/lib/model-utils';
 import { providerModelQueryKeys } from '@/ui/lib/provider-model-query-keys';
-import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-contracts';
 import {
   agentKey,
   availableConfigs,

@@ -41,17 +41,8 @@ function buildProps(overrides?: Partial<AgentCardProps>): AgentCardProps {
     profile: baseProfile,
     providerName: 'claude',
     providersById,
-    presence: undefined,
-    isLastUsed: false,
-    isLaunching: false,
     isUpdating: false,
     isDeleting: false,
-    controlsDisabled: false,
-    isTerminating: false,
-    isRestarting: false,
-    onLaunch: jest.fn(),
-    onRestart: jest.fn(),
-    onTerminate: jest.fn(),
     onEdit: jest.fn(),
     onDelete: jest.fn(),
     ...overrides,
@@ -84,18 +75,6 @@ describe('AgentCard', () => {
     render(<AgentCard {...buildProps({ profile: undefined })} />);
 
     expect(screen.getByText('Unknown Profile')).toBeInTheDocument();
-  });
-
-  it('shows "Last launched" badge when isLastUsed is true', () => {
-    render(<AgentCard {...buildProps({ isLastUsed: true })} />);
-
-    expect(screen.getByText('Last launched')).toBeInTheDocument();
-  });
-
-  it('does not show "Last launched" badge when isLastUsed is false', () => {
-    render(<AgentCard {...buildProps({ isLastUsed: false })} />);
-
-    expect(screen.queryByText('Last launched')).not.toBeInTheDocument();
   });
 
   it('shows an accessible Project owner badge for the owner agent', () => {
@@ -163,120 +142,15 @@ describe('AgentCard', () => {
     expect(screen.getByText('custom-config [env]')).toBeInTheDocument();
   });
 
-  // ---- Session controls: Launch ----
+  // ---- Session lifecycle controls are Chat-only ----
 
-  it('shows Launch Session button when no active session', () => {
-    render(<AgentCard {...buildProps({ presence: undefined })} />);
+  it('renders no session lifecycle controls or last-launched badge', () => {
+    render(<AgentCard {...buildProps()} />);
 
-    expect(screen.getByRole('button', { name: /launch session/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /launch session/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /restart session/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /terminate session/i })).not.toBeInTheDocument();
-  });
-
-  it('calls onLaunch with agent id when Launch clicked', async () => {
-    const user = userEvent.setup();
-    const onLaunch = jest.fn();
-    render(<AgentCard {...buildProps({ onLaunch })} />);
-
-    await user.click(screen.getByRole('button', { name: /launch session/i }));
-
-    expect(onLaunch).toHaveBeenCalledWith('agent-1');
-  });
-
-  it('disables Launch button when controlsDisabled is true', () => {
-    render(<AgentCard {...buildProps({ controlsDisabled: true })} />);
-
-    expect(screen.getByRole('button', { name: /launch session/i })).toBeDisabled();
-  });
-
-  it('shows Launching spinner when isLaunching is true', () => {
-    render(<AgentCard {...buildProps({ isLaunching: true })} />);
-
-    expect(screen.getByText('Launching…')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /launch session/i })).toBeDisabled();
-  });
-
-  // ---- Session controls: Restart & Terminate ----
-
-  it('shows Restart and Terminate buttons when agent has active session', () => {
-    render(<AgentCard {...buildProps({ presence: { online: true, sessionId: 'sess-1' } })} />);
-
-    expect(screen.getByRole('button', { name: /restart session/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /terminate session/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /launch session/i })).not.toBeInTheDocument();
-  });
-
-  it('calls onRestart with agent id and session id when Restart clicked', async () => {
-    const user = userEvent.setup();
-    const onRestart = jest.fn();
-    render(
-      <AgentCard
-        {...buildProps({
-          presence: { online: true, sessionId: 'sess-1' },
-          onRestart,
-        })}
-      />,
-    );
-
-    await user.click(screen.getByRole('button', { name: /restart session/i }));
-
-    expect(onRestart).toHaveBeenCalledWith('agent-1', 'sess-1');
-  });
-
-  it('calls onTerminate with agent id and session id when Terminate clicked', async () => {
-    const user = userEvent.setup();
-    const onTerminate = jest.fn();
-    render(
-      <AgentCard
-        {...buildProps({
-          presence: { online: true, sessionId: 'sess-1' },
-          onTerminate,
-        })}
-      />,
-    );
-
-    await user.click(screen.getByRole('button', { name: /terminate session/i }));
-
-    expect(onTerminate).toHaveBeenCalledWith('agent-1', 'sess-1');
-  });
-
-  it('shows Restarting spinner when isRestarting is true', () => {
-    render(
-      <AgentCard
-        {...buildProps({
-          presence: { online: true, sessionId: 'sess-1' },
-          isRestarting: true,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Restarting…')).toBeInTheDocument();
-  });
-
-  it('shows Terminating spinner when isTerminating is true', () => {
-    render(
-      <AgentCard
-        {...buildProps({
-          presence: { online: true, sessionId: 'sess-1' },
-          isTerminating: true,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Terminating…')).toBeInTheDocument();
-  });
-
-  it('disables Restart when anyBusy (isLaunching || isTerminating || isRestarting)', () => {
-    render(
-      <AgentCard
-        {...buildProps({
-          presence: { online: true, sessionId: 'sess-1' },
-          isTerminating: true,
-        })}
-      />,
-    );
-
-    expect(screen.getByRole('button', { name: /restart session/i })).toBeDisabled();
+    expect(screen.queryByText('Last launched')).not.toBeInTheDocument();
   });
 
   // ---- Edit and Delete ----

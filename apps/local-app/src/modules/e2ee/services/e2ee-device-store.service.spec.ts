@@ -2,13 +2,16 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { DB_CONNECTION } from '../../storage/db/db.provider';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { E2eeDeviceStoreService, type E2eePeerDevice } from './e2ee-device-store.service';
+import { PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT } from '../events/paired-device-workspace-access.events';
 
 // Test layer: module-unit with REAL :memory: SQLite. The directory is JSON-serialized
 // to the settings table; a real DB proves the add/get/revoke persistence + reset paths.
 describe('E2eeDeviceStoreService', () => {
   let service: E2eeDeviceStoreService;
   let sqlite: Database.Database;
+  let eventEmitter: { emit: jest.Mock };
 
   beforeEach(async () => {
     sqlite = new Database(':memory:');
@@ -19,12 +22,22 @@ describe('E2eeDeviceStoreService', () => {
         value TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE project_workspaces (id TEXT PRIMARY KEY);
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
+    eventEmitter = { emit: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [E2eeDeviceStoreService, { provide: DB_CONNECTION, useValue: db }],
+      providers: [
+        E2eeDeviceStoreService,
+        { provide: DB_CONNECTION, useValue: db },
+        { provide: EventEmitter2, useValue: eventEmitter },
+      ],
     }).compile();
 
     service = module.get<E2eeDeviceStoreService>(E2eeDeviceStoreService);
@@ -80,6 +93,63 @@ describe('E2eeDeviceStoreService', () => {
     expect(service.revoke('d'.repeat(32))).toBe(true);
     expect(service.get('d'.repeat(32))).toBeNull();
     expect(service.revoke('never')).toBe(false);
+    expect(eventEmitter.emit).toHaveBeenCalledWith(PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT, {
+      deviceKid: 'd'.repeat(32),
+      reason: 'device-revoked',
+    });
+  });
+
+  it('clears orphan grants on first adoption but preserves grants on repeated same-kid adoption', () => {
+    const kid = 'g'.repeat(32);
+    sqlite.prepare('INSERT INTO project_workspaces (id) VALUES (?)').run('w1');
+    const insertGrant = sqlite.prepare(
+      'INSERT INTO paired_device_workspace_grants (device_kid, workspace_id) VALUES (?, ?)',
+    );
+    insertGrant.run(kid, 'w1');
+
+    service.add(sample(kid));
+    expect(
+      sqlite.prepare('SELECT * FROM paired_device_workspace_grants WHERE device_kid = ?').all(kid),
+    ).toEqual([]);
+
+    insertGrant.run(kid, 'w1');
+    service.add(sample(kid));
+    expect(
+      sqlite
+        .prepare('SELECT workspace_id FROM paired_device_workspace_grants WHERE device_kid = ?')
+        .all(kid),
+    ).toEqual([{ workspace_id: 'w1' }]);
+  });
+
+  it('deletes grants on revoke and never transfers them through installId supersession', () => {
+    const oldKid = 'h'.repeat(32);
+    const newKid = 'i'.repeat(32);
+    const installId = '11111111-1111-4111-8111-111111111111';
+    sqlite.prepare('INSERT INTO project_workspaces (id) VALUES (?)').run('w1');
+    service.add({ ...sample(oldKid), installId });
+    sqlite
+      .prepare(
+        'INSERT INTO paired_device_workspace_grants (device_kid, workspace_id) VALUES (?, ?)',
+      )
+      .run(oldKid, 'w1');
+
+    service.add({ ...sample(newKid), installId });
+
+    expect(service.get(oldKid)).toBeNull();
+    expect(
+      sqlite.prepare('SELECT * FROM paired_device_workspace_grants ORDER BY device_kid').all(),
+    ).toEqual([]);
+    expect(eventEmitter.emit).toHaveBeenCalledWith(PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT, {
+      deviceKid: oldKid,
+      reason: 'device-revoked',
+    });
+    sqlite
+      .prepare(
+        'INSERT INTO paired_device_workspace_grants (device_kid, workspace_id) VALUES (?, ?)',
+      )
+      .run(newKid, 'w1');
+    expect(service.revoke(newKid)).toBe(true);
+    expect(sqlite.prepare('SELECT * FROM paired_device_workspace_grants').all()).toEqual([]);
   });
 
   it('does not share a namespace with the keypair record', () => {
@@ -105,8 +175,71 @@ describe('E2eeDeviceStoreService', () => {
     expect(service.list()).toHaveLength(1);
   });
 
+  describe('local aliases', () => {
+    const INSTALL = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const pub = (fill: number) => Buffer.from(new Uint8Array(32).fill(fill)).toString('base64');
+
+    it('persists an alias across restart and clears it without changing the reported label', () => {
+      const kid = 'j'.repeat(32);
+      service.add({ ...sample(kid), label: 'Reported phone' });
+      expect(service.setLocalAlias(kid, 'My phone')).toMatchObject({
+        label: 'Reported phone',
+        localAlias: 'My phone',
+      });
+      expect(new E2eeDeviceStoreService(drizzle(sqlite)).get(kid)?.localAlias).toBe('My phone');
+
+      expect(service.setLocalAlias(kid, null)).toMatchObject({ label: 'Reported phone' });
+      expect(service.get(kid)).not.toHaveProperty('localAlias');
+      expect(service.setLocalAlias('missing', 'Alias')).toBeNull();
+    });
+
+    it('keeps the alias while same-kid add/reconcile refresh the reported label', () => {
+      const kid = 'k'.repeat(32);
+      service.add({ kid, publicKeyB64: pub(1), label: 'Old label' });
+      service.setLocalAlias(kid, 'Desk phone');
+
+      const readded = service.add({ kid, publicKeyB64: pub(1), label: 'Fresh label' });
+      expect(readded).toMatchObject({ label: 'Fresh label', localAlias: 'Desk phone' });
+
+      const reconciled = service.reconcile({ kid, publicKeyB64: pub(1), label: 'Newest label' });
+      expect(reconciled).toMatchObject({ label: 'Newest label', localAlias: 'Desk phone' });
+    });
+
+    it('keeps the alias when trust is verified', () => {
+      const kid = 'l'.repeat(32);
+      service.reconcile({ kid, publicKeyB64: pub(2), label: 'Phone' });
+      service.setLocalAlias(kid, 'Personal');
+
+      expect(service.markVerified(kid)).toMatchObject({
+        trust: 'verified',
+        label: 'Phone',
+        localAlias: 'Personal',
+      });
+    });
+
+    it('removes alias residue on revoke and install-id supersession', () => {
+      const revokedKid = 'm'.repeat(32);
+      service.add({ kid: revokedKid, publicKeyB64: pub(3) });
+      service.setLocalAlias(revokedKid, 'Revoked alias');
+      service.revoke(revokedKid);
+      service.add({ kid: revokedKid, publicKeyB64: pub(3) });
+      expect(service.get(revokedKid)?.localAlias).toBeUndefined();
+
+      const oldKid = 'n'.repeat(32);
+      const newKid = 'o'.repeat(32);
+      service.add({ kid: oldKid, publicKeyB64: pub(4), installId: INSTALL });
+      service.setLocalAlias(oldKid, 'Old alias');
+      service.add(
+        { kid: newKid, publicKeyB64: pub(5), installId: INSTALL },
+        { evictVerified: true },
+      );
+      expect(service.get(oldKid)).toBeNull();
+      expect(service.get(newKid)?.localAlias).toBeUndefined();
+    });
+  });
+
   describe('idempotent re-pair (Task:7)', () => {
-    it('overwrites the prior key in place on re-pair (same kid, fresh key) — no duplicate', () => {
+    it('overwrites a same-kid record in place on explicit re-pair — no duplicate', () => {
       const kid = 'p'.repeat(32);
       service.add({
         kid,
@@ -115,7 +248,7 @@ describe('E2eeDeviceStoreService', () => {
         verifiedVia: 'qr',
         verifiedAt: '2026-06-01T00:00:00.000Z',
       });
-      // Re-pair after a mobile logout/re-login: a fresh keypair under the same device kid.
+      // Store-level replacement for an explicitly re-paired record with the same lookup key.
       const repaired = service.add({
         kid,
         publicKeyB64: Buffer.from(new Uint8Array(32).fill(2)).toString('base64'),
@@ -409,6 +542,120 @@ describe('E2eeDeviceStoreService', () => {
       );
       expect(selectPeerKid()).toBe(live.kid); // most-recently-added usable == the live re-login key
       expect(service.list().filter((d) => d.installId === INSTALL_A)).toHaveLength(1); // no stale same-install row
+    });
+  });
+
+  describe('same-kid reconnect policy continuity (paired-kid-continuity)', () => {
+    const INSTALL = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const pub = (fill: number) => Buffer.from(new Uint8Array(32).fill(fill)).toString('base64');
+
+    const seedMultiWorkspaceGrants = (kid: string): void => {
+      sqlite.exec("INSERT INTO project_workspaces (id) VALUES ('w1'), ('w2')");
+      const insertGrant = sqlite.prepare(
+        'INSERT INTO paired_device_workspace_grants (device_kid, workspace_id) VALUES (?, ?)',
+      );
+      insertGrant.run(kid, 'w1');
+      insertGrant.run(kid, 'w2');
+    };
+
+    const grantsFor = (kid: string): string[] =>
+      (
+        sqlite
+          .prepare(
+            'SELECT workspace_id FROM paired_device_workspace_grants WHERE device_kid = ? ORDER BY workspace_id',
+          )
+          .all(kid) as Array<{ workspace_id: string }>
+      ).map((row) => row.workspace_id);
+
+    it('same-kid reconcile (email seam, unchanged key) preserves verified trust, alias, and multi-workspace grants', () => {
+      const kid = 'same'.repeat(8);
+      service.add({
+        kid,
+        publicKeyB64: pub(1),
+        trust: 'verified',
+        verifiedVia: 'qr',
+        verifiedAt: '2026-06-01T00:00:00.000Z',
+        installId: INSTALL,
+      });
+      service.setLocalAlias(kid, 'My Pixel');
+      seedMultiWorkspaceGrants(kid);
+
+      const reconnected = service.reconcile({ kid, publicKeyB64: pub(1) }, undefined, {
+        installId: INSTALL,
+        evictVerified: false,
+      });
+
+      expect(reconnected).toMatchObject({
+        kid,
+        trust: 'verified',
+        verifiedVia: 'qr',
+        localAlias: 'My Pixel',
+        installId: INSTALL,
+      });
+      expect(grantsFor(kid)).toEqual(['w1', 'w2']);
+      expect(service.list()).toHaveLength(1);
+    });
+
+    it('same-kid add (QR seam, evictVerified) stays verified and preserves alias and multi-workspace grants', () => {
+      const kid = 'qrsm'.repeat(8);
+      service.add({
+        kid,
+        publicKeyB64: pub(2),
+        trust: 'verified',
+        verifiedVia: 'qr',
+        verifiedAt: '2026-06-01T00:00:00.000Z',
+        installId: INSTALL,
+      });
+      service.setLocalAlias(kid, 'Desk phone');
+      seedMultiWorkspaceGrants(kid);
+
+      const rePaired = service.add(
+        {
+          kid,
+          publicKeyB64: pub(2),
+          trust: 'verified',
+          verifiedVia: 'qr',
+          verifiedAt: '2026-08-01T00:00:00.000Z',
+          installId: INSTALL,
+        },
+        { evictVerified: true },
+      );
+
+      expect(rePaired).toMatchObject({
+        kid,
+        trust: 'verified',
+        verifiedVia: 'qr',
+        localAlias: 'Desk phone',
+        installId: INSTALL,
+      });
+      expect(grantsFor(kid)).toEqual(['w1', 'w2']);
+      expect(service.list()).toHaveLength(1);
+    });
+
+    it('un-pair deletes the row, alias, and grants; a same-kid re-adoption starts with neither', () => {
+      const kid = 'unpr'.repeat(8);
+      service.add({
+        kid,
+        publicKeyB64: pub(3),
+        trust: 'verified',
+        verifiedVia: 'qr',
+        installId: INSTALL,
+      });
+      service.setLocalAlias(kid, 'Gone alias');
+      seedMultiWorkspaceGrants(kid);
+
+      expect(service.revoke(kid)).toBe(true);
+      expect(service.get(kid)).toBeNull();
+      expect(grantsFor(kid)).toEqual([]);
+
+      const reAdopted = service.reconcile({ kid, publicKeyB64: pub(3) }, undefined, {
+        installId: INSTALL,
+      });
+
+      expect(reAdopted).toMatchObject({ kid, trust: 'unverified', adoptedVia: 'email-tofu' });
+      expect(reAdopted.localAlias).toBeUndefined();
+      expect(grantsFor(kid)).toEqual([]);
+      expect(service.list()).toHaveLength(1);
     });
   });
 });

@@ -105,4 +105,24 @@ describe('EpicsController - skillsRequired validation', () => {
       3,
     );
   });
+
+  it('passes tag replacement through and returns the stored epic', async () => {
+    epicsService.updateEpic.mockResolvedValue({
+      id: 'epic-1',
+      version: 4,
+      tags: ['stored-tag'],
+    });
+
+    const result = await controller.updateEpic('epic-1', {
+      version: 3,
+      tags: ['stored-tag'],
+    });
+
+    expect(epicsService.updateEpic).toHaveBeenCalledWith(
+      'epic-1',
+      expect.objectContaining({ tags: ['stored-tag'] }),
+      3,
+    );
+    expect(result).toMatchObject({ id: 'epic-1', version: 4, tags: ['stored-tag'] });
+  });
 });

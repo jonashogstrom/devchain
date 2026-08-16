@@ -1,10 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CommunitySourcesController } from './community-sources.controller';
-import { CommunitySourcesService } from '../services/community-sources.service';
+import { SkillSourceLifecycleService } from '../services/skill-source-lifecycle.service';
 
 describe('CommunitySourcesController', () => {
   let controller: CommunitySourcesController;
-  let communitySourcesService: {
+  let skillSourceLifecycle: {
     listCommunitySources: jest.Mock;
     createCommunitySource: jest.Mock;
     deleteCommunitySource: jest.Mock;
@@ -21,7 +21,7 @@ describe('CommunitySourcesController', () => {
   };
 
   beforeEach(async () => {
-    communitySourcesService = {
+    skillSourceLifecycle = {
       listCommunitySources: jest.fn().mockResolvedValue([]),
       createCommunitySource: jest.fn().mockResolvedValue(sampleSource),
       deleteCommunitySource: jest.fn().mockResolvedValue(undefined),
@@ -31,8 +31,8 @@ describe('CommunitySourcesController', () => {
       controllers: [CommunitySourcesController],
       providers: [
         {
-          provide: CommunitySourcesService,
-          useValue: communitySourcesService,
+          provide: SkillSourceLifecycleService,
+          useValue: skillSourceLifecycle,
         },
       ],
     }).compile();
@@ -41,11 +41,11 @@ describe('CommunitySourcesController', () => {
   });
 
   it('lists all community sources', async () => {
-    communitySourcesService.listCommunitySources.mockResolvedValue([sampleSource]);
+    skillSourceLifecycle.listCommunitySources.mockResolvedValue([sampleSource]);
 
     const result = await controller.listCommunitySources();
 
-    expect(communitySourcesService.listCommunitySources).toHaveBeenCalledWith();
+    expect(skillSourceLifecycle.listCommunitySources).toHaveBeenCalledWith();
     expect(result).toEqual([sampleSource]);
   });
 
@@ -57,7 +57,7 @@ describe('CommunitySourcesController', () => {
       branch: 'main',
     });
 
-    expect(communitySourcesService.createCommunitySource).toHaveBeenCalledWith({
+    expect(skillSourceLifecycle.createCommunitySource).toHaveBeenCalledWith({
       name: 'jeffallan',
       repoOwner: 'JeffAllan',
       repoName: 'Claude-Skills',
@@ -72,7 +72,7 @@ describe('CommunitySourcesController', () => {
       url: 'https://github.com/JeffAllan/claude-skills',
     });
 
-    expect(communitySourcesService.createCommunitySource).toHaveBeenCalledWith({
+    expect(skillSourceLifecycle.createCommunitySource).toHaveBeenCalledWith({
       name: 'jeffallan',
       repoOwner: 'JeffAllan',
       repoName: 'claude-skills',
@@ -85,7 +85,7 @@ describe('CommunitySourcesController', () => {
       id: '00000000-0000-0000-0000-000000000011',
     });
 
-    expect(communitySourcesService.deleteCommunitySource).toHaveBeenCalledWith(
+    expect(skillSourceLifecycle.deleteCommunitySource).toHaveBeenCalledWith(
       '00000000-0000-0000-0000-000000000011',
     );
     expect(result).toEqual({ success: true });

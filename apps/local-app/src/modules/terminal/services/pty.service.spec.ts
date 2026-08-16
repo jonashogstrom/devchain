@@ -6,11 +6,9 @@ import { PtyService } from './pty.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ptyMod = require('node-pty') as { spawn: jest.Mock };
 
-import type { TerminalGateway } from '../gateways/terminal.gateway';
 import type { TerminalActivityService } from './terminal-activity.service';
-import type { TerminalIOService } from './terminal-io/terminal-io.service';
 import type { SettingsService } from '../../settings/services/settings.service';
-import type { SessionsService } from '../../sessions/services/sessions.service';
+import type { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 
 const makePtyProcess = () => ({
   onData: jest.fn().mockImplementation(() => {}),
@@ -20,10 +18,12 @@ const makePtyProcess = () => ({
   kill: jest.fn(),
 });
 
-const createService = (opts?: { usesAlternateScreen?: boolean; needsLfNormalize?: boolean }) => {
-  const terminalGateway = {
-    broadcastTerminalData: jest.fn(),
-  } as unknown as TerminalGateway;
+const createService = (opts?: {
+  usesAlternateScreen?: boolean;
+  needsLfNormalize?: boolean;
+  registerOutputHandler?: boolean;
+}) => {
+  const outputHandler = jest.fn();
 
   const terminalActivity = {
     watchSession: jest.fn(),
@@ -31,16 +31,18 @@ const createService = (opts?: { usesAlternateScreen?: boolean; needsLfNormalize?
     clearSession: jest.fn(),
   } as unknown as TerminalActivityService;
 
-  const terminalIO = {} as unknown as TerminalIOService;
-
   const settingsService = {
     getSetting: jest.fn().mockReturnValue(undefined),
   } as unknown as SettingsService;
 
-  const sessionsService = {
-    shouldNormalizeLfFor: jest.fn().mockReturnValue(opts?.needsLfNormalize ?? true),
-    usesAlternateScreenFor: jest.fn().mockReturnValue(opts?.usesAlternateScreen ?? false),
-  } as unknown as SessionsService;
+  const sessionTerminalRuntime = {
+    getDescriptor: jest.fn().mockImplementation((sessionId: string) => ({
+      sessionId,
+      tmuxSessionName: `tmux_${sessionId}`,
+      normalizeLf: opts?.needsLfNormalize ?? true,
+      usesAlternateScreen: opts?.usesAlternateScreen ?? false,
+    })),
+  } as unknown as SessionTerminalRuntimeService;
 
   const mockMetricsService = {
     registerCacheStatsProvider: jest.fn(),
@@ -48,15 +50,16 @@ const createService = (opts?: { usesAlternateScreen?: boolean; needsLfNormalize?
   } as never;
 
   const service = new PtyService(
-    terminalGateway,
     terminalActivity,
-    terminalIO,
     settingsService,
-    sessionsService,
+    sessionTerminalRuntime,
     mockMetricsService,
   );
+  if (opts?.registerOutputHandler !== false) {
+    service.setOutputHandler(outputHandler);
+  }
 
-  return { service, terminalGateway, terminalActivity };
+  return { service, outputHandler, terminalActivity, sessionTerminalRuntime };
 };
 
 const makePtyProcessWithDims = (cols: number, rows: number) =>
@@ -78,6 +81,41 @@ describe('PtyService.startStreaming', () => {
       ['attach-session', '-t', '=tmux-spawn'],
       expect.objectContaining({ cols: 120, rows: 40 }),
     );
+  });
+
+  it('rejects missing output configuration before spawning a PTY', async () => {
+    const { service } = createService({ registerOutputHandler: false });
+
+    await expect(service.startStreaming('sid-unconfigured', 'tmux-unconfigured')).rejects.toThrow(
+      'PTY output handler is not registered',
+    );
+    expect(ptyMod.spawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a second output handler registration', () => {
+    const { service } = createService();
+
+    expect(() => service.setOutputHandler(jest.fn())).toThrow(
+      'PTY output handler is already registered',
+    );
+  });
+
+  it('delivers processed frames synchronously and in source order', async () => {
+    const { service, outputHandler } = createService({ needsLfNormalize: false });
+    const observed: string[] = [];
+    outputHandler.mockImplementation((_sessionId: string, data: string) => {
+      observed.push(`handler:${data}`);
+    });
+    await service.startStreaming('sid-order', 'tmux-order');
+
+    const ptyProc = ptyMod.spawn.mock.results[0].value;
+    const onData = ptyProc.onData.mock.calls[0][0] as (data: string) => void;
+    onData('first');
+    observed.push('after:first');
+    onData('second');
+    observed.push('after:second');
+
+    expect(observed).toEqual(['handler:first', 'after:first', 'handler:second', 'after:second']);
   });
 
   it('falls back to 80x24 when no options provided', async () => {
@@ -124,6 +162,18 @@ describe('PtyService.startStreaming', () => {
 
     expect(ptyMod.spawn).toHaveBeenCalledTimes(1);
   });
+
+  it('resolves both output-path policies once per stream', async () => {
+    const { service, sessionTerminalRuntime } = createService({
+      needsLfNormalize: false,
+      usesAlternateScreen: true,
+    });
+
+    await service.startStreaming('sid-policy', 'tmux-policy');
+
+    expect(sessionTerminalRuntime.getDescriptor).toHaveBeenCalledTimes(1);
+    expect(sessionTerminalRuntime.getDescriptor).toHaveBeenCalledWith('sid-policy');
+  });
 });
 
 describe('PtyService alt-screen strip gate', () => {
@@ -136,18 +186,18 @@ describe('PtyService alt-screen strip gate', () => {
   const COMBINED_DECSET = '\x1b[?1049;1000h';
 
   it('skips the strip for TUI providers — preserves combined ?1049;1000h (mouse-tracking survives)', async () => {
-    const { service, terminalGateway } = createService({ usesAlternateScreen: true });
+    const { service, outputHandler } = createService({ usesAlternateScreen: true });
     await service.startStreaming('tui-sid', 'tmux-tui');
 
     const ptyProc = ptyMod.spawn.mock.results[0].value;
     const onData = ptyProc.onData.mock.calls[0][0] as (d: string) => void;
     onData(COMBINED_DECSET);
 
-    expect(terminalGateway.broadcastTerminalData).toHaveBeenCalledWith('tui-sid', COMBINED_DECSET);
+    expect(outputHandler).toHaveBeenCalledWith('tui-sid', COMBINED_DECSET);
   });
 
   it('strips the alt-screen DECSET for non-TUI providers (default — scrollback preserved)', async () => {
-    const { service, terminalGateway } = createService({ usesAlternateScreen: false });
+    const { service, outputHandler } = createService({ usesAlternateScreen: false });
     await service.startStreaming('cli-sid', 'tmux-cli');
 
     const ptyProc = ptyMod.spawn.mock.results[0].value;
@@ -155,7 +205,7 @@ describe('PtyService alt-screen strip gate', () => {
     onData(COMBINED_DECSET);
 
     // The whole DECSET is removed when it contains an alt-screen code.
-    expect(terminalGateway.broadcastTerminalData).toHaveBeenCalledWith('cli-sid', '');
+    expect(outputHandler).toHaveBeenCalledWith('cli-sid', '');
   });
 });
 
@@ -176,7 +226,7 @@ describe('PtyService — OpenCode mouseTrackingMode survival (user-reported symp
   });
 
   it('preserves the ?1000h mouse-tracking enable inside a combined DECSET for TUI providers', async () => {
-    const { service, terminalGateway } = createService({ usesAlternateScreen: true });
+    const { service, outputHandler } = createService({ usesAlternateScreen: true });
     await service.startStreaming('tui-mouse', 'tmux-tui-mouse');
 
     const ptyProc = ptyMod.spawn.mock.results[0].value;
@@ -185,20 +235,17 @@ describe('PtyService — OpenCode mouseTrackingMode survival (user-reported symp
     onData('\x1b[?1049;1000h');
 
     // Byte-for-byte preservation (existing assertion)…
-    expect(terminalGateway.broadcastTerminalData).toHaveBeenCalledWith(
-      'tui-mouse',
-      '\x1b[?1049;1000h',
-    );
+    expect(outputHandler).toHaveBeenCalledWith('tui-mouse', '\x1b[?1049;1000h');
     // …AND the mouse-tracking mode number (1000) survives inside the combined
     // DECSET parameter list. This is what flips xterm's mouseTrackingMode off
     // 'none' so the wheel forwards into the TUI (the user-reported symptom).
-    const broadcast = terminalGateway.broadcastTerminalData.mock.calls[0][1] as string;
+    const broadcast = outputHandler.mock.calls[0][1] as string;
     expect(broadcast).toContain('1000');
     expect(broadcast).toContain('1049');
   });
 
   it('loses the ?1000h mouse-tracking enable for non-TUI providers (documented collateral)', async () => {
-    const { service, terminalGateway } = createService({ usesAlternateScreen: false });
+    const { service, outputHandler } = createService({ usesAlternateScreen: false });
     await service.startStreaming('cli-mouse', 'tmux-cli-mouse');
 
     const ptyProc = ptyMod.spawn.mock.results[0].value;
@@ -208,7 +255,7 @@ describe('PtyService — OpenCode mouseTrackingMode survival (user-reported symp
     // The whole combined DECSET is stripped (contains 1049) — mouse enable is
     // collateral damage. This is WHY non-TUI providers don't get wheel
     // passthrough (and is intentional: they don't run a mouse-driven TUI).
-    expect(terminalGateway.broadcastTerminalData).toHaveBeenCalledWith('cli-mouse', '');
+    expect(outputHandler).toHaveBeenCalledWith('cli-mouse', '');
   });
 
   it('preserves a standalone ?1000h mouse enable for BOTH provider types (no alt-screen code to strip)', async () => {
@@ -220,10 +267,7 @@ describe('PtyService — OpenCode mouseTrackingMode survival (user-reported symp
     let ptyProc = ptyMod.spawn.mock.results[0].value;
     let onData = ptyProc.onData.mock.calls[0][0] as (d: string) => void;
     onData('\x1b[?1000h');
-    expect(tui.terminalGateway.broadcastTerminalData).toHaveBeenLastCalledWith(
-      'tui-standalone',
-      '\x1b[?1000h',
-    );
+    expect(tui.outputHandler).toHaveBeenLastCalledWith('tui-standalone', '\x1b[?1000h');
 
     jest.clearAllMocks();
     const cli = createService({ usesAlternateScreen: false });
@@ -231,10 +275,7 @@ describe('PtyService — OpenCode mouseTrackingMode survival (user-reported symp
     ptyProc = ptyMod.spawn.mock.results[0].value;
     onData = ptyProc.onData.mock.calls[0][0] as (d: string) => void;
     onData('\x1b[?1000h');
-    expect(cli.terminalGateway.broadcastTerminalData).toHaveBeenLastCalledWith(
-      'cli-standalone',
-      '\x1b[?1000h',
-    );
+    expect(cli.outputHandler).toHaveBeenLastCalledWith('cli-standalone', '\x1b[?1000h');
   });
 });
 

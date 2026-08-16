@@ -25,9 +25,7 @@ import { useSelectedProject } from '@/ui/hooks/useProjectSelection';
 import { Plus, Bot, AlertCircle, Save } from 'lucide-react';
 import { PresetSelector, PresetDialog, DeletePresetDialog } from '@/ui/components/agents';
 import type { Preset } from '@/ui/lib/preset-validation';
-import { McpConfigurationModal } from '@/ui/components/shared/McpConfigurationModal';
-import { fetchPreflightChecks } from '@/ui/lib/preflight';
-import { useAgentSessionControls } from '@/ui/hooks/useAgentSessionControls';
+import { useAgentsPagePresence } from '@/ui/hooks/useAgentsPagePresence';
 import { AgentFormDialog } from '@/ui/components/agent/AgentFormDialog';
 import type { AgentFormSubmitData } from '@/ui/components/agent/AgentFormDialog';
 import { AgentCard } from '@/ui/components/agent/AgentCard';
@@ -162,7 +160,6 @@ export const agentsPageQueryKeys = {
   profiles: (projectId: string) => ['profiles', projectId] as const,
   providers: () => providersQueryKeys.list(),
   presets: (projectId: string) => ['project-presets', projectId] as const,
-  preflight: (rootPath?: string) => ['preflight', 'agents-page', rootPath ?? 'global'] as const,
 };
 
 // ============================================
@@ -200,18 +197,8 @@ export function AgentsPage() {
   });
   const existingPresetNames = (presetsData?.presets ?? []).map((p) => p.name);
 
-  const { refetch: refetchPreflight } = useQuery({
-    queryKey: agentsPageQueryKeys.preflight(activeProject?.rootPath),
-    queryFn: () => fetchPreflightChecks(activeProject?.rootPath),
-    staleTime: 30000,
-    refetchInterval: 60000,
-  });
-
-  // ---- Session controls (extracted hook) ----
-  const sessionControls = useAgentSessionControls({
-    projectId: selectedProjectId ?? null,
-    refetchPreflight,
-  });
+  // ---- Read-only agent presence (preset safety) ----
+  const agentPresence = useAgentsPagePresence({ projectId: selectedProjectId ?? null });
 
   // ---- Live-update via events socket ----
   const handleAgentEventEnvelope = useCallback(
@@ -542,7 +529,7 @@ export function AgentsPage() {
             <PresetSelector
               projectId={selectedProjectId}
               agents={agentsData?.items ?? []}
-              agentPresence={sessionControls.agentPresence}
+              agentPresence={agentPresence}
               onAgentsRefresh={() =>
                 queryClient.invalidateQueries({
                   queryKey: agentsPageQueryKeys.agents(selectedProjectId),
@@ -607,17 +594,8 @@ export function AgentsPage() {
                     profile={profile}
                     providerName={providerName}
                     providersById={providersById}
-                    presence={sessionControls.agentPresence[agent.id]}
-                    isLastUsed={sessionControls.lastUsedAgentId === agent.id}
-                    isLaunching={sessionControls.launchingAgentId === agent.id}
                     isUpdating={updatingAgentId === agent.id && updateMutation.isPending}
                     isDeleting={deleteMutation.isPending && deleteConfirm?.id === agent.id}
-                    controlsDisabled={!selectedProjectId}
-                    isTerminating={sessionControls.terminatingAgentId === agent.id}
-                    isRestarting={sessionControls.restartingAgentId === agent.id}
-                    onLaunch={sessionControls.handleLaunch}
-                    onRestart={sessionControls.handleRestart}
-                    onTerminate={sessionControls.handleTerminate}
                     onEdit={setEditAgent}
                     onDelete={handleDelete}
                   />
@@ -683,24 +661,6 @@ export function AgentsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* MCP Configuration Modal */}
-      {sessionControls.pendingMcpLaunch && (
-        <McpConfigurationModal
-          open={sessionControls.mcpModalOpen}
-          onOpenChange={(open) => {
-            sessionControls.setMcpModalOpen(open);
-            if (!open) {
-              sessionControls.setPendingMcpLaunch(null);
-            }
-          }}
-          providerId={sessionControls.pendingMcpLaunch.providerId}
-          providerName={sessionControls.pendingMcpLaunch.providerName}
-          projectPath={activeProject?.rootPath}
-          onConfigured={sessionControls.handleMcpConfigured}
-          onVerify={sessionControls.handleVerifyMcp}
-        />
-      )}
 
       <PresetDialog
         open={presetDialogOpen}

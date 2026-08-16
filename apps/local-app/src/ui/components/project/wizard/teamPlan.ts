@@ -1,10 +1,7 @@
 import type { ProfileSelection } from '@/ui/components/team/ProviderGroupedConfigSelector';
 import { filterConfigurableTeams } from '@/ui/lib/teams';
 
-/**
- * Pure state + emission logic for wizard Step 3 (Configure Teams), extracted from the legacy
- * `ProjectTeamPreconfigDialog`. No React — the component owns rendering.
- */
+/** Pure state and emission logic for the shared wizard's Configure Teams step. */
 
 export interface ParsedTemplateTeam {
   name: string;

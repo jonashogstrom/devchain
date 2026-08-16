@@ -1,13 +1,7 @@
 import { Button } from '@/ui/components/ui/button';
 import { Badge } from '@/ui/components/ui/badge';
 import { Avatar, AvatarFallback, AvatarImage } from '@/ui/components/ui/avatar';
-import {
-  TooltipProvider,
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from '@/ui/components/ui/tooltip';
-import { Loader2, Play, Pencil, RotateCcw, Power } from 'lucide-react';
+import { Pencil } from 'lucide-react';
 import {
   getAgentAvatarAltText,
   getAgentAvatarDataUri,
@@ -58,11 +52,6 @@ export interface AgentCardData {
   updatedAt: string;
 }
 
-export interface AgentCardPresence {
-  online: boolean;
-  sessionId?: string;
-}
-
 export interface AgentCardProps {
   agent: AgentCardData;
   /** Resolved profile (from agent.profile or profilesById lookup) */
@@ -71,27 +60,12 @@ export interface AgentCardProps {
   providerName: string | undefined;
   /** Providers map for provider config badge title */
   providersById: Map<string, AgentCardProvider>;
-  /** Presence state for this agent */
-  presence: AgentCardPresence | undefined;
-  /** Whether this is the last-used agent */
-  isLastUsed: boolean;
-  /** Whether a launch is in progress for this agent */
-  isLaunching: boolean;
   /** Whether an update is in progress for this agent */
   isUpdating: boolean;
   /** Whether a delete is in progress for this agent */
   isDeleting: boolean;
-  /** Whether session controls should be disabled (e.g. no project selected) */
-  controlsDisabled: boolean;
-  /** Whether a terminate is in progress for this agent */
-  isTerminating: boolean;
-  /** Whether a restart is in progress for this agent */
-  isRestarting: boolean;
 
   // Callbacks
-  onLaunch: (agentId: string) => void;
-  onRestart: (agentId: string, sessionId: string) => void;
-  onTerminate: (agentId: string, sessionId: string) => void;
   onEdit: (agent: AgentCardData) => void;
   onDelete: (agent: AgentCardData) => void;
 }
@@ -105,27 +79,14 @@ export function AgentCard({
   profile,
   providerName,
   providersById,
-  presence,
-  isLastUsed,
-  isLaunching,
   isUpdating,
   isDeleting,
-  controlsDisabled,
-  isTerminating,
-  isRestarting,
-  onLaunch,
-  onRestart,
-  onTerminate,
   onEdit,
   onDelete,
 }: AgentCardProps) {
   const avatarSrc = getAgentAvatarDataUri(agent.name);
   const avatarAlt = getAgentAvatarAltText(agent.name);
   const avatarFallback = getAgentInitials(agent.name);
-
-  const sessionId = presence?.sessionId ?? null;
-  const hasSession = Boolean(presence?.online && sessionId);
-  const anyBusy = isLaunching || isTerminating || isRestarting;
 
   return (
     <div className="border rounded-lg p-4 bg-card" data-testid={`agent-card-${agent.id}`}>
@@ -145,11 +106,6 @@ export function AgentCard({
               {agent.isProjectOwner && (
                 <Badge variant="outline" aria-label="Project owner">
                   Project owner
-                </Badge>
-              )}
-              {isLastUsed && (
-                <Badge variant="secondary" className="uppercase">
-                  Last launched
                 </Badge>
               )}
             </div>
@@ -193,85 +149,6 @@ export function AgentCard({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {hasSession && sessionId ? (
-            <>
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      aria-label="Restart session"
-                      title="Terminate the current session and start a new one"
-                      disabled={controlsDisabled || anyBusy}
-                      onClick={() => onRestart(agent.id, sessionId)}
-                    >
-                      {anyBusy ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Restarting…
-                        </>
-                      ) : (
-                        <>
-                          <RotateCcw className="mr-2 h-4 w-4" />
-                          Restart
-                        </>
-                      )}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Restart session</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      aria-label="Terminate session"
-                      title="Terminate the current session"
-                      disabled={controlsDisabled || isTerminating || isRestarting}
-                      onClick={() => onTerminate(agent.id, sessionId)}
-                    >
-                      {isTerminating ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Terminating…
-                        </>
-                      ) : (
-                        <>
-                          <Power className="mr-2 h-4 w-4" />
-                          Terminate
-                        </>
-                      )}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Terminate session</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </>
-          ) : (
-            <Button
-              size="sm"
-              onClick={() => onLaunch(agent.id)}
-              disabled={controlsDisabled || isLaunching}
-              aria-label="Launch session"
-              title="Launch a new session for this agent"
-            >
-              {isLaunching ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Launching…
-                </>
-              ) : (
-                <>
-                  <Play className="mr-2 h-4 w-4" />
-                  Launch Session
-                </>
-              )}
-            </Button>
-          )}
           <Button variant="outline" size="sm" onClick={() => onEdit(agent)} disabled={isUpdating}>
             <Pencil className="mr-2 h-4 w-4" />
             Edit

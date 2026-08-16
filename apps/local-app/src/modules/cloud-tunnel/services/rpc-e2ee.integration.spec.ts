@@ -93,6 +93,10 @@ describe('RPC lane E2EE — backend integration (real :memory: SQLite key servic
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
@@ -579,6 +583,10 @@ describe('RPC lane E2EE — fresh email-login (EMPTY device store → first encr
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
@@ -754,6 +762,10 @@ describe('QR first-start arrival-order convergence (Remediation 10) — real sto
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
@@ -779,6 +791,47 @@ describe('QR first-start arrival-order convergence (Remediation 10) — real sto
     const stored = deviceStore.get(phone.kid);
     expect(stored).toMatchObject({ trust: 'verified', verifiedVia: 'qr' });
     expect(stored?.publicKeyB64).toBe(phone.publicKeyB64);
+  });
+
+  it('a local alias survives reported-label refresh without affecting encrypted RPC', async () => {
+    const phone = await mobileEnvelopeFor(0xa5);
+    trust.adoptPeerKeyTofu({
+      kid: phone.kid,
+      publicKeyB64: phone.publicKeyB64,
+      label: 'Original label',
+    });
+    trust.setLocalAlias(phone.kid, 'My phone');
+    trust.adoptPeerKeyTofu({
+      kid: phone.kid,
+      publicKeyB64: phone.publicKeyB64,
+      label: 'Refreshed label',
+    });
+
+    expect(trust.listDevices()[0]).toMatchObject({
+      label: 'Refreshed label',
+      localAlias: 'My phone',
+    });
+
+    const method = 'board.listStatuses';
+    const sealedParams = (await phone.envelope.seal(
+      { projectId: 'proj-own' },
+      reqCtx(method),
+    )) as E2eeEnvelope;
+    const dispatch = jest.fn(
+      async (plain: JsonRpcRequestLike): Promise<JsonRpcResponseLike> => ({
+        jsonrpc: '2.0',
+        id: plain.id,
+        result: { statuses: ['todo'] },
+      }),
+    );
+
+    const response = await svc.handle(
+      { jsonrpc: '2.0', id: 'alias-rpc', method, params: sealedParams },
+      INSTANCE_ID,
+      dispatch,
+    );
+    expect(response.error).toBeUndefined();
+    expect(dispatch).toHaveBeenCalled();
   });
 
   // ── Order B: adopt-first → complete. Converges to verified/qr (complete overwrites). ─────

@@ -52,8 +52,6 @@ export interface BoardListViewProps {
   onBulkEdit?: (epics: Epic[]) => void;
   /** Handler for bulk delete - receives selected epic IDs */
   onBulkDelete?: (epicIds: string[]) => void;
-  /** Handler when "view sub-epics" is clicked (placeholder for future implementation) */
-  onViewSubEpics?: (epic: Epic) => void;
   /** Handler when status changes (inline editing) */
   onStatusChange?: (epic: Epic, statusId: string) => Promise<void> | void;
   /** Handler when agent changes (inline editing) */
@@ -97,7 +95,6 @@ export function BoardListView({
   onToggleParentFilter,
   onBulkEdit,
   onBulkDelete,
-  onViewSubEpics: _onViewSubEpics,
   onStatusChange,
   onAgentChange,
   subEpicCounts,

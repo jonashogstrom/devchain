@@ -15,6 +15,7 @@ import { ValidationError, ForbiddenError, NotFoundError } from '../../../common/
 import { createLogger } from '../../../common/logging/logger';
 import { E2eeKeypairService } from './e2ee-keypair.service';
 import { E2eeDeviceStoreService } from './e2ee-device-store.service';
+import { normalizeDeviceLabel } from './e2ee-device-label';
 
 const logger = createLogger('E2eePairing');
 
@@ -115,6 +116,7 @@ export class E2eePairingService {
     if (!input.deviceEncPubKey || !input.deviceEncKid || !input.pairingMac) {
       throw new ValidationError('deviceEncPubKey, deviceEncKid and pairingMac are required');
     }
+    const label = normalizeDeviceLabel(input.label);
 
     let devicePublicKey: Uint8Array;
     let mac: Uint8Array;
@@ -171,7 +173,7 @@ export class E2eePairingService {
         trust: 'verified',
         verifiedVia: 'qr',
         verifiedAt: new Date().toISOString(),
-        ...(input.label !== undefined ? { label: input.label } : {}),
+        ...(label ? { label } : {}),
         ...(input.installId !== undefined ? { installId: input.installId } : {}),
       },
       // QR pairing is MAC-authenticated, so a re-pair may supersede the phone's prior rows

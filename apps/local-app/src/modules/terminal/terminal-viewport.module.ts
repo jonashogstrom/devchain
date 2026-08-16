@@ -8,10 +8,8 @@ import { TerminalViewportFacade } from './services/terminal-viewport/terminal-vi
  * `TerminalSessionRegistry`) and `ProcessExecutorModule` (for the tmux capture executor),
  * but exports ONLY {@link TerminalViewportFacade}.
  *
- * `CloudTunnelModule` imports THIS module — not `TerminalModule` wholesale — so it stays a
- * leaf/transitive consumer of the Sessions↔Terminal SCC with no back-edge (no Sessions or
- * Terminal module imports CloudTunnel or this module). See
- * apps/local-app/scripts/cycle-allowlist.json.
+ * `CloudTunnelModule` imports THIS module — not `TerminalModule` wholesale — to keep its
+ * terminal dependency limited to the read-only viewport capability.
  */
 @Module({
   imports: [TerminalModule, ProcessExecutorModule],

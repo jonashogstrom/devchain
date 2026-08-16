@@ -20,7 +20,8 @@ import {
   SkillsListQuerySchema,
   type ResolvedSkillSummary,
 } from '../dtos/skill.dto';
-import { SkillSyncService, SyncResult } from '../services/skill-sync.service';
+import { SkillSourceLifecycleService } from '../services/skill-source-lifecycle.service';
+import type { SyncResult } from '../services/skill-sync.types';
 import {
   SkillSourceMetadata,
   ProjectSkill,
@@ -35,7 +36,7 @@ const logger = createLogger('SkillsController');
 export class SkillsController {
   constructor(
     private readonly skillsService: SkillsService,
-    private readonly skillSyncService: SkillSyncService,
+    private readonly skillSourceLifecycle: SkillSourceLifecycleService,
   ) {}
 
   @Post('sync')
@@ -44,9 +45,9 @@ export class SkillsController {
     logger.info('POST /api/skills/sync');
     const parsed = SkillSyncRequestSchema.parse(body ?? {});
     if (parsed.sourceName) {
-      return this.skillSyncService.syncSource(parsed.sourceName);
+      return this.skillSourceLifecycle.syncSource(parsed.sourceName);
     }
-    return this.skillSyncService.syncAll();
+    return this.skillSourceLifecycle.syncAll();
   }
 
   @Get('sources')

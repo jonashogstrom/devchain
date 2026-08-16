@@ -745,20 +745,6 @@ describe('SessionsService', () => {
     });
   });
 
-  describe('markSessionFailed', () => {
-    it('clears runtime context capture when a dead tmux ends a session', () => {
-      service.markSessionFailed('session-crashed', 'tmux missing');
-
-      expect(runtimeContextCapture.clear).toHaveBeenCalledWith('session-crashed');
-      expect(claudeLaunchSettings.cleanupSessionSync).toHaveBeenCalledWith('session-crashed');
-      expect(insertRunMock).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        'session-crashed',
-      );
-    });
-  });
-
   describe('getActiveSessionForAgent', () => {
     it('returns session when agent has a running session', () => {
       sqlitePrepare.mockReturnValue({
@@ -1073,110 +1059,6 @@ describe('SessionsService', () => {
       await expect(service.validateSessionInProject('session-1', 'project-1')).rejects.toThrow(
         ForbiddenError,
       );
-    });
-  });
-
-  // TWO-GATE INVARIANT + TIMING DEFAULT.
-  // The alt-screen policy is enforced at TWO gates: (1) the launch/restore
-  // pipelines call `setAlternateScreen(target, <flag>)`, and (2) the PTY strip
-  // gate skips stripAlternateScreenSequences when <flag> is true. BOTH gates
-  // resolve the SAME adapter field — `adapter.terminalOutputBehavior?.usesAlternateScreen`
-  // — and this resolver (usesAlternateScreenFor) is what gate 2 (PTY) reads.
-  // Gate 1 reads the field directly off the adapter in the pipeline (see
-  // session-launch/restore-pipeline.spec.ts → "alternate-screen policy"). These
-  // tests lock the resolver semantics: it reads the identical field, defaults
-  // safely to false, and never throws.
-  // Layer: service unit test — cheapest layer to prove the resolver + timing
-  // default without spinning up a pipeline or PTY.
-  describe('usesAlternateScreenFor (two-gate invariant + timing default)', () => {
-    const runningMetaRow = {
-      tmux_session_id: 'tmux-running',
-      provider_name_at_launch: 'opencode',
-    };
-
-    it('returns true when the resolved adapter advertises usesAlternateScreen: true', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest.fn().mockReturnValue(runningMetaRow),
-        all: jest.fn().mockReturnValue([]),
-      });
-      providerAdapterFactory.getAdapter.mockReturnValue({
-        providerName: 'opencode',
-        terminalOutputBehavior: { usesAlternateScreen: true },
-      });
-
-      expect(service.usesAlternateScreenFor('session-1')).toBe(true);
-      // Resolved the same field the pipelines read — divergence is structurally impossible.
-      expect(providerAdapterFactory.getAdapter).toHaveBeenCalledWith('opencode');
-    });
-
-    it('returns false when the adapter advertises usesAlternateScreen: false', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest.fn().mockReturnValue(runningMetaRow),
-        all: jest.fn().mockReturnValue([]),
-      });
-      providerAdapterFactory.getAdapter.mockReturnValue({
-        providerName: 'claude',
-        terminalOutputBehavior: { usesAlternateScreen: false },
-      });
-
-      expect(service.usesAlternateScreenFor('session-1')).toBe(false);
-    });
-
-    it('returns false when the adapter has no terminalOutputBehavior (default providers)', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest.fn().mockReturnValue(runningMetaRow),
-        all: jest.fn().mockReturnValue([]),
-      });
-      // claude/codex adapters do not set terminalOutputBehavior
-      providerAdapterFactory.getAdapter.mockReturnValue({ providerName: 'codex' });
-
-      expect(service.usesAlternateScreenFor('session-1')).toBe(false);
-    });
-
-    // TIMING DEFAULT — a not-yet-running session (no tmux_session_id yet, e.g.
-    // during the launch pipeline before createTmuxSession, or a stopped session)
-    // must resolve to the SAFE default false so the PTY strip stays active.
-    it('returns safe false for a not-yet-running session (no tmux session meta)', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest.fn().mockReturnValue(undefined), // session row not found
-        all: jest.fn().mockReturnValue([]),
-      });
-
-      expect(service.usesAlternateScreenFor('pending-session')).toBe(false);
-      // Adapter factory MUST NOT be consulted when meta lookup fails — safe default.
-      expect(providerAdapterFactory.getAdapter).not.toHaveBeenCalled();
-    });
-
-    it('returns safe false when the session row has no provider_name_at_launch', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest
-          .fn()
-          .mockReturnValue({ tmux_session_id: 'tmux-1', provider_name_at_launch: null }),
-        all: jest.fn().mockReturnValue([]),
-      });
-
-      expect(service.usesAlternateScreenFor('session-1')).toBe(false);
-      expect(providerAdapterFactory.getAdapter).not.toHaveBeenCalled();
-    });
-
-    it('returns safe false (never throws) when the adapter factory throws for an unknown provider', () => {
-      sqlitePrepare.mockReturnValue({
-        run: insertRunMock,
-        get: jest.fn().mockReturnValue(runningMetaRow),
-        all: jest.fn().mockReturnValue([]),
-      });
-      providerAdapterFactory.getAdapter.mockImplementation(() => {
-        throw new Error('unknown provider');
-      });
-
-      // Must not propagate — a resolver throw would crash the PTY onData hot path.
-      expect(() => service.usesAlternateScreenFor('session-1')).not.toThrow();
-      expect(service.usesAlternateScreenFor('session-1')).toBe(false);
     });
   });
 });

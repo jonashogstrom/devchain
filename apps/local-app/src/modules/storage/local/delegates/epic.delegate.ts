@@ -1,4 +1,5 @@
 import type { SQL } from 'drizzle-orm';
+import { and as andSync, eq as eqSync, isNull as isNullSync, or as orSync } from 'drizzle-orm';
 import {
   type CreateEpicForProjectInput,
   type ListAssignedEpicsOptions,
@@ -21,19 +22,19 @@ import {
 } from '../../models/domain.models';
 import {
   NotFoundError,
-  OptimisticLockError,
   StorageError,
   ValidationError,
 } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
+import { epicTags as epicTagsTable, epics as epicsTable, tags as tagsTable } from '../../db/schema';
 import { parseSkillsRequired, serializeSkillsRequired } from '../helpers/storage-helpers';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('EpicStorageDelegate');
 
 export interface EpicStorageDelegateDependencies {
-  createTag: (data: CreateTag) => Promise<Tag>;
-  getAgent: (id: string) => Promise<Agent>;
+  createTag: (data: CreateTag) => Tag;
+  getAgent: (id: string) => Agent;
   getAgentByName: (projectId: string, name: string) => Promise<Agent>;
   getStatus: (id: string) => Promise<Status>;
 }
@@ -52,8 +53,8 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
     const { epics, epicTags, tags } = await import('../../db/schema');
 
     const epicId = randomUUID();
-    await this.ensureValidEpicParent(data.projectId, data.parentId ?? null, epicId);
-    await this.ensureValidAgent(data.projectId, data.agentId ?? null);
+    this.ensureValidEpicParentSync(data.projectId, data.parentId ?? null, epicId);
+    this.ensureValidAgentSync(data.projectId, data.agentId ?? null);
 
     const epic: Epic = {
       id: epicId,
@@ -123,24 +124,26 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
   }
 
   async getEpic(id: string): Promise<Epic> {
-    const { epics, epicTags, tags } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    return this.getEpicSync(id);
+  }
 
-    const result = await this.db.select().from(epics).where(eq(epics.id, id)).limit(1);
-    if (!result[0]) {
+  private getEpicSync(id: string): Epic {
+    const row = this.db.select().from(epicsTable).where(eqSync(epicsTable.id, id)).limit(1).get();
+    if (!row) {
       throw new NotFoundError('Epic', id);
     }
 
-    const epicTagsResult = await this.db
-      .select({ tag: tags })
-      .from(epicTags)
-      .innerJoin(tags, eq(epicTags.tagId, tags.id))
-      .where(eq(epicTags.epicId, id));
+    const epicTagsResult = this.db
+      .select({ tag: tagsTable })
+      .from(epicTagsTable)
+      .innerJoin(tagsTable, eqSync(epicTagsTable.tagId, tagsTable.id))
+      .where(eqSync(epicTagsTable.epicId, id))
+      .all();
 
     return {
-      ...result[0],
-      data: result[0].data as Record<string, unknown> | null,
-      skillsRequired: parseSkillsRequired(result[0].skillsRequired),
+      ...row,
+      data: row.data as Record<string, unknown> | null,
+      skillsRequired: parseSkillsRequired(row.skillsRequired),
       tags: epicTagsResult.map((et) => et.tag.name),
     };
   }
@@ -413,8 +416,8 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
       agentId = agent.id;
     }
 
-    await this.ensureValidAgent(projectId, agentId);
-    await this.ensureValidEpicParent(projectId, input.parentId ?? null);
+    this.ensureValidAgentSync(projectId, agentId);
+    this.ensureValidEpicParentSync(projectId, input.parentId ?? null);
 
     return this.createEpic({
       projectId,
@@ -431,46 +434,64 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
   }
 
   async updateEpic(id: string, data: UpdateEpic, expectedVersion: number): Promise<Epic> {
-    const { epics } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
+    return this.versionedMutationExecutor.execute({
+      resource: 'Epic',
+      id,
+      expectedVersion,
+      loadCurrent: () => this.getEpicSync(id),
+      versionOf: (current) => current.version,
+      prepare: ({ current }) => {
+        if (data.parentId !== undefined) {
+          this.ensureValidEpicParentSync(current.projectId, data.parentId ?? null, id);
+        }
+        if (data.agentId !== undefined) {
+          this.ensureValidAgentSync(current.projectId, data.agentId ?? null);
+        }
 
-    const current = await this.getEpic(id);
-    if (current.version !== expectedVersion) {
-      throw new OptimisticLockError('Epic', id, {
-        expectedVersion,
-        actualVersion: current.version,
-      });
-    }
+        const { tags: requestedTags, ...scalarData } = data;
+        const updateData: Record<string, unknown> = { ...scalarData };
+        delete updateData.createdBy;
+        if (data.data !== undefined) {
+          updateData.data = JSON.stringify(data.data);
+        }
+        if (data.skillsRequired !== undefined) {
+          updateData.skillsRequired = serializeSkillsRequired(data.skillsRequired);
+        }
+        for (const key of Object.keys(updateData)) {
+          if (updateData[key] === undefined) {
+            delete updateData[key];
+          }
+        }
 
-    if (data.parentId !== undefined) {
-      await this.ensureValidEpicParent(current.projectId, data.parentId ?? null, id);
-    }
-
-    if (data.agentId !== undefined) {
-      await this.ensureValidAgent(current.projectId, data.agentId ?? null);
-    }
-
-    const updateData: Record<string, unknown> = { ...data };
-    delete updateData.createdBy;
-    if (data.data !== undefined) {
-      updateData.data = JSON.stringify(data.data);
-    }
-    if (data.skillsRequired !== undefined) {
-      updateData.skillsRequired = serializeSkillsRequired(data.skillsRequired);
-    }
-    for (const key of Object.keys(updateData)) {
-      if (updateData[key] === undefined) {
-        delete updateData[key];
-      }
-    }
-
-    await this.db
-      .update(epics)
-      .set({ ...updateData, version: expectedVersion + 1, updatedAt: now })
-      .where(eq(epics.id, id));
-
-    return this.getEpic(id);
+        return {
+          kind: 'write',
+          state: {
+            updateData,
+            requestedTags:
+              requestedTags === undefined ? undefined : Array.from(new Set(requestedTags)),
+            now: new Date().toISOString(),
+          },
+        };
+      },
+      write: (context, state) =>
+        this.db
+          .update(epicsTable)
+          .set({
+            ...state.updateData,
+            version: context.nextVersion,
+            updatedAt: state.now,
+          })
+          .where(
+            andSync(eqSync(epicsTable.id, id), eqSync(epicsTable.version, context.actualVersion)),
+          )
+          .run().changes,
+      afterWrite: ({ current }, state) => {
+        if (state.requestedTags !== undefined) {
+          this.setEpicTagsSync(id, state.requestedTags, current.projectId, state.now);
+        }
+      },
+      loadResult: () => this.getEpicSync(id),
+    });
   }
 
   async deleteEpic(id: string): Promise<void> {
@@ -824,11 +845,11 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
       );
   }
 
-  private async ensureValidEpicParent(
+  private ensureValidEpicParentSync(
     projectId: string,
     parentId?: string | null,
     childId?: string,
-  ): Promise<void> {
+  ): void {
     if (!parentId) {
       return;
     }
@@ -840,7 +861,7 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
       });
     }
 
-    const parent = await this.getEpic(parentId);
+    const parent = this.getEpicSync(parentId);
 
     if (parent.projectId !== projectId) {
       throw new ValidationError('Parent epic must belong to the same project.', {
@@ -857,12 +878,11 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
     }
 
     if (childId) {
-      const { epics } = await import('../../db/schema');
-      const { eq } = await import('drizzle-orm');
-      const descendants = await this.db
-        .select({ id: epics.id })
-        .from(epics)
-        .where(eq(epics.parentId, childId));
+      const descendants = this.db
+        .select({ id: epicsTable.id })
+        .from(epicsTable)
+        .where(eqSync(epicsTable.parentId, childId))
+        .all();
 
       if (descendants.some((row) => row.id === parentId)) {
         throw new ValidationError('Cannot assign a descendant as the parent epic.', {
@@ -896,18 +916,44 @@ export class EpicStorageDelegate extends BaseStorageDelegate {
     )`;
   }
 
-  private async ensureValidAgent(projectId: string, agentId?: string | null): Promise<void> {
+  private ensureValidAgentSync(projectId: string, agentId?: string | null): void {
     if (!agentId) {
       return;
     }
 
-    const agent = await this.dependencies.getAgent(agentId);
+    const agent = this.dependencies.getAgent(agentId);
     if (agent.projectId !== projectId) {
       throw new ValidationError('Agent must belong to the same project as the epic.', {
         projectId,
         agentProjectId: agent.projectId,
         agentId,
       });
+    }
+  }
+
+  private setEpicTagsSync(
+    epicId: string,
+    tagNames: string[],
+    projectId: string,
+    now: string,
+  ): void {
+    this.db.delete(epicTagsTable).where(eqSync(epicTagsTable.epicId, epicId)).run();
+
+    for (const tagName of tagNames) {
+      const existing = this.db
+        .select()
+        .from(tagsTable)
+        .where(
+          andSync(
+            eqSync(tagsTable.name, tagName),
+            orSync(eqSync(tagsTable.projectId, projectId), isNullSync(tagsTable.projectId)),
+          ),
+        )
+        .limit(1)
+        .get();
+      const tag = existing ?? this.dependencies.createTag({ projectId, name: tagName });
+
+      this.db.insert(epicTagsTable).values({ epicId, tagId: tag.id, createdAt: now }).run();
     }
   }
 

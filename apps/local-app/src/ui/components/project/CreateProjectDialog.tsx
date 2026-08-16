@@ -1,4 +1,4 @@
-import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import type { FormEvent } from 'react';
 import { CheckCircle2, AlertTriangle, XCircle, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/ui/components/ui/alert';
 import { Badge } from '@/ui/components/ui/badge';
@@ -23,6 +23,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/ui/components/ui/tabs';
 import { Textarea } from '@/ui/components/ui/textarea';
 
+import type {
+  CreateProjectFilePathValidation,
+  CreateProjectFormData,
+  ProjectPathValidation,
+} from '@/ui/pages/projects/projects-page-presentation';
+import type { ProjectWorkspace } from '@/ui/pages/projects/lib/project-contracts';
+
 type TemplateSource = 'bundled' | 'registry' | 'file';
 
 export interface CreateProjectTemplate {
@@ -31,25 +38,8 @@ export interface CreateProjectTemplate {
   source: TemplateSource;
 }
 
-export interface CreateProjectFormData {
-  name: string;
-  description: string;
-  rootPath: string;
-  templateId: string;
-  version: string;
-  templatePath: string;
-}
-
-export interface CreateProjectPathValidation {
-  isAbsolute: boolean;
-  exists: boolean;
-  checked: boolean;
-}
-
-export interface CreateProjectFilePathValidation extends CreateProjectPathValidation {
-  isFile: boolean;
-  error?: string;
-}
+export type { CreateProjectFilePathValidation, CreateProjectFormData };
+export type CreateProjectPathValidation = ProjectPathValidation;
 
 interface CreateProjectDialogProps {
   open: boolean;
@@ -58,7 +48,12 @@ interface CreateProjectDialogProps {
   templateSourceTab: 'template' | 'file';
   onTemplateSourceTabChange: (value: 'template' | 'file') => void;
   templateFormData: CreateProjectFormData;
-  setTemplateFormData: Dispatch<SetStateAction<CreateProjectFormData>>;
+  onNameChange: (value: string) => void;
+  onDescriptionChange: (value: string) => void;
+  onVersionChange: (value: string) => void;
+  workspaces?: ProjectWorkspace[];
+  showWorkspaceSelector?: boolean;
+  onWorkspaceChange?: (workspaceId: string) => void;
   templates?: CreateProjectTemplate[];
   selectedTemplateSource?: TemplateSource;
   sortedVersions: string[];
@@ -78,7 +73,12 @@ export function CreateProjectDialog({
   templateSourceTab,
   onTemplateSourceTabChange,
   templateFormData,
-  setTemplateFormData,
+  onNameChange,
+  onDescriptionChange,
+  onVersionChange,
+  workspaces = [],
+  showWorkspaceSelector = false,
+  onWorkspaceChange,
   templates,
   selectedTemplateSource,
   sortedVersions,
@@ -146,12 +146,7 @@ export function CreateProjectDialog({
               {selectedTemplateSource === 'registry' && sortedVersions.length > 0 && (
                 <div>
                   <Label htmlFor="template-version">Version</Label>
-                  <Select
-                    value={templateFormData.version}
-                    onValueChange={(value) =>
-                      setTemplateFormData((prev) => ({ ...prev, version: value }))
-                    }
-                  >
+                  <Select value={templateFormData.version} onValueChange={onVersionChange}>
                     <SelectTrigger id="template-version">
                       <SelectValue placeholder="Select a version" />
                     </SelectTrigger>
@@ -228,9 +223,7 @@ export function CreateProjectDialog({
               id="template-name"
               type="text"
               value={templateFormData.name}
-              onChange={(event) =>
-                setTemplateFormData((prev) => ({ ...prev, name: event.target.value }))
-              }
+              onChange={(event) => onNameChange(event.target.value)}
               required
               placeholder="My Project"
             />
@@ -288,13 +281,29 @@ export function CreateProjectDialog({
             <Textarea
               id="template-description"
               value={templateFormData.description}
-              onChange={(event) =>
-                setTemplateFormData((prev) => ({ ...prev, description: event.target.value }))
-              }
+              onChange={(event) => onDescriptionChange(event.target.value)}
               placeholder="Optional project description"
               rows={3}
             />
           </div>
+
+          {showWorkspaceSelector && (
+            <div>
+              <Label htmlFor="create-project-workspace">Workspace</Label>
+              <Select value={templateFormData.workspaceId} onValueChange={onWorkspaceChange}>
+                <SelectTrigger id="create-project-workspace">
+                  <SelectValue placeholder="Select a workspace" />
+                </SelectTrigger>
+                <SelectContent>
+                  {workspaces.map((workspace) => (
+                    <SelectItem key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onCancel}>

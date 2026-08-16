@@ -1,11 +1,11 @@
 /**
- * Build-time script: Fetch model pricing from LiteLLM and bundle as static JSON.
+ * Maintainer script: Refresh the committed model-pricing snapshot from LiteLLM.
  *
  * Fetches https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
  * Filters to Claude, OpenAI, and Gemini models, validates entries, writes to session-reader/data/pricing.json.
  *
- * On failure: logs warning, keeps existing pricing.json — build continues.
- * Usage: ts-node scripts/fetch-pricing-data.ts
+ * On failure: logs a warning and keeps the existing pricing.json when present.
+ * Usage: pnpm --filter local-app pricing:update
  */
 
 import * as fs from 'node:fs';
@@ -144,7 +144,7 @@ async function main(): Promise<void> {
     }
 
     if (fs.existsSync(OUTPUT_PATH)) {
-      console.warn('[fetch-pricing] Keeping existing pricing.json — build continues');
+      console.warn('[fetch-pricing] Keeping existing pricing.json — refresh not applied');
     } else {
       console.warn('[fetch-pricing] No existing pricing.json — writing empty fallback');
       const outputDir = path.dirname(OUTPUT_PATH);
@@ -158,5 +158,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error('[fetch-pricing] Unexpected error:', err);
-  process.exit(0); // Exit 0 so build continues
+  process.exit(0); // Preserve the existing non-blocking refresh behavior
 });

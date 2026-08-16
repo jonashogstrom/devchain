@@ -3,7 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type {
   AgentOverridePayload,
   SetupPreviewResponse,
-} from '@/ui/pages/projects/lib/project-api';
+} from '@/ui/pages/projects/lib/project-contracts';
 import type { WizardStep } from '@/ui/hooks/useProjectSetupWizard';
 import { Step1Providers } from './Step1Providers';
 import { Step2Agents } from './Step2Agents';

@@ -1,24 +1,37 @@
 import type {
   CreateProjectWithTemplateOptions,
-  ListOptions,
   ListResult,
+  ProjectListOptions,
 } from '../../interfaces/storage.interface';
 import type { CreateProject, Project, UpdateProject } from '../../models/domain.models';
-import { ConflictError, StorageError, NotFoundError } from '../../../../common/errors/error-types';
+import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import {
+  ConflictError,
+  StorageError,
+  NotFoundError,
+  ValidationError,
+} from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
+import {
+  communitySkillSources,
+  DEFAULT_PROJECT_WORKSPACE_ID,
+  projects,
+  sourceProjectEnabled,
+  statuses,
+} from '../../db/schema';
 import { isSqliteUniqueConstraint } from '../helpers/storage-helpers';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('ProjectStorageDelegate');
+type ProjectRow = typeof projects.$inferSelect;
 
 export class ProjectStorageDelegate extends BaseStorageDelegate {
   constructor(context: StorageDelegateContext) {
     super(context);
   }
 
-  private listSeedableSourceNamesForNewProject(
-    communitySkillSources: typeof import('../../db/schema').communitySkillSources,
-  ): string[] {
+  private listSeedableSourceNamesForNewProject(): string[] {
     const communitySourceRows = this.db
       .select({ name: communitySkillSources.name })
       .from(communitySkillSources)
@@ -57,35 +70,12 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
   }
 
   async createProject(data: CreateProject): Promise<Project> {
-    const { randomUUID } = await import('crypto');
     const now = new Date().toISOString();
-    const project: Project = {
-      id: randomUUID(),
-      ...data,
-      isTemplate: data.isTemplate ?? false,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const project = await this.txRunner.runImmediateQueued(() => {
+      const project = this.buildProject(data, randomUUID(), now);
+      const seedableSourceNames = this.listSeedableSourceNamesForNewProject();
 
-    const { projects, statuses, sourceProjectEnabled, communitySkillSources } = await import(
-      '../../db/schema'
-    );
-
-    this.txRunner.runImmediate(() => {
-      const seedableSourceNames = this.listSeedableSourceNamesForNewProject(communitySkillSources);
-
-      this.db
-        .insert(projects)
-        .values({
-          id: project.id,
-          name: project.name,
-          description: project.description,
-          rootPath: project.rootPath,
-          isTemplate: project.isTemplate,
-          createdAt: project.createdAt,
-          updatedAt: project.updatedAt,
-        })
-        .run();
+      this.insertProjectSync(project);
 
       // Create default statuses atomically with project
       const defaultStatuses = [
@@ -125,6 +115,8 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
           )
           .run();
       }
+
+      return project;
     });
 
     logger.info({ projectId: project.id }, 'Created project with default statuses (transactional)');
@@ -137,95 +129,66 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
   }
 
   /**
-   * Insert a project row + seed enabled skill sources, transaction-free (must run inside
-   * `runInTransaction`) and WITHOUT default statuses (the template statuses codec supplies
-   * them). Mirrors the project-row + sourceProjectEnabled seeding the create-core delegate did.
+   * Insert a project row + seed enabled skill sources without default statuses. The template
+   * create core calls this inside `runInTransaction`, where it joins through a savepoint.
    */
   async createProjectShell(
     data: CreateProject,
     options?: CreateProjectWithTemplateOptions,
   ): Promise<Project> {
-    const { randomUUID } = await import('crypto');
     const now = new Date().toISOString();
     const providedProjectId = options?.projectId?.trim();
-    const project: Project = {
-      id: providedProjectId || randomUUID(),
-      ...data,
-      isTemplate: data.isTemplate ?? false,
-      createdAt: now,
-      updatedAt: now,
-    };
 
-    const { projects, sourceProjectEnabled, communitySkillSources } = await import(
-      '../../db/schema'
-    );
-    const seedableSourceNames = this.listSeedableSourceNamesForNewProject(communitySkillSources);
+    return this.txRunner.runImmediateQueuedOrJoin(() => {
+      const project = this.buildProject(data, providedProjectId || randomUUID(), now);
+      const seedableSourceNames = this.listSeedableSourceNamesForNewProject();
 
-    try {
-      await this.db.insert(projects).values({
-        id: project.id,
-        name: project.name,
-        description: project.description,
-        rootPath: project.rootPath,
-        isTemplate: project.isTemplate,
-        createdAt: project.createdAt,
-        updatedAt: project.updatedAt,
-      });
-    } catch (error) {
-      // Preserve the create-core behavior: a client-supplied projectId colliding with an
-      // existing row surfaces as a domain ConflictError (409), not a raw SQLite constraint
-      // error. This insert only targets the projects table and `id` is the sole
-      // caller-controlled unique/primary-key column, so any PK/UNIQUE violation here IS the
-      // duplicate id — gate strictly on an explicitly-provided id. Match on the stable error
-      // `code` (better-sqlite3's `message` getter is unreliable under load, and `projects.id`
-      // is a PRIMARY KEY, whose violation code the message-based helper alone does not cover).
-      const code = (error as { code?: unknown }).code;
-      const isDuplicateId =
-        code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
-        code === 'SQLITE_CONSTRAINT_UNIQUE' ||
-        code === 'SQLITE_CONSTRAINT' ||
-        isSqliteUniqueConstraint(error);
-      if (providedProjectId && isDuplicateId) {
-        throw new ConflictError(`Project ID "${providedProjectId}" already exists.`, {
-          field: 'projectId',
-          projectId: providedProjectId,
-        });
+      try {
+        this.insertProjectSync(project);
+      } catch (error) {
+        // Preserve the create-core behavior: a client-supplied projectId colliding with an
+        // existing row surfaces as a domain ConflictError (409), not a raw SQLite constraint
+        // error. This insert only targets the projects table and `id` is the sole
+        // caller-controlled unique/primary-key column, so any PK/UNIQUE violation here IS the
+        // duplicate id — gate strictly on an explicitly-provided id. Match on the stable error
+        // `code` (better-sqlite3's `message` getter is unreliable under load, and `projects.id`
+        // is a PRIMARY KEY, whose violation code the message-based helper alone does not cover).
+        const code = (error as { code?: unknown }).code;
+        const isDuplicateId =
+          code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+          code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+          code === 'SQLITE_CONSTRAINT' ||
+          isSqliteUniqueConstraint(error);
+        if (providedProjectId && isDuplicateId) {
+          throw new ConflictError(`Project ID "${providedProjectId}" already exists.`, {
+            field: 'projectId',
+            projectId: providedProjectId,
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    if (seedableSourceNames.length > 0) {
-      await this.db.insert(sourceProjectEnabled).values(
-        seedableSourceNames.map((sourceName) => ({
-          id: randomUUID(),
-          projectId: project.id,
-          sourceName,
-          enabled: true,
-          createdAt: now,
-        })),
-      );
-    }
+      if (seedableSourceNames.length > 0) {
+        this.db
+          .insert(sourceProjectEnabled)
+          .values(
+            seedableSourceNames.map((sourceName) => ({
+              id: randomUUID(),
+              projectId: project.id,
+              sourceName,
+              enabled: true,
+              createdAt: now,
+            })),
+          )
+          .run();
+      }
 
-    return project;
+      return project;
+    });
   }
 
   async getProject(id: string): Promise<Project> {
-    const { projects } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const result = await this.db.select().from(projects).where(eq(projects.id, id)).limit(1);
-    if (!result[0]) {
-      throw new NotFoundError('Project', id);
-    }
-    const row = result[0] as Record<string, unknown>;
-    return {
-      id: row.id,
-      name: row.name,
-      description: row.description ?? null,
-      rootPath: row.rootPath,
-      isTemplate: Boolean(row.isTemplate ?? false),
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    } as Project;
+    return this.getProjectSync(id);
   }
 
   async findProjectByPath(path: string): Promise<Project | null> {
@@ -237,16 +200,7 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
       .where(eq(projects.rootPath, path))
       .limit(1);
     if (!result[0]) return null;
-    const row = result[0] as Record<string, unknown>;
-    return {
-      id: row.id,
-      name: row.name,
-      description: row.description ?? null,
-      rootPath: row.rootPath,
-      isTemplate: Boolean(row.isTemplate ?? false),
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    } as Project;
+    return this.mapProject(result[0]);
   }
 
   async getProjectByRootPath(rootPath: string): Promise<Project | null> {
@@ -266,15 +220,7 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
       return null;
     }
 
-    return {
-      id: rows[0].id,
-      name: rows[0].name,
-      description: rows[0].description,
-      rootPath: rows[0].rootPath,
-      isTemplate: rows[0].isTemplate,
-      createdAt: rows[0].createdAt,
-      updatedAt: rows[0].updatedAt,
-    };
+    return this.mapProject(rows[0]);
   }
 
   async findProjectContainingPath(absolutePath: string): Promise<Project | null> {
@@ -296,15 +242,7 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
         hasMore = false;
       } else {
         for (const row of rows) {
-          allProjects.push({
-            id: row.id,
-            name: row.name,
-            description: row.description,
-            rootPath: row.rootPath,
-            isTemplate: row.isTemplate,
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-          });
+          allProjects.push(this.mapProject(row));
         }
         offset += pageSize;
         if (rows.length < pageSize) {
@@ -333,28 +271,28 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
     return bestMatch;
   }
 
-  async listProjects(options: ListOptions = {}): Promise<ListResult<Project>> {
+  async listProjects(options: ProjectListOptions = {}): Promise<ListResult<Project>> {
     const { projects } = await import('../../db/schema');
     const { sql } = await import('drizzle-orm');
     const limit = options.limit || 100;
     const offset = options.offset || 0;
 
-    const items = await this.db.select().from(projects).limit(limit).offset(offset);
-    const countResult = await this.db.select({ count: sql<number>`count(*)` }).from(projects);
+    const workspaceFilter = options.workspaceId
+      ? eq(projects.workspaceId, options.workspaceId)
+      : undefined;
+    const items = await this.db
+      .select()
+      .from(projects)
+      .where(workspaceFilter)
+      .limit(limit)
+      .offset(offset);
+    const countResult = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(projects)
+      .where(workspaceFilter);
     const total = Number(countResult[0]?.count ?? 0);
 
-    const mapped = (items as Array<Record<string, unknown>>).map(
-      (row) =>
-        ({
-          id: row.id,
-          name: row.name,
-          description: row.description ?? null,
-          rootPath: row.rootPath,
-          isTemplate: Boolean(row.isTemplate ?? false),
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-        }) as Project,
-    );
+    const mapped = items.map((row) => this.mapProject(row));
 
     return {
       items: mapped,
@@ -383,31 +321,84 @@ export class ProjectStorageDelegate extends BaseStorageDelegate {
         sql`lower(substr(${projects.id}, 1, ${normalizedPrefix.length})) = ${normalizedPrefix}`,
       );
 
-    return (rows as Array<Record<string, unknown>>).map(
-      (row) =>
-        ({
-          id: row.id,
-          name: row.name,
-          description: row.description ?? null,
-          rootPath: row.rootPath,
-          isTemplate: Boolean(row.isTemplate ?? false),
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-        }) as Project,
-    );
+    return rows.map((row) => this.mapProject(row));
   }
 
   async updateProject(id: string, data: UpdateProject): Promise<Project> {
-    const { projects } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
+    return this.txRunner.runImmediateQueuedOrJoin(() => {
+      this.getProjectSync(id);
+      const workspaceId =
+        data.workspaceId === undefined ? undefined : this.resolveWorkspaceIdSync(data.workspaceId);
 
-    await this.db
-      .update(projects)
-      .set({ ...data, updatedAt: now })
-      .where(eq(projects.id, id));
+      this.db
+        .update(projects)
+        .set({
+          ...(data.name !== undefined ? { name: data.name } : {}),
+          ...(data.description !== undefined ? { description: data.description } : {}),
+          ...(data.rootPath !== undefined ? { rootPath: data.rootPath } : {}),
+          ...(data.isTemplate !== undefined ? { isTemplate: data.isTemplate } : {}),
+          ...(workspaceId !== undefined ? { workspaceId } : {}),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(projects.id, id))
+        .run();
 
-    return this.getProject(id);
+      return this.getProjectSync(id);
+    });
+  }
+
+  private getProjectSync(id: string): Project {
+    const row = this.db.select().from(projects).where(eq(projects.id, id)).limit(1).get();
+    if (!row) {
+      throw new NotFoundError('Project', id);
+    }
+    return this.mapProject(row);
+  }
+
+  private buildProject(data: CreateProject, id: string, now: string): Project {
+    return {
+      id,
+      ...data,
+      workspaceId: this.resolveWorkspaceIdSync(data.workspaceId),
+      isTemplate: data.isTemplate ?? false,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private insertProjectSync(project: Project): void {
+    this.db.insert(projects).values(project).run();
+  }
+
+  private mapProject(row: ProjectRow): Project {
+    return {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      name: row.name,
+      description: row.description ?? null,
+      rootPath: row.rootPath,
+      isTemplate: Boolean(row.isTemplate ?? false),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private resolveWorkspaceIdSync(requestedWorkspaceId: string | undefined): string {
+    let workspaceId = DEFAULT_PROJECT_WORKSPACE_ID;
+    if (requestedWorkspaceId !== undefined) {
+      workspaceId = typeof requestedWorkspaceId === 'string' ? requestedWorkspaceId.trim() : '';
+    }
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId must be a non-empty string.');
+    }
+
+    const exists = this.rawClient
+      .prepare('SELECT 1 FROM project_workspaces WHERE id = ?')
+      .get(workspaceId);
+    if (!exists) {
+      throw new NotFoundError('Project workspace', workspaceId);
+    }
+    return workspaceId;
   }
 
   async deleteProject(id: string): Promise<void> {

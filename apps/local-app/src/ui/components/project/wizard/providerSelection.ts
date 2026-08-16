@@ -1,4 +1,4 @@
-import type { SetupPreviewFamilyAlternative } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewFamilyAlternative } from '@/ui/pages/projects/lib/project-contracts';
 
 /**
  * Family-coverage gate for wizard Step 1 (provider selection). Returns the family slugs that LOSE

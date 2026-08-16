@@ -2,7 +2,7 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { UpgradeDialog } from './UpgradeDialog';
-import type { UpgradeProjectResponse } from '@/ui/pages/projects/lib/project-api';
+import type { UpgradeProjectResponse } from '@/ui/pages/projects/lib/project-contracts';
 
 jest.mock('@radix-ui/react-dialog', () => {
   const actual = jest.requireActual('@radix-ui/react-dialog');

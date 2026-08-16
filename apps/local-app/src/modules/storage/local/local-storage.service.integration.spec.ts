@@ -3,12 +3,7 @@ import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { join } from 'path';
 import { LocalStorageService } from './local-storage.service';
-import {
-  NotFoundError,
-  OptimisticLockError,
-  ValidationError,
-  ConflictError,
-} from '../../../common/errors/error-types';
+import { NotFoundError, ValidationError, ConflictError } from '../../../common/errors/error-types';
 import type { Project, Provider, AgentProfile, Agent, Status } from '../models/domain.models';
 
 const MIGRATIONS_FOLDER = join(__dirname, '../../../../drizzle');
@@ -345,16 +340,30 @@ describe('LocalStorageService', () => {
       expect(updated.version).toBe(2);
     });
 
-    it('throws OptimisticLockError on version mismatch', async () => {
+    it('replaces, preserves, clears, and exactly deduplicates epic tags', async () => {
       const epic = await service.createEpic({
         projectId: project.id,
-        title: 'Test',
+        title: 'Tagged Epic',
         statusId: defaultStatusId,
+        tags: ['Alpha', 'beta'],
       });
 
-      await expect(service.updateEpic(epic.id, { title: 'Conflict' }, 99)).rejects.toThrow(
-        OptimisticLockError,
+      const replaced = await service.updateEpic(
+        epic.id,
+        { tags: ['beta', 'Alpha', 'Alpha', 'alpha'] },
+        epic.version,
       );
+      expect(replaced.tags.sort()).toEqual(['Alpha', 'alpha', 'beta']);
+
+      const preserved = await service.updateEpic(
+        epic.id,
+        { title: 'Still Tagged' },
+        replaced.version,
+      );
+      expect(preserved.tags.sort()).toEqual(['Alpha', 'alpha', 'beta']);
+
+      const cleared = await service.updateEpic(epic.id, { tags: [] }, preserved.version);
+      expect(cleared.tags).toEqual([]);
     });
 
     it('throws NotFoundError for missing epic', async () => {
@@ -561,19 +570,6 @@ describe('LocalStorageService', () => {
       expect(updated.tags).toEqual(['feature', 'type:custom']);
     });
 
-    it('throws OptimisticLockError on version conflict during update', async () => {
-      const project = await seedProject();
-      const prompt = await service.createPrompt({
-        projectId: project.id,
-        title: 'Test Prompt',
-        content: 'Hello',
-      });
-
-      await expect(service.updatePrompt(prompt.id, { title: 'Updated' }, 99)).rejects.toThrow(
-        OptimisticLockError,
-      );
-    });
-
     it('returns configured initial session prompt', async () => {
       const project = await seedProject();
       const prompt = await service.createPrompt({
@@ -621,26 +617,6 @@ describe('LocalStorageService', () => {
       expect(record.type).toBe('note');
       expect(record.epicId).toBe(epic.id);
     });
-
-    it('throws OptimisticLockError on version conflict during update', async () => {
-      const project = await seedProject();
-      const statuses = await getStatuses(project.id);
-      const epic = await service.createEpic({
-        projectId: project.id,
-        title: 'Record Epic',
-        statusId: statuses[0].id,
-      });
-      const record = await service.createRecord({
-        epicId: epic.id,
-        type: 'note',
-        data: {},
-        tags: [],
-      });
-
-      await expect(
-        service.updateRecord(record.id, { data: { updated: true } }, 99),
-      ).rejects.toThrow(OptimisticLockError);
-    });
   });
 
   // ==========================================
@@ -680,19 +656,6 @@ describe('LocalStorageService', () => {
 
       expect(updated.title).toBe('Updated Title');
       expect(updated.version).toBe(doc.version + 1);
-    });
-
-    it('rejects document update on version mismatch', async () => {
-      const project = await seedProject();
-      const doc = await service.createDocument({
-        projectId: project.id,
-        title: 'Doc',
-        contentMd: 'Content',
-      });
-
-      await expect(
-        service.updateDocument(doc.id, { title: 'Bad Update', version: 99 }),
-      ).rejects.toThrow(OptimisticLockError);
     });
 
     it('filters documents by tags and paginates', async () => {

@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { ImportResultDialog } from './ImportResultDialog';
-import type { ImportResult } from '@/ui/hooks/useProjectImport';
+import type { ImportProjectSuccess } from '@/ui/pages/projects/lib/project-contracts';
 
 jest.mock('@radix-ui/react-dialog', () => {
   const actual = jest.requireActual('@radix-ui/react-dialog');
@@ -11,7 +11,7 @@ jest.mock('@radix-ui/react-dialog', () => {
   };
 });
 
-const mockResult: ImportResult = {
+const mockResult: ImportProjectSuccess = {
   success: true,
   counts: {
     imported: { agents: 3, epics: 5 },

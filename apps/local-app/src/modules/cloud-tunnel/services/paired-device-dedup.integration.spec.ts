@@ -6,21 +6,27 @@
  * `E2eePairingService.completeQrPairing` + real `E2eeTrustService.adoptPeerKeyTofu`). This is
  * the CHEAPEST layer that proves the cross-component permutations NO single per-task unit
  * test covers: the convergence behavior emerges only across the real store + BOTH adopt
- * seams (QR-complete `evictVerified:true` vs email-TOFU `evictVerified:false`) + the M3
- * sealed revoke, all through real persistence.
+ * seams (QR-complete `evictVerified:true` vs email-TOFU `evictVerified:false`) + the
+ * dormant explicit sealed-revoke path, all through real persistence.
  *
  * Why not a cheaper layer: the module-unit `e2ee-device-store.service.spec.ts` already pins
  * the supersede rule in isolation (single store method calls) — it cannot prove that the QR
- * vs email SEAMS drive the trust guard correctly end-to-end, nor the logout→re-login
- * convergence across wipe (M1) + supersede (M2) + revoke (M3). Why not dearer: a full
+ * vs email SEAMS drive the trust guard correctly end-to-end, nor exceptional same-install
+ * identity-rotation convergence across supersede and optional explicit revoke. Why not dearer: a full
  * `TunnelHandlerService` / live-bridge wiring would not prove any additional dedup property
  * — the dispatch seams are pinned by `rpc-e2ee.integration.spec.ts` + the per-task units.
  *
  * What is NOT re-tested here (per-task unit coverage): the supersede guard in isolation,
  * plaintext-revoke rejection, senderKid threading, mobile installId survival, sealed-only
  * enforcement. This file is the CROSS-COMPONENT matrix only.
+ *
+ * The same-kid continuity section below proves the PC-side policy the mobile logout
+ * change relies on: an ordinary logout that PRESERVES the mobile X25519 keypair must keep
+ * the device row (verified trust, localAlias, explicit multi-workspace grants) intact on
+ * both reconnect seams, while desktop Un-pair remains the one path that resets a device.
  */
 import Database from 'better-sqlite3';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import {
   CryptoEnvelopeService,
@@ -37,12 +43,19 @@ import { E2eeKeypairService } from '../../e2ee/services/e2ee-keypair.service';
 import { E2eeDeviceStoreService } from '../../e2ee/services/e2ee-device-store.service';
 import { E2eeTrustService } from '../../e2ee/services/e2ee-trust.service';
 import { E2eePairingService } from '../../e2ee/services/e2ee-pairing.service';
+import { PairedDeviceWorkspaceAccessService } from '../../e2ee/services/paired-device-workspace-access.service';
+import { DEFAULT_PROJECT_WORKSPACE_ID } from '../../storage/db/schema';
+import { NotFoundError } from '../../../common/errors/error-types';
 
 const INSTANCE_ID = 'inst-dedup';
 
 // Canonical UUID v4 (valid against both the mobile `[1-5]` and PC `[1-8]` install-id regex).
-// The SAME value across logout→re-login models M1's "installId survives wipe" invariant.
+// The SAME value identifies one app install across ordinary same-kid reconnects and
+// exceptional same-install identity rotation.
 const INSTALL_ID = '11111111-1111-4111-8111-111111111111';
+// A genuinely different app install (fresh install / another phone → its own kid).
+const INSTALL_ID_B = '55555555-5555-4555-8555-555555555555';
+const SECOND_WORKSPACE_ID = '22222222-2222-4222-8222-222222222222';
 
 function makeRng(seed: number): (n: number) => Uint8Array {
   let s = seed >>> 0;
@@ -64,6 +77,7 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
   let deviceStore: E2eeDeviceStoreService;
   let trust: E2eeTrustService;
   let pairing: E2eePairingService;
+  let access: PairedDeviceWorkspaceAccessService;
 
   // Unused today but kept to mirror the sibling integration harness (sealing lane ready if a
   // future matrix case needs to prove an encrypted RPC post-convergence).
@@ -126,13 +140,29 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
+      );
+      CREATE TABLE project_workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, is_default INTEGER NOT NULL,
+        position INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       )
     `);
+    const insertWorkspace = sqlite.prepare(
+      `INSERT INTO project_workspaces
+       (id, name, is_default, position, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '2026-01-01', '2026-01-01')`,
+    );
+    insertWorkspace.run(DEFAULT_PROJECT_WORKSPACE_ID, 'Default', 1, 0);
+    insertWorkspace.run(SECOND_WORKSPACE_ID, 'W2', 0, 1);
     const db = drizzle(sqlite);
     keypair = new E2eeKeypairService(db);
     deviceStore = new E2eeDeviceStoreService(db);
     trust = new E2eeTrustService(keypair, deviceStore);
     pairing = new E2eePairingService(keypair, deviceStore);
+    access = new PairedDeviceWorkspaceAccessService(db, deviceStore, new EventEmitter2());
   });
 
   afterEach(() => sqlite.close());
@@ -140,8 +170,8 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
   // ── 1. Old phone (no installId) + new PC: append behavior preserved (QR + email) ──────
   describe('old phone (no installId) + new PC — append preserved (backward compat)', () => {
     it('email-TOFU: two adopts WITHOUT installId coexist (no supersede, append as today)', async () => {
-      // Same physical phone across a logout→re-login, but it is a PRE-installId client build,
-      // so neither adopt carries installId. The new PC must keep the old append behavior.
+      // Same physical legacy phone after an exceptional identity rotation, but it is a
+      // PRE-installId client build, so neither adopt carries installId. Keep append behavior.
       const phone1 = await mobileEnvelopeFor(0x0101);
       const phone2 = await mobileEnvelopeFor(0x0202);
 
@@ -252,16 +282,16 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
     });
   });
 
-  // ── 4. Full logout → re-login convergence ───────────────────────────────────────────
-  describe('logout → re-login convergence (M1 installId stable + M2 supersede + M3 revoke)', () => {
-    it('QR → QR: installId stable across logout → converges to EXACTLY ONE entry', async () => {
-      // First login: QR pair (verified, installId).
+  // ── 4. Exceptional identity-rotation convergence ────────────────────────────────────
+  describe('same-install identity rotation (installId supersede + explicit revoke)', () => {
+    it('QR → QR: installId survives an identity reset → converges to EXACTLY ONE entry', async () => {
+      // Initial QR pair (verified, installId).
       const phone1 = await mobileEnvelopeFor(0xc1c1);
       await qrComplete('chan-qr-1', phone1.kid, phone1.publicKeyB64, INSTALL_ID);
+      trust.setLocalAlias(phone1.kid, 'Old local alias');
       expect(deviceStore.list()).toHaveLength(1);
 
-      // Logout: phone wipes its X25519 keypair (M1) but installId SURVIVES (not key material).
-      // Re-login mints a fresh kid (phone2) carrying the SAME installId.
+      // A low-level same-install identity reset mints a fresh kid while installId survives.
       const phone2 = await mobileEnvelopeFor(0xc2c2);
       await qrComplete('chan-qr-2', phone2.kid, phone2.publicKeyB64, INSTALL_ID);
 
@@ -270,18 +300,18 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
       expect(devices[0].kid).toBe(phone2.kid);
       expect(devices[0].installId).toBe(INSTALL_ID);
       expect(devices[0].trust).toBe('verified');
+      expect(devices[0].localAlias).toBeUndefined();
     });
 
-    it('QR → email, revoke SUCCEEDED: sealed revoke removed the prior kid → converges to ONE', async () => {
-      // First login: QR pair (verified, installId).
+    it('QR → email, explicit revoke removed the prior kid → converges to ONE', async () => {
+      // Initial QR pair (verified, installId).
       const phone1 = await mobileEnvelopeFor(0xd1d1);
       await qrComplete('chan-em-1', phone1.kid, phone1.publicKeyB64, INSTALL_ID);
 
-      // Logout ONLINE: the best-effort sealed e2ee.revokeDeviceKey reaches the PC (M3) and
-      // removes phone1's row using the VERIFIED envelope kid.
+      // An explicit sealed revoke removes phone1 using the verified envelope kid.
       expect(trust.revokeDevice(phone1.kid)).toEqual({ kid: phone1.kid, removed: true });
 
-      // Re-login via email-TOFU: fresh kid, same installId.
+      // The reset identity returns via email TOFU with the same installId.
       const phone2 = await mobileEnvelopeFor(0xd2d2);
       trust.adoptPeerKeyTofu({ kid: phone2.kid, publicKeyB64: phone2.publicKeyB64 }, INSTALL_ID);
 
@@ -291,13 +321,13 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
       expect(devices[0].installId).toBe(INSTALL_ID);
     });
 
-    it('QR → email, revoke SUPPRESSED (offline): verified RESIDUE remains → TWO entries until QR re-pair / manual unpair', async () => {
-      // First login: QR pair (verified, installId).
+    it('QR → email, no explicit revoke: verified RESIDUE remains until QR re-pair / manual unpair', async () => {
+      // Initial QR pair (verified, installId).
       const phone1 = await mobileEnvelopeFor(0xe1e1);
       await qrComplete('chan-off-1', phone1.kid, phone1.publicKeyB64, INSTALL_ID);
 
-      // Logout OFFLINE / crashed: the sealed revoke NEVER reaches the PC → phone1 REMAINS.
-      // Re-login via email-TOFU: fresh kid, same installId.
+      // A same-install identity reset occurs without an explicit revoke; phone1 remains.
+      // The reset identity returns via email TOFU with the same installId.
       const phone2 = await mobileEnvelopeFor(0xe2e2);
       trust.adoptPeerKeyTofu({ kid: phone2.kid, publicKeyB64: phone2.publicKeyB64 }, INSTALL_ID);
 
@@ -312,10 +342,114 @@ describe('Paired-device-dedup convergence matrix (Phase 1 Task:5) — real store
       expect(fresh?.trust).toBe('unverified'); // the new email-TOFU entry
       expect(fresh?.installId).toBe(INSTALL_ID);
 
-      // Convergence is recovered by manual unpair (or a future QR re-pair): revoke the stale
-      // verified row → back to ONE entry. (This is the case M3 exists to handle when online.)
+      // Manual Un-pair (or a future QR re-pair) removes the stale verified row.
       expect(trust.revokeDevice(phone1.kid)).toEqual({ kid: phone1.kid, removed: true });
       expect(deviceStore.list()).toHaveLength(1);
+    });
+  });
+
+  // ── 5. Same-kid reconnect continuity (paired-kid-continuity) ────────────────────────
+  describe('same-kid reconnect continuity — ordinary logout preserves the mobile keypair', () => {
+    const aliasAndGrantBothWorkspaces = async (kid: string): Promise<void> => {
+      trust.setLocalAlias(kid, 'My Pixel');
+      await access.updateAccess(kid, [DEFAULT_PROJECT_WORKSPACE_ID, SECOND_WORKSPACE_ID]);
+    };
+
+    it('same-kid email reconnect preserves verified trust, localAlias, and explicit multi-workspace grants', async () => {
+      const phone = await mobileEnvelopeFor(0xf1f1);
+      await qrComplete('chan-same-email', phone.kid, phone.publicKeyB64, INSTALL_ID);
+      await aliasAndGrantBothWorkspaces(phone.kid);
+      expect(deviceStore.list()).toHaveLength(1);
+
+      // Ordinary logout now keeps the phone's X25519 keypair: re-login carries the SAME
+      // kid + key through the email-TOFU bootstrap lane.
+      const result = trust.adoptPeerKeyTofu(
+        { kid: phone.kid, publicKeyB64: phone.publicKeyB64 },
+        INSTALL_ID,
+      );
+
+      expect(result).toEqual({ kid: phone.kid, trust: 'verified', verifiedVia: 'qr' });
+      expect(deviceStore.get(phone.kid)).toMatchObject({
+        trust: 'verified',
+        verifiedVia: 'qr',
+        localAlias: 'My Pixel',
+        installId: INSTALL_ID,
+      });
+      expect(deviceStore.list()).toHaveLength(1);
+      expect(access.getAccess(phone.kid)).toEqual({
+        kid: phone.kid,
+        explicit: true,
+        workspaceIds: [DEFAULT_PROJECT_WORKSPACE_ID, SECOND_WORKSPACE_ID],
+      });
+    });
+
+    it('same-kid QR reconnect remains verified and preserves localAlias and explicit multi-workspace grants', async () => {
+      const phone = await mobileEnvelopeFor(0xf2f2);
+      await qrComplete('chan-same-qr-1', phone.kid, phone.publicKeyB64, INSTALL_ID);
+      await aliasAndGrantBothWorkspaces(phone.kid);
+
+      // Same phone, same key: a re-pair over QR after an ordinary logout.
+      await qrComplete('chan-same-qr-2', phone.kid, phone.publicKeyB64, INSTALL_ID);
+
+      expect(deviceStore.get(phone.kid)).toMatchObject({
+        trust: 'verified',
+        verifiedVia: 'qr',
+        localAlias: 'My Pixel',
+        installId: INSTALL_ID,
+      });
+      expect(deviceStore.list()).toHaveLength(1);
+      expect(access.getAccess(phone.kid)).toEqual({
+        kid: phone.kid,
+        explicit: true,
+        workspaceIds: [DEFAULT_PROJECT_WORKSPACE_ID, SECOND_WORKSPACE_ID],
+      });
+    });
+
+    it('desktop un-pair followed by same-kid adoption restores neither alias nor grants — effective Default-only', async () => {
+      const phone = await mobileEnvelopeFor(0xf3f3);
+      await qrComplete('chan-unpair-1', phone.kid, phone.publicKeyB64, INSTALL_ID);
+      await aliasAndGrantBothWorkspaces(phone.kid);
+
+      // Desktop Un-pair (Paired devices → remove) is the one path that resets the device.
+      expect(trust.revokeDevice(phone.kid)).toEqual({ kid: phone.kid, removed: true });
+      expect(deviceStore.get(phone.kid)).toBeNull();
+      expect(() => access.getAccess(phone.kid)).toThrow(NotFoundError);
+
+      // The phone re-adopts with the SAME kid over the email-TOFU lane.
+      const result = trust.adoptPeerKeyTofu(
+        { kid: phone.kid, publicKeyB64: phone.publicKeyB64 },
+        INSTALL_ID,
+      );
+
+      expect(result).toEqual({ kid: phone.kid, trust: 'unverified' });
+      expect(deviceStore.get(phone.kid)).toMatchObject({ installId: INSTALL_ID });
+      expect(deviceStore.get(phone.kid)?.localAlias).toBeUndefined();
+      expect(
+        sqlite
+          .prepare('SELECT workspace_id FROM paired_device_workspace_grants WHERE device_kid = ?')
+          .all(phone.kid),
+      ).toEqual([]);
+      expect(access.getAccess(phone.kid)).toEqual({
+        kid: phone.kid,
+        explicit: false,
+        workspaceIds: [DEFAULT_PROJECT_WORKSPACE_ID],
+      });
+    });
+
+    it('a genuinely new kid remains a new Default-only device', async () => {
+      const other = await mobileEnvelopeFor(0xf4f4);
+      const result = trust.adoptPeerKeyTofu(
+        { kid: other.kid, publicKeyB64: other.publicKeyB64 },
+        INSTALL_ID_B,
+      );
+
+      expect(result).toEqual({ kid: other.kid, trust: 'unverified' });
+      expect(deviceStore.get(other.kid)?.localAlias).toBeUndefined();
+      expect(access.getAccess(other.kid)).toEqual({
+        kid: other.kid,
+        explicit: false,
+        workspaceIds: [DEFAULT_PROJECT_WORKSPACE_ID],
+      });
     });
   });
 });

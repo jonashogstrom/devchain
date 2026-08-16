@@ -16,10 +16,8 @@ import type {
   AgentProfile,
   Provider,
 } from '../../../storage/models/domain.models';
-import { ConflictError, ValidationError } from '../../../../common/errors/error-types';
+import { ValidationError } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
-import { getEnvConfig } from '../../../../common/config/env.config';
-import { HostResolver } from '@devchain/shared';
 import { SessionCoordinatorService } from '../session-coordinator.service';
 import { ProviderAdapterFactory } from '../../../providers/adapters/provider-adapter.factory';
 import type { ProviderAdapter } from '../../../providers/adapters/provider-adapter.interface';
@@ -41,27 +39,15 @@ import { PreflightService } from '../../../core/services/preflight.service';
 import { ProviderMcpEnsureService } from '../../../providers/services/provider-mcp-ensure.service';
 import { EventsService } from '../../../events/services/events.service';
 import { TeamsStore } from '../../../teams/storage/teams.store';
-import { resolve as resolveLaunchConfig, type LaunchConfig } from '../provider-launch-config';
-import {
-  parseProfileOptions,
-  extractModelFromArgs,
-  hasCodexProfileSelector,
-  hasFlagOccurrence,
-} from '../../utils/profile-options';
+import type { LaunchConfig } from '../provider-launch-config';
 import { buildTmuxSessionName } from '../../utils/tmux-naming.util';
 import { renderTemplate } from '../../../../common/template/handlebars-renderer';
 import { buildPromptRenderContext } from '../../../../common/template/prompt-render-context';
 import { CleanupStack } from './cleanup-stack';
 import type { LaunchSessionDto, SessionDetailDto } from '../../dtos/sessions.dto';
 import { RuntimeContextCaptureService } from '../../../runtime-context-capture/runtime-context-capture.service';
-import { ClaudeLaunchSettingsMaterializerService } from '../../../runtime-context-capture/claude-launch-settings-materializer.service';
-import {
-  CodexPluginProfileMaterializerService,
-  type PreparedCodexPluginProfile,
-} from '../../../runtime-context-capture/codex-plugin-profile-materializer.service';
-import { ProviderPluginPolicyService } from '../../../providers/services/provider-plugin-policy.service';
-import { buildSessionCommand } from '../../utils/env-builder';
-import { CONTEXT_WINDOW_ENV_KEY } from '../../../runtime-context-capture/context-window-policy';
+import { CodexPluginProfileMaterializerService } from '../../../runtime-context-capture/codex-plugin-profile-materializer.service';
+import { ProviderRuntimePreparationService } from '../provider-runtime-preparation';
 
 const logger = createLogger('SessionLaunchPipeline');
 
@@ -84,9 +70,8 @@ export class SessionLaunchPipeline {
     private readonly eventsService: EventsService,
     private readonly teamsStore: TeamsStore,
     private readonly runtimeContextCapture: RuntimeContextCaptureService,
-    private readonly claudeLaunchSettings: ClaudeLaunchSettingsMaterializerService,
     private readonly codexPluginProfiles: CodexPluginProfileMaterializerService,
-    private readonly providerPluginPolicy: ProviderPluginPolicyService,
+    private readonly providerRuntimePreparation: ProviderRuntimePreparationService,
   ) {
     this.sqlite = getRawSqliteClient(db);
   }
@@ -114,25 +99,14 @@ export class SessionLaunchPipeline {
         const target = await this.resolveLaunchTarget({ agentId, projectId, epicId });
         const { agent, project, epic, profile, provider, options, configEnv } = target;
 
-        // Effective model/effort precedence (uniform): agent override → config
-        // structured default → raw options text (model only; effort has no raw
-        // text form). When a structured model is set, the raw `--model` in options
-        // no longer wins — the resolver strips it and injects the effective value.
-        const effectiveModel =
-          agent.modelOverride ??
-          target.configModel ??
-          extractModelFromArgs(parseProfileOptions(options));
-        const effectiveEffort = agent.effortOverride ?? target.configEffort ?? null;
-
         // Auto-compact recommendation (non-blocking)
         this.emitAutoCompactRecommendation(provider, agent, agentId, silent);
 
         // Phase 3: verifyProvider (preflight + MCP ensure)
         await this.verifyProvider(provider, project.rootPath);
 
-        // Phase 4: resolveLaunchConfig (pure — via ProviderLaunchConfig.resolve)
+        // Phase 4: create the read-only provider runtime plan
         const adapter = this.providerAdapterFactory.getAdapter(provider.name);
-        const env = getEnvConfig();
 
         // Generate session ID and tmux name
         sessionId = randomUUID();
@@ -145,7 +119,7 @@ export class SessionLaunchPipeline {
         tmuxSessionName = buildTmuxSessionName(projectSlug, epicSegment, agentId, sessionId);
 
         // Opt-in initial-prompt seeding (e.g. agy's full-screen TUI): render the
-        // prompt BEFORE resolveLaunchConfig so `argv`-mode adapters can embed it
+        // prompt BEFORE runtime planning so `argv`-mode adapters can embed it
         // in the launch args and the fragile post-launch paste can be skipped.
         // Default providers leave `initialPromptSeedMode` undefined and keep the
         // existing post-launch paste path untouched (seededPrompt stays null).
@@ -161,57 +135,25 @@ export class SessionLaunchPipeline {
             })
           : null;
 
-        const providerEnv = this.storage.getProviderEnvForProject(provider.id, projectId);
-        const profileOptionArgs = parseProfileOptions(options);
-        const pluginPolicy = await this.providerPluginPolicy.resolveAll(project.id, provider.id);
-        const providerName = provider.name.toLowerCase();
-        if (
-          pluginPolicy.length > 0 &&
-          providerName === 'claude' &&
-          hasFlagOccurrence(profileOptionArgs, '--settings')
-        ) {
-          throw new ConflictError(
-            'Profile-supplied --settings conflicts with required DevChain Claude plugin policy.',
-            { field: 'profileOptions', flag: '--settings' },
-          );
-        }
-        if (
-          pluginPolicy.length > 0 &&
-          providerName === 'codex' &&
-          hasCodexProfileSelector(profileOptionArgs)
-        ) {
-          throw new ConflictError(
-            'Profile-supplied Codex profile selector conflicts with required DevChain plugin policy.',
-            { field: 'profileOptions', flag: '--profile' },
-          );
-        }
-        const launchConfigInput = {
+        const providerRuntimePlan = await this.providerRuntimePreparation.createPlan({
           mode: 'new',
-          // Thread devchain's freshly-minted sessions.id (line ~103) so a
-          // deterministic-binding adapter (Copilot) can pass it as the provider
-          // session UUID via `--session-id`, making the transcript path derivable
-          // without a post-launch scan. Other adapters ignore it.
-          sessionId,
           adapter,
-          profileOptions: options,
-          modelOverride: effectiveModel,
-          effortOverride: effectiveEffort,
-          providerBinPath: provider.binPath!,
-          providerEnv,
-          configEnv,
           provider,
+          providerBinPath: provider.binPath!,
+          projectId: project.id,
+          projectName: project.name,
+          projectRootPath: project.rootPath,
+          agentId: agent.id,
+          agentModelOverride: agent.modelOverride,
+          agentEffortOverride: agent.effortOverride,
+          configModel: target.configModel,
+          configEffort: target.configEffort,
+          profileOptions: options,
+          configEnv,
+          sessionId,
+          tmuxSessionName,
           initialPrompt: seededPrompt ?? undefined,
-          hookContext: isHookCapable(adapter)
-            ? {
-                apiUrl: HostResolver.buildInternalBaseUrl({ host: env.HOST, port: env.PORT }),
-                projectId,
-                agentId,
-                sessionId,
-                tmuxSessionName,
-              }
-            : undefined,
-        } as const;
-        let finalConfig = resolveLaunchConfig(launchConfigInput);
+        });
 
         // Phase 6: setupHooksConfig (filesystem write, non-fatal)
         await this.setupHooksConfig(provider, project.rootPath);
@@ -230,69 +172,10 @@ export class SessionLaunchPipeline {
             .prepare('UPDATE sessions SET status = ?, ended_at = ?, updated_at = ? WHERE id = ?')
             .run('failed', new Date().toISOString(), new Date().toISOString(), sessionId);
         });
-        const epoch = this.runtimeContextCapture.rotateEpoch(
-          sessionId,
-          finalConfig.contextWindowOverride ?? null,
-        );
-        cleanup.push('runtimeContextCapture', async () => {
-          this.runtimeContextCapture.clear(sessionId!);
-        });
-        const preparedSettings = await this.claudeLaunchSettings.prepare({
-          providerName: provider.name,
-          settingsJson: provider.claudeLaunchSettingsJson,
-          profileOptionArgs,
-          providerEnv,
-          configEnv,
-          sessionId,
-          epoch,
-          projectRootPath: project.rootPath,
-          pluginPolicy: providerName === 'claude' ? pluginPolicy : [],
-          policyRequired: providerName === 'claude' && pluginPolicy.length > 0,
-        });
-        const preparedCodex: PreparedCodexPluginProfile | null =
-          providerName === 'codex'
-            ? await this.codexPluginProfiles.prepare({
-                projectId: project.id,
-                projectName: project.name,
-                sessionId,
-                pluginPolicy,
-                attemptNonce: randomUUID(),
-              })
-            : null;
-        const managedOptionArgs = [
-          ...preparedSettings.optionArgs,
-          ...(preparedCodex?.providerOptionArgs ?? []),
-        ];
-        if (managedOptionArgs.length > 0) {
-          finalConfig = resolveLaunchConfig({
-            ...launchConfigInput,
-            providerOptionArgs: managedOptionArgs,
-            runtimeEnv: preparedSettings.runtimeEnv,
-          });
-        }
-        cleanup.push('claudeLaunchSettings', async () => {
-          await this.claudeLaunchSettings.cleanupSession(sessionId!);
-        });
-        if (preparedCodex) {
-          const helperArgv = this.codexPluginProfiles.buildHelperArgv(
-            preparedCodex,
-            provider.binPath!,
-            finalConfig.argv,
-            {
-              projectId: project.id,
-              attemptNonce: preparedCodex.attemptNonce,
-            },
-          );
-          finalConfig = {
-            ...finalConfig,
-            commandArgs: buildSessionCommand(finalConfig.env, helperArgv[0], helperArgv.slice(1), [
-              ...new Set([...(adapter.launchUnsetEnv ?? []), CONTEXT_WINDOW_ENV_KEY]),
-            ]),
-          };
-          cleanup.push('codexPluginProfile', async () => {
-            await this.codexPluginProfiles.cleanupPrepared(preparedCodex);
-          });
-        }
+        const providerRuntime =
+          await this.providerRuntimePreparation.materialize(providerRuntimePlan);
+        cleanup.push('providerRuntime', providerRuntime.rollback);
+        const finalConfig = providerRuntime.config;
 
         // ── Runtime plan finalized checkpoint ──────────────────────────
         // From here: argv, env, sessionId, and generated artifact paths are immutable.
@@ -366,13 +249,7 @@ export class SessionLaunchPipeline {
             seedMode,
             seededPrompt,
           },
-          preparedCodex
-            ? () =>
-                this.codexPluginProfiles.awaitAcknowledgement(preparedCodex, {
-                  projectId: project.id,
-                  attemptNonce: preparedCodex.attemptNonce,
-                })
-            : undefined,
+          providerRuntime.afterCommand,
         );
 
         await this.eventsService.publish('session.started', {
@@ -505,9 +382,8 @@ export class SessionLaunchPipeline {
       provider,
       options: config.options,
       configEnv: config.env,
-      // Structured model/effort defaults from the resolved provider config
-      // (Phase-1 effort levels). The pipeline folds these into the effective
-      // model/effort passed to resolveLaunchConfig (precedence below).
+      // Structured model/effort defaults remain separate so runtime planning
+      // can apply the shared precedence contract.
       configModel: config.model,
       configEffort: config.effort,
     };
@@ -701,8 +577,8 @@ export class SessionLaunchPipeline {
   /**
    * Resolve and render the project's initial prompt to its final text, or null
    * when none is configured / it renders empty. Shared by both seeding paths:
-   * pre-launch (opt-in `initialPromptSeedMode` adapters render BEFORE
-   * `resolveLaunchConfig()`) and the default post-launch paste.
+   * pre-launch (opt-in `initialPromptSeedMode` adapters render before provider
+   * runtime planning) and the default post-launch paste.
    */
   private async renderInitialPromptText(params: {
     sessionId: string;

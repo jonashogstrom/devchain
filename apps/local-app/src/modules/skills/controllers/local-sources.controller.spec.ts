@@ -1,10 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { LocalSourcesController } from './local-sources.controller';
-import { LocalSourcesService } from '../services/local-sources.service';
+import { SkillSourceLifecycleService } from '../services/skill-source-lifecycle.service';
 
 describe('LocalSourcesController', () => {
   let controller: LocalSourcesController;
-  let localSourcesService: {
+  let skillSourceLifecycle: {
     listLocalSources: jest.Mock;
     createLocalSource: jest.Mock;
     deleteLocalSource: jest.Mock;
@@ -19,7 +19,7 @@ describe('LocalSourcesController', () => {
   };
 
   beforeEach(async () => {
-    localSourcesService = {
+    skillSourceLifecycle = {
       listLocalSources: jest.fn().mockResolvedValue([]),
       createLocalSource: jest.fn().mockResolvedValue(sampleSource),
       deleteLocalSource: jest.fn().mockResolvedValue(undefined),
@@ -29,8 +29,8 @@ describe('LocalSourcesController', () => {
       controllers: [LocalSourcesController],
       providers: [
         {
-          provide: LocalSourcesService,
-          useValue: localSourcesService,
+          provide: SkillSourceLifecycleService,
+          useValue: skillSourceLifecycle,
         },
       ],
     }).compile();
@@ -39,11 +39,11 @@ describe('LocalSourcesController', () => {
   });
 
   it('lists all local sources', async () => {
-    localSourcesService.listLocalSources.mockResolvedValue([sampleSource]);
+    skillSourceLifecycle.listLocalSources.mockResolvedValue([sampleSource]);
 
     const result = await controller.listLocalSources();
 
-    expect(localSourcesService.listLocalSources).toHaveBeenCalledWith();
+    expect(skillSourceLifecycle.listLocalSources).toHaveBeenCalledWith();
     expect(result).toEqual([sampleSource]);
   });
 
@@ -53,7 +53,7 @@ describe('LocalSourcesController', () => {
       folderPath: '/tmp/local-source/../local-source',
     });
 
-    expect(localSourcesService.createLocalSource).toHaveBeenCalledWith({
+    expect(skillSourceLifecycle.createLocalSource).toHaveBeenCalledWith({
       name: 'local-source',
       folderPath: '/tmp/local-source/../local-source',
     });
@@ -65,7 +65,7 @@ describe('LocalSourcesController', () => {
       id: '00000000-0000-0000-0000-000000000121',
     });
 
-    expect(localSourcesService.deleteLocalSource).toHaveBeenCalledWith(
+    expect(skillSourceLifecycle.deleteLocalSource).toHaveBeenCalledWith(
       '00000000-0000-0000-0000-000000000121',
     );
     expect(result).toEqual({ success: true });

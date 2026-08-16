@@ -11,9 +11,8 @@ import { VercelSkillSource } from './adapters/vercel-skill-source.adapter';
 import { CommunitySourcesController } from './controllers/community-sources.controller';
 import { LocalSourcesController } from './controllers/local-sources.controller';
 import { SkillsController } from './controllers/skills.controller';
-import { CommunitySourcesService } from './services/community-sources.service';
-import { LocalSourcesService } from './services/local-sources.service';
 import { SkillCategoryService } from './services/skill-category.service';
+import { SkillSourceLifecycleService } from './services/skill-source-lifecycle.service';
 import { SkillSourceRegistryService } from './services/skill-source-registry.service';
 import { SkillsService } from './services/skills.service';
 import { SkillSyncService } from './services/skill-sync.service';
@@ -40,9 +39,8 @@ import { SkillSyncService } from './services/skill-sync.service';
         }),
     },
     SkillCategoryService,
-    CommunitySourcesService,
-    LocalSourcesService,
     SkillSourceRegistryService,
+    SkillSourceLifecycleService,
     SkillsService,
     SkillSyncService,
     {
@@ -81,7 +79,6 @@ import { SkillSyncService } from './services/skill-sync.service';
     SkillCategoryService,
     SkillSourceRegistryService,
     SkillsService,
-    SkillSyncService,
     SKILL_SOURCE_ADAPTERS,
   ],
 })

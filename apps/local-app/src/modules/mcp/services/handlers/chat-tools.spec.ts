@@ -450,5 +450,22 @@ describe('chat-tools handlers', () => {
       expect(deliverAgentMessage).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledTimes(1);
     });
+
+    it('does not mask storage failures as recipient-not-found errors', async () => {
+      const ctx = makeCtx();
+      (ctx.storage.getAgentByName as jest.Mock).mockRejectedValue(new Error('agent store offline'));
+
+      await expect(
+        handleSendMessage(ctx, {
+          sessionId: SESSION_ID,
+          recipientAgentNames: ['Agent-B'],
+          message: 'hello',
+        }),
+      ).resolves.toEqual({
+        success: false,
+        error: { code: 'SEND_MESSAGE_FAILED', message: 'agent store offline' },
+      });
+      expect(ctx.storage.getGuestByName).not.toHaveBeenCalled();
+    });
   });
 });

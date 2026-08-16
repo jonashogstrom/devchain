@@ -52,7 +52,16 @@ async function waitForHealth(url, { timeoutMs = 15000, intervalMs = 250 } = {}) 
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  return false;
+
+  // A synchronous bootstrap stall can hold the event loop past the nominal
+  // deadline. Make one bounded attempt because the in-process server may have
+  // finished binding while the watchdog could not run.
+  try {
+    const res = await fetchWithTimeout(url, {}, 1000);
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
 }
 
 function resolveOpenOptions() {
@@ -2005,6 +2014,7 @@ module.exports = {
   main,
   normalizeCliArgv,
   __test__: {
+    waitForHealth,
     ensureDockerAvailable,
     isDockerAvailable,
     deriveRepoRootFromGit,

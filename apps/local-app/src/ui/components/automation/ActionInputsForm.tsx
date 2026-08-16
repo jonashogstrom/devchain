@@ -44,8 +44,14 @@ export function ActionInputsForm({
     });
   };
 
-  const getInputValue = (name: string): SubscriberActionInput => {
-    return values[name] || { source: 'custom', customValue: '' };
+  const getInputValue = (inputDef: ActionMetadata['inputs'][number]): SubscriberActionInput => {
+    const configured = values[inputDef.name];
+    if (configured) return configured;
+
+    return {
+      source: 'custom',
+      customValue: inputDef.defaultValue === undefined ? '' : String(inputDef.defaultValue),
+    };
   };
 
   return (
@@ -58,7 +64,7 @@ export function ActionInputsForm({
         <InputSourceSelector
           key={inputDef.name}
           inputDef={inputDef}
-          value={getInputValue(inputDef.name)}
+          value={getInputValue(inputDef)}
           onChange={(value) => handleInputChange(inputDef.name, value)}
           availableEventFields={availableEventFields}
           editorCapabilities={getEditorCapabilities(action?.type, inputDef.name)}

@@ -1,4 +1,4 @@
-import type { ToolBindingEntry } from './types';
+import type { RecordToolContext } from '../services/handlers/record-context';
 import {
   handleCreateRecord,
   handleUpdateRecord,
@@ -7,12 +7,17 @@ import {
   handleAddTags,
   handleRemoveTags,
 } from '../services/handlers/record-tools';
+import { defineToolGroup, type McpBindingRuntime } from './binding-types';
 
-export const recordBindings: ToolBindingEntry[] = [
-  ['devchain_create_record', handleCreateRecord as unknown as ToolBindingEntry[1]],
-  ['devchain_update_record', handleUpdateRecord as unknown as ToolBindingEntry[1]],
-  ['devchain_get_record', handleGetRecord as unknown as ToolBindingEntry[1]],
-  ['devchain_list_records', handleListRecords as unknown as ToolBindingEntry[1]],
-  ['devchain_add_tags', handleAddTags as unknown as ToolBindingEntry[1]],
-  ['devchain_remove_tags', handleRemoveTags as unknown as ToolBindingEntry[1]],
-];
+function createRecordContext(runtime: McpBindingRuntime): RecordToolContext {
+  return { storage: runtime.storage };
+}
+
+export const recordBindings = defineToolGroup<RecordToolContext>(createRecordContext, [
+  ['devchain_create_record', handleCreateRecord],
+  ['devchain_update_record', handleUpdateRecord],
+  ['devchain_get_record', handleGetRecord],
+  ['devchain_list_records', handleListRecords],
+  ['devchain_add_tags', handleAddTags],
+  ['devchain_remove_tags', handleRemoveTags],
+]);

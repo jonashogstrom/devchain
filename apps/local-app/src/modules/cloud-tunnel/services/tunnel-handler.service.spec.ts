@@ -14,7 +14,22 @@ import {
   ValidationError,
 } from '../../../common/errors/error-types';
 
+jest.mock('../../../common/logging/logger', () => {
+  const testLogger = {
+    child: jest.fn(),
+    debug: jest.fn(),
+    error: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+  };
+  testLogger.child.mockReturnValue(testLogger);
+  return { logger: testLogger, createLogger: () => testLogger };
+});
+
 describe('TunnelHandlerService', () => {
+  const mockedLogger = jest.requireMock('../../../common/logging/logger').logger as {
+    error: jest.Mock;
+  };
   // board.* read handlers never touch the seam services; bare stubs suffice for
   // those tests. The board.* mutation tests inject a purpose-built mobileBoard.
   const mobileChat = {} as MobileChatRpcService;
@@ -32,11 +47,123 @@ describe('TunnelHandlerService', () => {
   const PARENT_ID_2 = '77777777-7777-4777-8777-777777777777';
   const CHILD_ID = '88888888-8888-4888-8888-888888888888';
   const CHILD_ID_2 = '99999999-9999-4999-8999-999999999999';
+  const OPERATION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const COMMENT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const ISO = '2026-05-10T18:00:00.000Z';
+
+  const makeEpic = (overrides: Record<string, unknown> = {}) => ({
+    id: EPIC_ID,
+    projectId: PROJECT_ID,
+    title: 'Fix mobile board',
+    statusId: STATUS_ID,
+    agentId: null,
+    parentId: null,
+    version: 1,
+    updatedAt: ISO,
+    description: null,
+    createdAt: ISO,
+    tags: [],
+    ...overrides,
+  });
+
+  const transcriptMetrics = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalTokens: 0,
+    totalContextConsumption: 0,
+    compactionCount: 0,
+    phaseBreakdowns: [],
+    visibleContextTokens: 0,
+    totalContextTokens: 0,
+    contextWindowTokens: 200_000,
+    costUsd: 0,
+    primaryModel: 'codex',
+    durationMs: 0,
+    messageCount: 0,
+    isOngoing: false,
+  };
+
+  const makeTranscriptChunk = () => ({
+    id: 'chunk-1',
+    type: 'ai' as const,
+    startTime: new Date('2026-05-10T18:00:00.000Z'),
+    endTime: new Date('2026-05-10T18:00:01.000Z'),
+    messages: [
+      {
+        id: 'message-1',
+        parentId: null,
+        role: 'assistant' as const,
+        timestamp: new Date('2026-05-10T18:00:00.000Z'),
+        content: [{ type: 'text' as const, text: 'Done' }],
+        toolCalls: [],
+        toolResults: [],
+        isMeta: false,
+        isSidechain: false,
+      },
+    ],
+    metrics: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      messageCount: 1,
+      durationMs: 1000,
+      costUsd: 0,
+    },
+    semanticSteps: [
+      {
+        id: 'step-1',
+        type: 'output' as const,
+        startTime: new Date('2026-05-10T18:00:00.500Z'),
+        durationMs: 500,
+        content: { outputText: 'Done' },
+        context: 'main' as const,
+      },
+    ],
+    turns: [
+      {
+        id: 'turn-1',
+        assistantMessageId: 'message-1',
+        timestamp: new Date('2026-05-10T18:00:00.000Z'),
+        steps: [
+          {
+            id: 'turn-step-1',
+            type: 'thinking' as const,
+            startTime: new Date('2026-05-10T18:00:00.250Z'),
+            durationMs: 250,
+            content: { thinkingText: 'Working' },
+            context: 'main' as const,
+          },
+        ],
+        summary: { thinkingCount: 1, toolCallCount: 0, subagentCount: 0, outputCount: 1 },
+        durationMs: 1000,
+        additiveTurnField: 'preserved',
+      },
+    ],
+    additiveChunkField: 'preserved',
+  });
+
+  const makeSession = (sessionId: string, overrides: Record<string, unknown> = {}) => ({
+    id: sessionId,
+    epicId: null,
+    agentId: AGENT_ID,
+    tmuxSessionId: null,
+    status: 'stopped',
+    startedAt: ISO,
+    endedAt: ISO,
+    name: null,
+    createdAt: ISO,
+    updatedAt: ISO,
+    ...overrides,
+  });
 
   it('returns mobile board DTOs and uses parent-only project counts for status counts', async () => {
     const storage = {
       listProjects: jest.fn().mockResolvedValue({
-        items: [{ id: 'project-1', name: 'Project One', rootPath: '/tmp/project-one' }],
+        items: [{ id: PROJECT_ID, name: 'Project One', rootPath: '/tmp/project-one' }],
         total: 1,
       }),
       listStatuses: jest.fn().mockResolvedValue({
@@ -56,7 +183,7 @@ describe('TunnelHandlerService', () => {
     await expect(
       service.handle({ jsonrpc: '2.0', id: '1', method: 'board.listProjects', params: {} }),
     ).resolves.toMatchObject({
-      result: [{ id: 'project-1', name: 'Project One' }],
+      result: [{ id: PROJECT_ID, name: 'Project One' }],
     });
 
     await expect(
@@ -94,15 +221,7 @@ describe('TunnelHandlerService', () => {
         position: 1,
       }),
       listEpicsByStatus: jest.fn().mockResolvedValue({
-        items: [
-          {
-            id: EPIC_ID,
-            title: 'Fix mobile board',
-            statusId: STATUS_ID,
-            agentId: AGENT_ID,
-            updatedAt: '2026-05-10T18:00:00.000Z',
-          },
-        ],
+        items: [makeEpic({ agentId: AGENT_ID })],
         total: 1,
       }),
       listStatuses: jest.fn().mockResolvedValue({
@@ -167,16 +286,13 @@ describe('TunnelHandlerService', () => {
 
   it('enriches getEpicDetail DTO with resolved agent and status metadata', async () => {
     const storage = {
-      getEpic: jest.fn().mockResolvedValue({
-        id: EPIC_ID,
-        title: 'Fix mobile board',
-        statusId: STATUS_ID,
-        projectId: PROJECT_ID,
-        agentId: AGENT_ID,
-        createdAt: '2026-05-09T12:00:00.000Z',
-        updatedAt: '2026-05-10T18:00:00.000Z',
-        tags: ['bridge'],
-      }),
+      getEpic: jest.fn().mockResolvedValue(
+        makeEpic({
+          agentId: AGENT_ID,
+          createdAt: '2026-05-09T12:00:00.000Z',
+          tags: ['bridge'],
+        }),
+      ),
       listStatuses: jest.fn().mockResolvedValue({
         items: [{ id: STATUS_ID, label: 'Todo', color: '#123456', position: 1 }],
         total: 1,
@@ -212,22 +328,12 @@ describe('TunnelHandlerService', () => {
     const storage = {
       listProjectEpics: jest.fn().mockResolvedValue({
         items: [
-          {
-            id: PARENT_ID,
-            title: 'Parent one',
-            statusId: STATUS_ID,
-            agentId: AGENT_ID,
-            updatedAt: '2026-05-10T18:00:00.000Z',
-            tags: ['alpha'],
-          },
-          {
+          makeEpic({ id: PARENT_ID, title: 'Parent one', agentId: AGENT_ID, tags: ['alpha'] }),
+          makeEpic({
             id: PARENT_ID_2,
             title: 'Parent two',
-            statusId: STATUS_ID,
-            agentId: null,
             updatedAt: '2026-05-10T19:00:00.000Z',
-            tags: [],
-          },
+          }),
         ],
         total: 2,
         limit: 20,
@@ -311,7 +417,7 @@ describe('TunnelHandlerService', () => {
       listProjectEpics: jest
         .fn()
         .mockResolvedValueOnce({
-          items: [{ id: PARENT_ID, title: 'Parent one', statusId: STATUS_ID, agentId: AGENT_ID }],
+          items: [makeEpic({ id: PARENT_ID, title: 'Parent one', agentId: AGENT_ID })],
           total: 1,
           limit: 20,
           offset: 0,
@@ -374,15 +480,7 @@ describe('TunnelHandlerService', () => {
         projectId: PROJECT_ID,
       }),
       listProjectEpics: jest.fn().mockResolvedValue({
-        items: [
-          {
-            id: PARENT_ID,
-            title: 'Parent one',
-            statusId: STATUS_ID,
-            agentId: AGENT_ID,
-            updatedAt: '2026-05-10T18:00:00.000Z',
-          },
-        ],
+        items: [makeEpic({ id: PARENT_ID, title: 'Parent one', agentId: AGENT_ID })],
         total: 1,
         limit: 10,
         offset: 5,
@@ -451,26 +549,21 @@ describe('TunnelHandlerService', () => {
       }),
       listParentChildren: jest.fn().mockResolvedValue({
         items: [
-          {
+          makeEpic({
             id: CHILD_ID,
             title: 'Child one',
             description: 'A child epic',
-            statusId: STATUS_ID,
             parentId: PARENT_ID,
             agentId: AGENT_ID,
             tags: ['bridge'],
             updatedAt: '2026-05-11T00:00:00.000Z',
-          },
-          {
+          }),
+          makeEpic({
             id: CHILD_ID_2,
             title: 'Child two',
-            description: null,
-            statusId: STATUS_ID,
             parentId: PARENT_ID,
-            agentId: null,
-            tags: [],
             updatedAt: '2026-05-10T23:59:00.000Z',
-          },
+          }),
         ],
         total: 2,
         limit: 50,
@@ -546,7 +639,7 @@ describe('TunnelHandlerService', () => {
         projectId: PROJECT_ID,
       }),
       listParentChildren: jest.fn().mockResolvedValue({
-        items: [{ id: CHILD_ID, statusId: STATUS_ID, parentId: PARENT_ID }],
+        items: [makeEpic({ id: CHILD_ID, parentId: PARENT_ID })],
         total: 1,
         limit: 10,
         offset: 20,
@@ -609,11 +702,84 @@ describe('TunnelHandlerService', () => {
     });
   });
 
+  it('validates trimmed params but dispatches the original values and additive keys', async () => {
+    const addEpicComment = jest.fn().mockResolvedValue({
+      id: COMMENT_ID,
+      epicId: EPIC_ID,
+      authorName: 'User',
+      content: 'comment',
+      createdAt: ISO,
+      updatedAt: ISO,
+    });
+    const board = { addEpicComment } as unknown as MobileBoardRpcService;
+    const service = new TunnelHandlerService({}, mobileChat, board, mobileViewport);
+    const params = {
+      projectId: PROJECT_ID,
+      epicId: EPIC_ID,
+      authorName: '  User  ',
+      content: '  comment  ',
+      additiveField: 'preserved',
+    };
+
+    await expect(
+      service.handle({ jsonrpc: '2.0', id: 'raw-params', method: 'board.addEpicComment', params }),
+    ).resolves.toMatchObject({ result: { id: COMMENT_ID } });
+    expect(addEpicComment).toHaveBeenCalledWith(params);
+  });
+
+  it('returns the same validated result object with additive JSON-compatible fields', async () => {
+    const producerResult = { ok: true, additiveField: { preserved: true } };
+    const viewport = {
+      unsubscribe: jest.fn().mockReturnValue(producerResult),
+    } as unknown as ViewportStreamerService;
+    const service = new TunnelHandlerService({}, mobileChat, mobileBoard, viewport);
+
+    const response = await service.handle({
+      jsonrpc: '2.0',
+      id: 'additive-result',
+      method: 'terminal.viewport.unsubscribe',
+      params: { subscriptionId: 'vp-1' },
+    });
+
+    expect(response.result).toBe(producerResult);
+  });
+
+  it('sanitizes invalid producer output and logs only its method and schema paths', async () => {
+    mockedLogger.error.mockClear();
+    const secretValue = 'must-not-enter-logs';
+    const storage = {
+      listProjects: jest.fn().mockResolvedValue({
+        items: [{ id: secretValue, name: 'Invalid project' }],
+        total: 1,
+      }),
+    };
+    const service = new TunnelHandlerService(storage, mobileChat, mobileBoard, mobileViewport);
+
+    await expect(
+      service.handle({
+        jsonrpc: '2.0',
+        id: 'invalid-result',
+        method: 'board.listProjects',
+        params: {},
+      }),
+    ).resolves.toEqual({
+      jsonrpc: '2.0',
+      id: 'invalid-result',
+      error: { code: -32603, message: 'Internal error' },
+    });
+
+    expect(mockedLogger.error).toHaveBeenCalledWith(
+      { method: 'board.listProjects', schemaPaths: ['0.id'] },
+      'RPC handler returned an invalid result',
+    );
+    expect(JSON.stringify(mockedLogger.error.mock.calls)).not.toContain(secretValue);
+  });
+
   it('delegates chat.listAgents to MobileChatRpcService and returns its result', async () => {
     const listAgents = jest
       .fn()
       .mockResolvedValue([
-        { id: AGENT_ID, name: 'Coder', type: 'agent', online: true, sessionId: 'sess-1' },
+        { id: AGENT_ID, name: 'Coder', type: 'agent', online: true, sessionId: STATUS_ID_2 },
       ]);
     const chat = { listAgents } as unknown as MobileChatRpcService;
     const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
@@ -626,7 +792,9 @@ describe('TunnelHandlerService', () => {
         params: { projectId: PROJECT_ID },
       }),
     ).resolves.toMatchObject({
-      result: [{ id: AGENT_ID, name: 'Coder', type: 'agent', online: true, sessionId: 'sess-1' }],
+      result: [
+        { id: AGENT_ID, name: 'Coder', type: 'agent', online: true, sessionId: STATUS_ID_2 },
+      ],
     });
 
     expect(listAgents).toHaveBeenCalledWith({ projectId: PROJECT_ID });
@@ -670,9 +838,14 @@ describe('TunnelHandlerService', () => {
 
   it('delegates chat.getTranscriptSummary to MobileChatRpcService', async () => {
     const SESSION_ID = '12121212-1212-4212-8212-121212121212';
-    const getTranscriptSummary = jest
-      .fn()
-      .mockResolvedValue({ sessionId: SESSION_ID, cursor: 'CUR' });
+    const getTranscriptSummary = jest.fn().mockResolvedValue({
+      sessionId: SESSION_ID,
+      providerName: 'codex',
+      metrics: transcriptMetrics,
+      messageCount: 0,
+      isOngoing: false,
+      cursor: 'CUR',
+    });
     const chat = { getTranscriptSummary } as unknown as MobileChatRpcService;
     const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
 
@@ -706,6 +879,65 @@ describe('TunnelHandlerService', () => {
       }),
     ).resolves.toMatchObject({ error: { code: -32602, message: 'Invalid params' } });
     expect(getTranscriptChunks).not.toHaveBeenCalled();
+  });
+
+  it('projects all transcript chunk and delta-tail dates before result validation', async () => {
+    const SESSION_ID = '12121212-1212-4212-8212-121212121212';
+    const chunk = makeTranscriptChunk();
+    const getTranscriptChunks = jest.fn().mockResolvedValue({
+      chunks: [chunk],
+      nextCursor: null,
+      prevCursor: null,
+      totalCount: 1,
+    });
+    const getTranscriptTail = jest.fn().mockResolvedValue({
+      kind: 'delta',
+      cursor: 'cursor-2',
+      replaceFromChunkId: chunk.id,
+      replaceFromChunkIndex: 0,
+      deltaChunks: [chunk],
+      deltaMessages: chunk.messages,
+      metrics: transcriptMetrics,
+      totalChunkCount: 1,
+      totalMessageCount: 1,
+    });
+    const chat = { getTranscriptChunks, getTranscriptTail } as unknown as MobileChatRpcService;
+    const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
+
+    const chunksResponse = await service.handle({
+      jsonrpc: '2.0',
+      id: 'transcript-chunks',
+      method: 'chat.getTranscriptChunks',
+      params: { sessionId: SESSION_ID, projectId: PROJECT_ID },
+    });
+    const tailResponse = await service.handle({
+      jsonrpc: '2.0',
+      id: 'transcript-tail',
+      method: 'chat.getTranscriptTail',
+      params: { sessionId: SESSION_ID, projectId: PROJECT_ID, since: 'cursor-1' },
+    });
+
+    const wireChunk = (chunksResponse.result as { chunks: Array<Record<string, unknown>> })
+      .chunks[0];
+    const turn = (wireChunk.turns as Array<Record<string, unknown>>)[0];
+    const turnStep = (turn.steps as Array<Record<string, unknown>>)[0];
+    expect(wireChunk).toMatchObject({
+      startTime: ISO,
+      endTime: '2026-05-10T18:00:01.000Z',
+      additiveChunkField: 'preserved',
+    });
+    expect((wireChunk.messages as Array<Record<string, unknown>>)[0].timestamp).toBe(ISO);
+    expect((wireChunk.semanticSteps as Array<Record<string, unknown>>)[0].startTime).toBe(
+      '2026-05-10T18:00:00.500Z',
+    );
+    expect(turn).toMatchObject({ timestamp: ISO, additiveTurnField: 'preserved' });
+    expect(turnStep.startTime).toBe('2026-05-10T18:00:00.250Z');
+    expect(
+      (tailResponse.result as { deltaMessages: Array<Record<string, unknown>> }).deltaMessages[0]
+        .timestamp,
+    ).toBe(ISO);
+    expect(JSON.parse(JSON.stringify(chunksResponse.result))).toEqual(chunksResponse.result);
+    expect(JSON.parse(JSON.stringify(tailResponse.result))).toEqual(tailResponse.result);
   });
 
   it('strictly validates and dispatches the Custom prompt read methods', async () => {
@@ -800,11 +1032,35 @@ describe('TunnelHandlerService', () => {
       }),
     ).resolves.toMatchObject({ result: { status: 'queued' } });
 
-    expect(sendMessage).toHaveBeenCalledWith({
+    expect(sendMessage).toHaveBeenCalledWith(
+      {
+        agentId: AGENT_ID,
+        projectId: PROJECT_ID,
+        text: 'hello',
+      },
+      undefined,
+    );
+  });
+
+  it('threads trusted crypto context separately while accepting spoofed passthrough fields', async () => {
+    const sendMessage = jest.fn().mockResolvedValue({ status: 'queued' });
+    const chat = { sendMessage } as unknown as MobileChatRpcService;
+    const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
+    const cryptoCtx = { senderKid: 'authenticated-kid' };
+    const params = {
       agentId: AGENT_ID,
       projectId: PROJECT_ID,
       text: 'hello',
-    });
+      senderName: 'Spoofed Name',
+      deviceName: 'Spoofed Device',
+      __senderKid: 'spoofed-kid',
+    };
+
+    await expect(
+      service.handle({ jsonrpc: '2.0', id: '16a', method: 'chat.sendMessage', params }, cryptoCtx),
+    ).resolves.toMatchObject({ result: { status: 'queued' } });
+
+    expect(sendMessage).toHaveBeenCalledWith(params, cryptoCtx);
   });
 
   it('rejects chat.sendMessage with empty/whitespace text before delegating', async () => {
@@ -866,12 +1122,15 @@ describe('TunnelHandlerService', () => {
       result: { status: 'delivered', messageId: 'm1', clientMessageId: CLIENT_MSG_ID },
     });
 
-    expect(sendMessage).toHaveBeenCalledWith({
-      agentId: AGENT_ID,
-      projectId: PROJECT_ID,
-      text: 'hi',
-      clientMessageId: CLIENT_MSG_ID,
-    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      {
+        agentId: AGENT_ID,
+        projectId: PROJECT_ID,
+        text: 'hi',
+        clientMessageId: CLIENT_MSG_ID,
+      },
+      undefined,
+    );
   });
 
   it('rejects chat.sendMessage with a non-uuid clientMessageId before delegating', async () => {
@@ -977,7 +1236,9 @@ describe('TunnelHandlerService', () => {
   });
 
   it('delegates chat.launchAgent and returns the operation handle', async () => {
-    const launchAgent = jest.fn().mockResolvedValue({ operationId: 'op-1', status: 'launching' });
+    const launchAgent = jest
+      .fn()
+      .mockResolvedValue({ operationId: OPERATION_ID, status: 'launching' });
     const chat = { launchAgent } as unknown as MobileChatRpcService;
     const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
 
@@ -988,7 +1249,7 @@ describe('TunnelHandlerService', () => {
         method: 'chat.launchAgent',
         params: { agentId: AGENT_ID, projectId: PROJECT_ID },
       }),
-    ).resolves.toMatchObject({ result: { operationId: 'op-1', status: 'launching' } });
+    ).resolves.toMatchObject({ result: { operationId: OPERATION_ID, status: 'launching' } });
     expect(launchAgent).toHaveBeenCalledWith({ agentId: AGENT_ID, projectId: PROJECT_ID });
   });
 
@@ -1097,9 +1358,21 @@ describe('TunnelHandlerService', () => {
 
   it('delegates chat.listPendingAskQuestions to MobileChatRpcService and returns its result', async () => {
     const SESSION_ID = '12121212-1212-4212-8212-121212121212';
-    const listPendingAskQuestions = jest
-      .fn()
-      .mockResolvedValue([{ toolUseId: 'toolu_1', questions: [], createdAt: 1, expiresAt: 2 }]);
+    const listPendingAskQuestions = jest.fn().mockResolvedValue([
+      {
+        toolUseId: 'toolu_1',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Decision',
+            multiSelect: false,
+            options: [{ label: 'Yes', description: 'Continue' }],
+          },
+        ],
+        createdAt: 1,
+        expiresAt: 2,
+      },
+    ]);
     const chat = { listPendingAskQuestions } as unknown as MobileChatRpcService;
     const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
 
@@ -1111,7 +1384,7 @@ describe('TunnelHandlerService', () => {
         params: { sessionId: SESSION_ID, projectId: PROJECT_ID },
       }),
     ).resolves.toMatchObject({
-      result: [{ toolUseId: 'toolu_1', questions: [], createdAt: 1, expiresAt: 2 }],
+      result: [{ toolUseId: 'toolu_1', createdAt: 1, expiresAt: 2 }],
     });
 
     expect(listPendingAskQuestions).toHaveBeenCalledWith({
@@ -1159,7 +1432,7 @@ describe('TunnelHandlerService', () => {
     it('delegates board.updateEpicAssignment to mobileBoard and returns its DTO', async () => {
       const updateEpicAssignment = jest
         .fn()
-        .mockResolvedValue({ id: EPIC_ID, version: 4, agentId: AGENT_ID, agentName: 'Coder' });
+        .mockResolvedValue(makeEpic({ version: 4, agentId: AGENT_ID, agentName: 'Coder' }));
       const board = { updateEpicAssignment } as unknown as MobileBoardRpcService;
       const service = new TunnelHandlerService({}, mobileChat, board, mobileViewport);
 
@@ -1182,7 +1455,7 @@ describe('TunnelHandlerService', () => {
     });
 
     it('accepts a null agentId (unassign) on board.updateEpicAssignment', async () => {
-      const updateEpicAssignment = jest.fn().mockResolvedValue({ id: EPIC_ID, agentId: null });
+      const updateEpicAssignment = jest.fn().mockResolvedValue(makeEpic({ agentId: null }));
       const board = { updateEpicAssignment } as unknown as MobileBoardRpcService;
       const service = new TunnelHandlerService({}, mobileChat, board, mobileViewport);
 
@@ -1268,8 +1541,17 @@ describe('TunnelHandlerService', () => {
     });
 
     it('delegates board.listEpicComments / board.addEpicComment / board.deleteEpicComment', async () => {
-      const listEpicComments = jest.fn().mockResolvedValue({ items: [], total: 0 });
-      const addEpicComment = jest.fn().mockResolvedValue({ id: 'c1' });
+      const listEpicComments = jest
+        .fn()
+        .mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+      const addEpicComment = jest.fn().mockResolvedValue({
+        id: COMMENT_ID,
+        epicId: EPIC_ID,
+        authorName: 'User',
+        content: 'hi',
+        createdAt: ISO,
+        updatedAt: ISO,
+      });
       const deleteEpicComment = jest.fn().mockResolvedValue({ deleted: true });
       const board = {
         listEpicComments,
@@ -1294,7 +1576,7 @@ describe('TunnelHandlerService', () => {
           method: 'board.addEpicComment',
           params: { projectId: PROJECT_ID, epicId: EPIC_ID, authorName: 'User', content: 'hi' },
         }),
-      ).resolves.toMatchObject({ result: { id: 'c1' } });
+      ).resolves.toMatchObject({ result: { id: COMMENT_ID } });
 
       await expect(
         service.handle({
@@ -1316,7 +1598,20 @@ describe('TunnelHandlerService', () => {
 
     it('delegates chat.listSessions to MobileChatRpcService and returns the history DTO', async () => {
       const listSessions = jest.fn().mockResolvedValue({
-        items: [{ id: SESSION_ID }],
+        items: [
+          {
+            id: SESSION_ID,
+            providerSessionId: null,
+            providerNameAtLaunch: null,
+            status: 'stopped',
+            startedAt: ISO,
+            endedAt: ISO,
+            lastActivityAt: ISO,
+            sizeBytes: 0,
+            transcriptAvailable: true,
+            name: null,
+          },
+        ],
         nextCursor: 'N',
         hasMore: true,
         total: 1,
@@ -1415,7 +1710,7 @@ describe('TunnelHandlerService', () => {
     });
 
     it('delegates chat.renameSession and accepts a null name (clear)', async () => {
-      const renameSession = jest.fn().mockResolvedValue({ id: SESSION_ID, name: null });
+      const renameSession = jest.fn().mockResolvedValue(makeSession(SESSION_ID));
       const chat = { renameSession } as unknown as MobileChatRpcService;
       const service = new TunnelHandlerService({}, chat, mobileBoard, mobileViewport);
 
@@ -1476,14 +1771,20 @@ describe('TunnelHandlerService', () => {
       const service = new TunnelHandlerService({}, mobileChat, mobileBoard, viewport);
 
       await expect(
-        service.handle({
-          jsonrpc: '2.0',
-          id: 'v1',
-          method: 'terminal.viewport.subscribe',
-          params: { sessionId: SESSION_ID, projectId: PROJECT_ID },
-        }),
+        service.handle(
+          {
+            jsonrpc: '2.0',
+            id: 'v1',
+            method: 'terminal.viewport.subscribe',
+            params: { sessionId: SESSION_ID, projectId: PROJECT_ID },
+          },
+          { senderKid: 'verified-device-kid' },
+        ),
       ).resolves.toMatchObject({ result: { subscriptionId: 'vp-1' } });
-      expect(subscribe).toHaveBeenCalledWith({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+      expect(subscribe).toHaveBeenCalledWith(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: 'verified-device-kid' },
+      );
     });
 
     it('rejects terminal.viewport.subscribe with a non-uuid sessionId before delegating', async () => {
@@ -1541,14 +1842,20 @@ describe('TunnelHandlerService', () => {
       const service = new TunnelHandlerService({}, mobileChat, mobileBoard, viewport);
 
       await expect(
-        service.handle({
-          jsonrpc: '2.0',
-          id: 'v5',
-          method: 'terminal.viewport.unsubscribe',
-          params: { subscriptionId: 'vp-1' },
-        }),
+        service.handle(
+          {
+            jsonrpc: '2.0',
+            id: 'v5',
+            method: 'terminal.viewport.unsubscribe',
+            params: { subscriptionId: 'vp-1' },
+          },
+          { senderKid: 'verified-device-kid' },
+        ),
       ).resolves.toMatchObject({ result: { ok: true } });
-      expect(unsubscribe).toHaveBeenCalledWith({ subscriptionId: 'vp-1' });
+      expect(unsubscribe).toHaveBeenCalledWith(
+        { subscriptionId: 'vp-1' },
+        { senderKid: 'verified-device-kid' },
+      );
     });
 
     it('rejects terminal.viewport.unsubscribe with an empty subscriptionId before delegating', async () => {
@@ -1783,7 +2090,7 @@ describe('TunnelHandlerService', () => {
     });
   });
 
-  describe('e2ee.adoptDeviceKey — installId supersede threading (M2)', () => {
+  describe('e2ee.adoptDeviceKey metadata threading', () => {
     const KID = 'a'.repeat(32);
     const PUB = Buffer.from(new Uint8Array(32).fill(1)).toString('base64');
     const INSTALL = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -1806,6 +2113,23 @@ describe('TunnelHandlerService', () => {
         }),
       ).resolves.toMatchObject({ result: { kid: KID, trust: 'unverified' } });
       expect(adopt).toHaveBeenCalledWith({ kid: KID, publicKeyB64: PUB }, INSTALL);
+    });
+
+    it('threads the bounded reported label into IncomingPeerKey', async () => {
+      const adopt = jest.fn().mockReturnValue({ kid: KID, trust: 'unverified' });
+      const service = makeHandler(adopt);
+
+      await service.handle({
+        jsonrpc: '2.0',
+        id: 'e-label',
+        method: 'e2ee.adoptDeviceKey',
+        params: { kid: KID, publicKeyB64: PUB, label: 'Pixel' },
+      });
+
+      expect(adopt).toHaveBeenCalledWith(
+        { kid: KID, publicKeyB64: PUB, label: 'Pixel' },
+        undefined,
+      );
     });
 
     it('is backward compatible: an old client omitting installId still adopts (installId undefined)', async () => {

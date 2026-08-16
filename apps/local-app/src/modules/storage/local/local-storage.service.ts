@@ -5,6 +5,7 @@ import {
   StorageService,
   ListOptions,
   ListResult,
+  ProjectListOptions,
   DocumentListFilters,
   DocumentIdentifier,
   ListProjectEpicsOptions,
@@ -22,12 +23,17 @@ import {
   ListScheduledEpicsOptions,
   ListScheduledEpicRunsOptions,
   type ClaimRunResult,
+  type CreateSkillSourceOptions,
+  type DeleteAgentOptions,
+  type UpdateScheduledEpicOptions,
 } from '../interfaces/storage.interface';
 import type { SnapshotPromptWriter } from '../interfaces/snapshot-prompt-writer.interface';
 import {
   Project,
   CreateProject,
   UpdateProject,
+  ProjectWorkspace,
+  DeleteProjectWorkspaceResult,
   Status,
   CreateStatus,
   UpdateStatus,
@@ -98,13 +104,11 @@ import {
   CreateScheduledEpicRun,
   UpdateScheduledEpicRun,
 } from '../models/domain.models';
-import { ValidationError, ConflictError } from '../../../common/errors/error-types';
 import { createLogger } from '../../../common/logging/logger';
 import {
   DEFAULT_FEATURE_FLAGS,
   type FeatureFlagConfig,
 } from '../../../common/config/feature-flags';
-import { RESERVED_COMMUNITY_SOURCE_NAMES } from './helpers/storage-helpers';
 import { createStorageDelegateContext } from './delegates/base-storage.delegate';
 import { AgentStorageDelegate } from './delegates/agent.delegate';
 import { AgentProfileStorageDelegate } from './delegates/agent-profile.delegate';
@@ -118,6 +122,7 @@ import { ProviderModelStorageDelegate } from './delegates/provider-model.delegat
 import { ProviderEffortStorageDelegate } from './delegates/provider-effort.delegate';
 import { ProviderPluginPolicyStorageDelegate } from './delegates/provider-plugin-policy.delegate';
 import { ProjectStorageDelegate } from './delegates/project.delegate';
+import { ProjectWorkspaceStorageDelegate } from './delegates/project-workspace.delegate';
 import { RecordStorageDelegate } from './delegates/record.delegate';
 import { ReviewStorageDelegate } from './delegates/review.delegate';
 import { SkillSourceStorageDelegate } from './delegates/skill-source.delegate';
@@ -141,6 +146,7 @@ const logger = createLogger('LocalStorageService');
 @Injectable()
 export class LocalStorageService implements StorageService, SnapshotPromptWriter {
   private readonly projectDelegate: ProjectStorageDelegate;
+  private readonly projectWorkspaceDelegate: ProjectWorkspaceStorageDelegate;
   private readonly statusDelegate: StatusStorageDelegate;
   private readonly epicDelegate: EpicStorageDelegate;
   private readonly tagDelegate: TagStorageDelegate;
@@ -165,25 +171,19 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
   constructor(@Inject(DB_CONNECTION) private readonly db: BetterSQLite3Database) {
     const context = createStorageDelegateContext(this.db);
     this.projectDelegate = new ProjectStorageDelegate(context);
+    this.projectWorkspaceDelegate = new ProjectWorkspaceStorageDelegate(context);
     this.statusDelegate = new StatusStorageDelegate(context);
     this.tagDelegate = new TagStorageDelegate(context);
+    const createTag = (data: CreateTag): Tag => this.tagDelegate.createTagSync(data);
     this.promptDelegate = new PromptStorageDelegate(context, {
-      createTag: (data) => this.createTag(data),
-      getPrompt: (id) => this.getPrompt(id),
+      createTag,
     });
     this.documentDelegate = new DocumentStorageDelegate(context, {
-      createTag: (data) => this.createTag(data),
-      getDocument: (identifier) => this.getDocument(identifier),
-      generateDocumentSlug: (projectId, desired, excludeId) =>
-        excludeId === undefined
-          ? this.generateDocumentSlug(projectId, desired)
-          : this.generateDocumentSlug(projectId, desired, excludeId),
-      setDocumentTags: (documentId, tagNames, projectId) =>
-        this.setDocumentTags(documentId, tagNames, projectId),
+      createTag,
     });
     this.epicDelegate = new EpicStorageDelegate(context, {
-      createTag: (data) => this.createTag(data),
-      getAgent: (id) => this.getAgent(id),
+      createTag,
+      getAgent: (id) => this.agentDelegate.getAgentSync(id),
       getAgentByName: (projectId, name) => this.getAgentByName(projectId, name),
       getStatus: (id) => this.statusDelegate.getStatus(id),
     });
@@ -193,12 +193,7 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     this.providerModelDelegate = new ProviderModelStorageDelegate(context);
     this.providerEffortDelegate = new ProviderEffortStorageDelegate(context);
     this.providerPluginPolicyDelegate = new ProviderPluginPolicyStorageDelegate(context);
-    this.skillSourceDelegate = new SkillSourceStorageDelegate(context, {
-      assertLocalSourceNameAvailableAcrossTypes: (sourceName) =>
-        this.assertLocalSourceNameAvailableAcrossTypes(sourceName),
-      getCommunitySkillSource: (id) => this.getCommunitySkillSource(id),
-      getLocalSkillSource: (id) => this.getLocalSkillSource(id),
-    });
+    this.skillSourceDelegate = new SkillSourceStorageDelegate(context);
     this.agentProfileDelegate = new AgentProfileStorageDelegate(context, {
       getAgentProfile: (id) => this.getAgentProfile(id),
       listAgentProfiles: (options) => this.listAgentProfiles(options),
@@ -212,16 +207,12 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
       getProfileProviderConfig: (id) => this.getProfileProviderConfig(id),
     });
     this.recordDelegate = new RecordStorageDelegate(context, {
-      createTag: (data) => this.createTag(data),
-      getRecord: (id) => this.getRecord(id),
+      createTag,
     });
     this.watcherDelegate = new WatcherStorageDelegate(context);
     this.subscriberDelegate = new SubscriberStorageDelegate(context);
     this.guestDelegate = new GuestStorageDelegate(context);
-    this.reviewDelegate = new ReviewStorageDelegate(context, {
-      getReview: (id) => this.getReview(id),
-      getReviewComment: (id) => this.getReviewComment(id),
-    });
+    this.reviewDelegate = new ReviewStorageDelegate(context);
     this.scheduledEpicDelegate = new ScheduledEpicStorageDelegate(context);
     this.sessionDelegate = new SessionStorageDelegate(context);
     logger.info('LocalStorageService initialized');
@@ -229,28 +220,6 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
 
   getFeatureFlags(): FeatureFlagConfig {
     return { ...DEFAULT_FEATURE_FLAGS };
-  }
-
-  private async assertLocalSourceNameAvailableAcrossTypes(sourceName: string): Promise<void> {
-    if (RESERVED_COMMUNITY_SOURCE_NAMES.has(sourceName)) {
-      throw new ValidationError('Local source name conflicts with a built-in source.', {
-        name: sourceName,
-      });
-    }
-
-    const { communitySkillSources } = await import('../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const existingCommunitySource = await this.db
-      .select({ id: communitySkillSources.id })
-      .from(communitySkillSources)
-      .where(eq(communitySkillSources.name, sourceName))
-      .limit(1);
-
-    if (existingCommunitySource.length > 0) {
-      throw new ConflictError('Local source name conflicts with an existing community source.', {
-        name: sourceName,
-      });
-    }
   }
 
   // Projects
@@ -277,7 +246,7 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     return this.projectDelegate.findProjectByPath(path);
   }
 
-  async listProjects(options: ListOptions = {}): Promise<ListResult<Project>> {
+  async listProjects(options: ProjectListOptions = {}): Promise<ListResult<Project>> {
     return this.projectDelegate.listProjects(options);
   }
 
@@ -291,6 +260,33 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
 
   async deleteProject(id: string): Promise<void> {
     return this.projectDelegate.deleteProject(id);
+  }
+
+  async listProjectWorkspaces(): Promise<ProjectWorkspace[]> {
+    return this.projectWorkspaceDelegate.listProjectWorkspaces();
+  }
+
+  async getProjectWorkspace(id: string): Promise<ProjectWorkspace> {
+    return this.projectWorkspaceDelegate.getProjectWorkspace(id);
+  }
+
+  async createProjectWorkspace(name: string): Promise<ProjectWorkspace> {
+    return this.projectWorkspaceDelegate.createProjectWorkspace(name);
+  }
+
+  async renameProjectWorkspace(id: string, name: string): Promise<ProjectWorkspace> {
+    return this.projectWorkspaceDelegate.renameProjectWorkspace(id, name);
+  }
+
+  async reorderProjectWorkspaces(workspaceIds: string[]): Promise<ProjectWorkspace[]> {
+    return this.projectWorkspaceDelegate.reorderProjectWorkspaces(workspaceIds);
+  }
+
+  async deleteProjectWorkspace(
+    id: string,
+    replacementId: string,
+  ): Promise<DeleteProjectWorkspaceResult> {
+    return this.projectWorkspaceDelegate.deleteProjectWorkspace(id, replacementId);
   }
 
   // Statuses
@@ -670,14 +666,6 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     return this.skillSourceDelegate.listSourceProjectEnabled(projectId);
   }
 
-  async seedSourceProjectDisabled(projectId: string, sourceNames: string[]): Promise<void> {
-    return this.skillSourceDelegate.seedSourceProjectDisabled(projectId, sourceNames);
-  }
-
-  async deleteSourceProjectEnabledBySource(sourceName: string): Promise<void> {
-    return this.skillSourceDelegate.deleteSourceProjectEnabledBySource(sourceName);
-  }
-
   // Community Skill Sources
   async listCommunitySkillSources(): Promise<CommunitySkillSource[]> {
     return this.skillSourceDelegate.listCommunitySkillSources();
@@ -693,8 +681,9 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
 
   async createCommunitySkillSource(
     data: CreateCommunitySkillSource,
+    options?: CreateSkillSourceOptions,
   ): Promise<CommunitySkillSource> {
-    return this.skillSourceDelegate.createCommunitySkillSource(data);
+    return this.skillSourceDelegate.createCommunitySkillSource(data, options);
   }
 
   async deleteCommunitySkillSource(id: string): Promise<void> {
@@ -710,8 +699,15 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     return this.skillSourceDelegate.getLocalSkillSource(id);
   }
 
-  async createLocalSkillSource(data: CreateLocalSkillSource): Promise<LocalSkillSource> {
-    return this.skillSourceDelegate.createLocalSkillSource(data);
+  async getLocalSkillSourceByName(name: string): Promise<LocalSkillSource | null> {
+    return this.skillSourceDelegate.getLocalSkillSourceByName(name);
+  }
+
+  async createLocalSkillSource(
+    data: CreateLocalSkillSource,
+    options?: CreateSkillSourceOptions,
+  ): Promise<LocalSkillSource> {
+    return this.skillSourceDelegate.createLocalSkillSource(data, options);
   }
 
   async deleteLocalSkillSource(id: string): Promise<void> {
@@ -840,8 +836,8 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     return this.agentDelegate.updateAgent(id, data);
   }
 
-  async deleteAgent(id: string): Promise<void> {
-    return this.agentDelegate.deleteAgent(id);
+  async deleteAgent(id: string, options?: DeleteAgentOptions): Promise<void> {
+    return this.agentDelegate.deleteAgent(id, options);
   }
 
   // Records (with optimistic locking)
@@ -867,22 +863,6 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
 
   async deleteRecord(id: string): Promise<void> {
     return this.recordDelegate.deleteRecord(id);
-  }
-
-  private async generateDocumentSlug(
-    projectId: string | null,
-    desired: string,
-    excludeId?: string,
-  ): Promise<string> {
-    return this.documentDelegate.generateDocumentSlug(projectId, desired, excludeId);
-  }
-
-  private async setDocumentTags(
-    documentId: string,
-    tagNames: string[],
-    projectId: string | null,
-  ): Promise<void> {
-    return this.documentDelegate.setDocumentTags(documentId, tagNames, projectId);
   }
 
   // ============================================
@@ -1092,8 +1072,9 @@ export class LocalStorageService implements StorageService, SnapshotPromptWriter
     id: string,
     data: UpdateScheduledEpic,
     expectedVersion: number,
+    options?: UpdateScheduledEpicOptions,
   ): Promise<ScheduledEpic> {
-    return this.scheduledEpicDelegate.updateScheduledEpic(id, data, expectedVersion);
+    return this.scheduledEpicDelegate.updateScheduledEpic(id, data, expectedVersion, options);
   }
 
   async deleteScheduledEpic(id: string): Promise<void> {

@@ -265,6 +265,34 @@ describe('AgentMessageDeliveryService', () => {
       ]);
     });
 
+    it('passes deliveryMode to the pool and exposes only its classified failure', async () => {
+      const { service, messageEnqueue } = buildService();
+      messageEnqueue.enqueue.mockResolvedValue([
+        { agentId: 'agent-1', status: 'failed', error: 'DELIVERY_FAILED' },
+      ]);
+
+      const outcome = await service.deliver(
+        ['agent-1'],
+        {
+          kind: 'mcp.project',
+          body: 'idle delivery',
+          source: 'test',
+          projectId: 'p1',
+          senderName: 'A',
+        },
+        { deliveryMode: 'on_idle', immediate: true },
+      );
+
+      expect(messageEnqueue.enqueue).toHaveBeenCalledWith([
+        expect.objectContaining({ deliveryMode: 'on_idle', immediate: true }),
+      ]);
+      expect(outcome.results[0]).toEqual({
+        agentId: 'agent-1',
+        status: 'failed',
+        error: 'DELIVERY_FAILED',
+      });
+    });
+
     it('invokes formatter.format() for mcp.direct kind', async () => {
       const { service, formatter, messageEnqueue } = buildService();
 

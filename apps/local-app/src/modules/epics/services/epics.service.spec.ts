@@ -538,6 +538,52 @@ describe('EpicsService', () => {
       expect(eventsService.publish).not.toHaveBeenCalled();
     });
 
+    it('publishes epic.updated with empty changes when the stored tag set changes', async () => {
+      storage.getEpic.mockResolvedValue({ ...baseEpic, tags: ['Alpha'] });
+      storage.updateEpic.mockResolvedValue({
+        ...baseEpic,
+        tags: ['Alpha', 'beta'],
+        version: 2,
+      });
+      storage.getProject.mockResolvedValue({ id: 'project-1', name: 'Demo Project' });
+
+      await service.updateEpic(baseEpic.id, { tags: ['Alpha', 'beta'] }, baseEpic.version);
+
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        'epic.updated',
+        expect.objectContaining({
+          epicId: baseEpic.id,
+          changes: {},
+        }),
+      );
+    });
+
+    it('does not publish when stored tags only change order', async () => {
+      storage.getEpic.mockResolvedValue({ ...baseEpic, tags: ['Alpha', 'beta'] });
+      storage.updateEpic.mockResolvedValue({
+        ...baseEpic,
+        tags: ['beta', 'Alpha'],
+        version: 2,
+      });
+
+      await service.updateEpic(baseEpic.id, { tags: ['beta', 'Alpha'] }, baseEpic.version);
+
+      expect(eventsService.publish).not.toHaveBeenCalled();
+    });
+
+    it('treats tag identity as case-sensitive when deciding to publish', async () => {
+      storage.getEpic.mockResolvedValue({ ...baseEpic, tags: ['Alpha'] });
+      storage.updateEpic.mockResolvedValue({ ...baseEpic, tags: ['alpha'], version: 2 });
+      storage.getProject.mockResolvedValue({ id: 'project-1', name: 'Demo Project' });
+
+      await service.updateEpic(baseEpic.id, { tags: ['alpha'] }, baseEpic.version);
+
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        'epic.updated',
+        expect.objectContaining({ changes: {} }),
+      );
+    });
+
     it('does NOT publish epic.updated when only skillsRequired changes', async () => {
       storage.getEpic.mockResolvedValue({ ...baseEpic, skillsRequired: ['openai/review'] });
       storage.updateEpic.mockResolvedValue({

@@ -122,6 +122,34 @@ describe('Teams Regression – Destructive Flows', () => {
       expect((members[0] as { agent_id: string }).agent_id).toBe(agentB);
     });
 
+    it('rejects an agent that becomes Team Lead before a protected delete transaction', async () => {
+      const agentA = seedAgent('Agent-A');
+      const agentB = seedAgent('Agent-B');
+      const teamId = seedTeam('Protected Team', agentA, [agentA, agentB]);
+
+      const preflight = sqlite
+        .prepare('SELECT team_lead_agent_id FROM teams WHERE id = ?')
+        .get(teamId) as { team_lead_agent_id: string | null };
+      expect(preflight.team_lead_agent_id).toBe(agentA);
+      sqlite.prepare('UPDATE teams SET team_lead_agent_id = ? WHERE id = ?').run(agentB, teamId);
+
+      await expect(service.deleteAgent(agentB, { protectTeamLead: true })).rejects.toMatchObject({
+        details: {
+          code: 'AGENT_IS_TEAM_LEAD',
+          agentId: agentB,
+          projectId,
+          teamId,
+          teamName: 'Protected Team',
+        },
+      });
+
+      expect(sqlite.prepare('SELECT id FROM agents WHERE id = ?').get(agentB)).toBeDefined();
+      expect(sqlite.prepare('SELECT id FROM teams WHERE id = ?').get(teamId)).toBeDefined();
+      expect(
+        sqlite.prepare('SELECT agent_id FROM team_members WHERE agent_id = ?').get(agentB),
+      ).toBeDefined();
+    });
+
     it('succeeds and removes team membership when agent is NOT a lead', async () => {
       const agentA = seedAgent('Agent-A');
       const agentB = seedAgent('Agent-B');
@@ -134,6 +162,21 @@ describe('Teams Regression – Destructive Flows', () => {
       const members = sqlite.prepare('SELECT * FROM team_members').all();
       expect(members).toHaveLength(1);
       expect((members[0] as { agent_id: string }).agent_id).toBe(agentA);
+    });
+
+    it('retains empty-team cleanup when both deletion protections allow the target', async () => {
+      const agentA = seedAgent('Protected Non-Lead');
+      const teamId = seedTeam('Protected Leadless Team', null, [agentA]);
+
+      await expect(
+        service.deleteAgent(agentA, { protectProjectOwner: true, protectTeamLead: true }),
+      ).resolves.not.toThrow();
+
+      expect(sqlite.prepare('SELECT id FROM agents WHERE id = ?').get(agentA)).toBeUndefined();
+      expect(sqlite.prepare('SELECT id FROM teams WHERE id = ?').get(teamId)).toBeUndefined();
+      expect(sqlite.prepare('SELECT * FROM team_members WHERE team_id = ?').all(teamId)).toEqual(
+        [],
+      );
     });
 
     it('clears only the deleted agent lead when agent leads one team but is member of another', async () => {

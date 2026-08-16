@@ -1,6 +1,6 @@
-import { Injectable, Inject, forwardRef, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { createLogger } from '../../../common/logging/logger';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import { TerminalSessionRegistry } from './terminal-session/terminal-session-registry';
 import { TerminalIOService } from './terminal-io/terminal-io.service';
 
@@ -9,14 +9,13 @@ const logger = createLogger('TerminalRegistryRehydrator');
 @Injectable()
 export class TerminalRegistryRehydrator implements OnApplicationBootstrap {
   constructor(
-    @Inject(forwardRef(() => SessionsService))
-    private readonly sessionsService: SessionsService,
+    private readonly sessionTerminalRuntime: SessionTerminalRuntimeService,
     private readonly registry: TerminalSessionRegistry,
     private readonly terminalIO: TerminalIOService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    const metas = this.sessionsService.listRunningSessionMetas();
+    const metas = this.sessionTerminalRuntime.listStartupSessions();
     const nonLiveSessionIds = new Set<string>();
 
     if (metas.length > 0) {
@@ -30,7 +29,7 @@ export class TerminalRegistryRehydrator implements OnApplicationBootstrap {
           { sessionId: meta.sessionId, tmuxSessionName: meta.tmuxSessionName },
           'Dead tmux orphan at bootstrap — marking session failed',
         );
-        this.sessionsService.markSessionFailed(
+        this.sessionTerminalRuntime.retireConfirmedLoss(
           meta.sessionId,
           'tmux session no longer exists at bootstrap',
         );
@@ -56,6 +55,6 @@ export class TerminalRegistryRehydrator implements OnApplicationBootstrap {
         logger.debug({ sessionId: meta.sessionId }, 'Concurrent rehydration; entry already exists');
       }
     }
-    await this.sessionsService.reconcileCodexPluginProfiles(nonLiveSessionIds);
+    await this.sessionTerminalRuntime.reconcileCodexStartup(nonLiveSessionIds);
   }
 }

@@ -8,7 +8,7 @@ import {
   MessageBody,
   WsException,
 } from '@nestjs/websockets';
-import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
 import { createHash } from 'node:crypto';
@@ -39,7 +39,7 @@ import {
 import type { TerminalPromptPasteAck, TerminalPromptPasteInput } from '../dtos/ws-envelope.dto';
 import type { FrameEvent } from '../services/terminal-session/terminal-frame-stream';
 import type { TerminalSession } from '../services/terminal-session/terminal-session';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import { normalizeLineEndings, stripFinalLineEnding } from '../utils/normalize-line-endings';
 import { RealtimeBroadcastService } from '../../realtime/services/realtime-broadcast.service';
 import { MetricsService } from '../../metrics/services/metrics.service';
@@ -148,7 +148,7 @@ function classifySubscribeCursor(lastSequence: unknown, sequenceEpoch: unknown):
 
 @WebSocketGateway({ cors: false, transports: ['websocket'] })
 @Injectable()
-export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   @WebSocketServer()
   server!: Server;
 
@@ -175,14 +175,12 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
   constructor(
     private readonly streamService: TerminalStreamService,
     private readonly settingsService: SettingsService,
-    @Inject(forwardRef(() => PtyService))
     private readonly ptyService: PtyService,
     private readonly seedService: TerminalSeedService,
     @Inject(forwardRef(() => TerminalIOService))
     private readonly terminalIO: TerminalIOService,
     private readonly registry: TerminalSessionRegistry,
-    @Inject(forwardRef(() => SessionsService))
-    private readonly sessionsService: SessionsService,
+    private readonly sessionTerminalRuntime: SessionTerminalRuntimeService,
     private readonly realtimeBroadcast: RealtimeBroadcastService,
     private readonly sendScheduler: TerminalSendSchedulerService,
     private readonly metricsService: MetricsService,
@@ -193,6 +191,12 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
     // callback (not a constructor edge) keeps the service → gateway direction acyclic.
     this.streamService.setClearExpiryHandler((sessionId) =>
       this.retireSessionRecoveries(sessionId),
+    );
+  }
+
+  onModuleInit(): void {
+    this.ptyService.setOutputHandler((sessionId, data) =>
+      this.broadcastTerminalData(sessionId, data),
     );
   }
 
@@ -488,7 +492,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
       currentSequence,
       sequenceEpoch,
       replayStatus,
-      historyRefreshable: !this.sessionsService.usesAlternateScreenFor(sessionId),
+      historyRefreshable: !this.sessionTerminalRuntime.getDescriptor(sessionId).usesAlternateScreen,
     });
     client.emit('message', createEnvelope(`terminal/${sessionId}`, 'subscribed', payload));
   }
@@ -895,7 +899,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
         // Ink TUI (claude/codex) repaints its transcript tail into scrollback at the resized
         // geometry, baking duplicated history. tmux window style + the dedup cache stay ungated
         // for every provider — only the jiggle is skipped (mirrors maybeRestoreViewportModes).
-        if (this.sessionsService.usesAlternateScreenFor(sessionId)) {
+        if (this.sessionTerminalRuntime.getDescriptor(sessionId).usesAlternateScreen) {
           void this.ptyService.triggerRedraw(sessionId);
         } else {
           logger.debug({ sessionId }, 'terminal_theme_redraw_skipped_non_altscreen');
@@ -1317,7 +1321,10 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
     // Mirror handleDeadTmuxSession: without this the DB row stays 'running'
     // and the registry entry survives, blocking a later restore with
     // "TerminalSession already exists".
-    this.sessionsService.markSessionFailed(payload.sessionId, 'tmux session lost (health check)');
+    this.sessionTerminalRuntime.retireConfirmedLoss(
+      payload.sessionId,
+      'tmux session lost (health check)',
+    );
     this.cleanupSessionLifecycle(payload.sessionId, {
       replayRetentionMs: 0,
       disposeTerminalState: true,
@@ -1459,7 +1466,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   private async handleDeadTmuxSession(sessionId: string, client: Socket): Promise<void> {
     logger.warn({ sessionId }, 'Dead tmux detected — marking session failed');
-    this.sessionsService.markSessionFailed(sessionId, 'tmux session no longer exists');
+    this.sessionTerminalRuntime.retireConfirmedLoss(sessionId, 'tmux session no longer exists');
     this.cleanupSessionLifecycle(sessionId, {
       replayRetentionMs: 0,
       disposeTerminalState: true,
@@ -1544,7 +1551,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
    * itself a no-op when the PTY isn't streaming.
    */
   private maybeRestoreViewportModes(sessionId: string): void {
-    if (!this.sessionsService.usesAlternateScreenFor(sessionId)) return;
+    if (!this.sessionTerminalRuntime.getDescriptor(sessionId).usesAlternateScreen) return;
     const now = Date.now();
     const last = this.viewportRestoreAt.get(sessionId) ?? 0;
     if (now - last < VIEWPORT_RESTORE_COALESCE_MS) {

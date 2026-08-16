@@ -9,7 +9,7 @@ import {
 } from '../../settings/services/settings.service';
 import { TerminalSessionRegistry } from './terminal-session/terminal-session-registry';
 import { TerminalIOService } from './terminal-io/terminal-io.service';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import type { Socket } from 'socket.io';
 
 describe('TerminalSeedService', () => {
@@ -17,7 +17,7 @@ describe('TerminalSeedService', () => {
   let settingsService: jest.Mocked<Partial<SettingsService>>;
   let terminalSessionRegistry: jest.Mocked<Partial<TerminalSessionRegistry>>;
   let terminalIO: jest.Mocked<Partial<TerminalIOService>>;
-  let sessionsService: jest.Mocked<Partial<SessionsService>>;
+  let sessionTerminalRuntime: jest.Mocked<Partial<SessionTerminalRuntimeService>>;
 
   beforeEach(() => {
     settingsService = {
@@ -34,16 +34,20 @@ describe('TerminalSeedService', () => {
       getCursorPosition: jest.fn().mockResolvedValue(null),
     };
 
-    sessionsService = {
-      getSession: jest.fn().mockReturnValue(null),
-      usesAlternateScreenFor: jest.fn().mockReturnValue(false),
+    sessionTerminalRuntime = {
+      getDescriptor: jest.fn().mockImplementation((sessionId: string) => ({
+        sessionId,
+        tmuxSessionName: null,
+        normalizeLf: true,
+        usesAlternateScreen: false,
+      })),
     };
 
     seedService = new TerminalSeedService(
       settingsService as SettingsService,
       terminalSessionRegistry as unknown as TerminalSessionRegistry,
       terminalIO as TerminalIOService,
-      sessionsService as SessionsService,
+      sessionTerminalRuntime as SessionTerminalRuntimeService,
     );
   });
 
@@ -227,9 +231,11 @@ describe('TerminalSeedService', () => {
         return TerminalSeedDelivery.Continue;
       };
 
-      sessionsService.getSession = jest.fn().mockReturnValue({
-        id: 'session-123',
-        tmuxSessionId: 'tmux-123',
+      sessionTerminalRuntime.getDescriptor = jest.fn().mockReturnValue({
+        sessionId: 'session-123',
+        tmuxSessionName: 'tmux-123',
+        normalizeLf: true,
+        usesAlternateScreen: false,
       }) as jest.Mock;
 
       terminalIO.captureHistory = jest.fn().mockResolvedValue({
@@ -352,7 +358,12 @@ describe('TerminalSeedService', () => {
         ok: true,
         output: 'oldest-line\nmiddle-line\nnewest-line\n',
       });
-      sessionsService.usesAlternateScreenFor = jest.fn().mockReturnValue(true) as jest.Mock;
+      sessionTerminalRuntime.getDescriptor = jest.fn().mockReturnValue({
+        sessionId: 'session-123',
+        tmuxSessionName: 'tmux-123',
+        normalizeLf: true,
+        usesAlternateScreen: true,
+      }) as jest.Mock;
 
       await seedService.emitSeedToClient({
         deliver,

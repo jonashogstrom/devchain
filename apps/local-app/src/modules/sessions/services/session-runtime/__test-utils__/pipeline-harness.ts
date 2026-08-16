@@ -161,7 +161,6 @@ export function createLaunchPipelineHarness() {
     getEpic: jest.fn().mockResolvedValue(fakeEpic()),
     getAgentProfile: jest.fn().mockResolvedValue(fakeProfile()),
     getProvider: jest.fn().mockResolvedValue(fakeProvider()),
-    getProviderEnvForProject: jest.fn().mockReturnValue(null),
     getInitialSessionPrompt: jest.fn().mockResolvedValue(null),
     listProfileProviderConfigsByProfile: jest.fn().mockResolvedValue([fakeProfileProviderConfig()]),
   };
@@ -229,30 +228,26 @@ export function createLaunchPipelineHarness() {
   };
 
   const runtimeContextCapture = {
-    rotateEpoch: jest.fn().mockReturnValue('capture-epoch'),
     clear: jest.fn(),
-    snapshot: jest.fn().mockReturnValue(null),
-    restoreSnapshot: jest.fn(),
-    get: jest.fn(),
-    getEpoch: jest.fn(),
-  };
-  const claudeLaunchSettings = {
-    prepare: jest.fn().mockResolvedValue({
-      optionArgs: [],
-      runtimeEnv: {},
-      captureEnabled: false,
-    }),
-    cleanupSession: jest.fn().mockResolvedValue(undefined),
-    cleanupSessionSync: jest.fn(),
   };
   const codexPluginProfiles = {
-    prepare: jest.fn().mockResolvedValue(null),
-    buildHelperArgv: jest.fn(),
-    awaitAcknowledgement: jest.fn().mockResolvedValue('/tmp/codex-profile'),
-    cleanupPrepared: jest.fn().mockResolvedValue(undefined),
+    cleanupSession: jest.fn().mockResolvedValue(undefined),
   };
-  const providerPluginPolicy = {
-    resolveAll: jest.fn().mockResolvedValue([]),
+  const providerRuntimePlan = Object.freeze({ mode: 'new' });
+  const preparedProviderRuntime = {
+    config: {
+      argv: ['test-provider', '--session', 'new'],
+      commandArgs: ['test-provider', '--session', 'new'],
+      env: null,
+      contextWindowOverride: null,
+      promptHandshake: undefined,
+    },
+    afterCommand: jest.fn().mockResolvedValue(undefined),
+    rollback: jest.fn().mockResolvedValue(undefined),
+  };
+  const providerRuntimePreparation = {
+    createPlan: jest.fn().mockResolvedValue(providerRuntimePlan),
+    materialize: jest.fn().mockResolvedValue(preparedProviderRuntime),
   };
 
   // Build the pipeline via direct instantiation (bypass DI decorators)
@@ -274,9 +269,8 @@ export function createLaunchPipelineHarness() {
     eventsService, // EventsService
     teamsService, // TeamsService
     runtimeContextCapture, // RuntimeContextCaptureService
-    claudeLaunchSettings, // ClaudeLaunchSettingsMaterializerService
     codexPluginProfiles, // CodexPluginProfileMaterializerService
-    providerPluginPolicy, // ProviderPluginPolicyService
+    providerRuntimePreparation, // ProviderRuntimePreparationService
   );
 
   return {
@@ -297,9 +291,10 @@ export function createLaunchPipelineHarness() {
       eventsService,
       teamsService,
       runtimeContextCapture,
-      claudeLaunchSettings,
       codexPluginProfiles,
-      providerPluginPolicy,
+      providerRuntimePlan,
+      preparedProviderRuntime,
+      providerRuntimePreparation,
     },
   };
 }
@@ -310,18 +305,12 @@ export function createRestorePipelineHarness(opts?: { streamService?: unknown })
   const sqliteMock = createSqliteMock();
   const adapter = createMockAdapter();
 
-  // For restore, the adapter.buildLaunchArgs must include the providerSessionId
-  adapter.buildLaunchArgs.mockImplementation((input: { providerSessionId?: string }) => ({
-    argv: ['test-provider', '--resume', input.providerSessionId ?? 'sess-id'],
-  }));
-
   const storage = {
     getAgent: jest.fn().mockResolvedValue(fakeAgent()),
     getProject: jest.fn().mockResolvedValue(fakeProject()),
     getEpic: jest.fn().mockResolvedValue(fakeEpic()),
     getAgentProfile: jest.fn().mockResolvedValue(fakeProfile()),
     getProvider: jest.fn().mockResolvedValue(fakeProvider()),
-    getProviderEnvForProject: jest.fn().mockReturnValue(null),
     getInitialSessionPrompt: jest.fn().mockResolvedValue(null),
     listProfileProviderConfigsByProfile: jest.fn().mockResolvedValue([fakeProfileProviderConfig()]),
   };
@@ -372,31 +361,21 @@ export function createRestorePipelineHarness(opts?: { streamService?: unknown })
     initializeBuffer: jest.fn(),
   };
 
-  const runtimeContextCapture = {
-    rotateEpoch: jest.fn().mockReturnValue('capture-epoch'),
-    clear: jest.fn(),
-    snapshot: jest.fn().mockReturnValue(null),
-    restoreSnapshot: jest.fn(),
-    get: jest.fn(),
-    getEpoch: jest.fn(),
+  const providerRuntimePlan = Object.freeze({ mode: 'restore' });
+  const preparedProviderRuntime = {
+    config: {
+      argv: ['test-provider', '--resume', 'provider-session-1'],
+      commandArgs: ['test-provider', '--resume', 'provider-session-1'],
+      env: null,
+      contextWindowOverride: null,
+      promptHandshake: undefined,
+    },
+    afterCommand: jest.fn().mockResolvedValue(undefined),
+    rollback: jest.fn().mockResolvedValue(undefined),
   };
-  const claudeLaunchSettings = {
-    prepare: jest.fn().mockResolvedValue({
-      optionArgs: [],
-      runtimeEnv: {},
-      captureEnabled: false,
-    }),
-    cleanupSession: jest.fn().mockResolvedValue(undefined),
-    cleanupSessionSync: jest.fn(),
-  };
-  const codexPluginProfiles = {
-    prepare: jest.fn().mockResolvedValue(null),
-    buildHelperArgv: jest.fn(),
-    awaitAcknowledgement: jest.fn().mockResolvedValue('/tmp/codex-profile'),
-    cleanupPrepared: jest.fn().mockResolvedValue(undefined),
-  };
-  const providerPluginPolicy = {
-    resolveAll: jest.fn().mockResolvedValue([]),
+  const providerRuntimePreparation = {
+    createPlan: jest.fn().mockResolvedValue(providerRuntimePlan),
+    materialize: jest.fn().mockResolvedValue(preparedProviderRuntime),
   };
 
   // Default: prepare returns a stopped session row when called with SELECT,
@@ -457,10 +436,7 @@ export function createRestorePipelineHarness(opts?: { streamService?: unknown })
     terminalSessionRegistry, // TerminalSessionRegistry
     eventsService, // EventsService
     streamService, // TerminalStreamService
-    runtimeContextCapture, // RuntimeContextCaptureService
-    claudeLaunchSettings, // ClaudeLaunchSettingsMaterializerService
-    codexPluginProfiles, // CodexPluginProfileMaterializerService
-    providerPluginPolicy, // ProviderPluginPolicyService
+    providerRuntimePreparation, // ProviderRuntimePreparationService
   );
 
   /**
@@ -512,10 +488,9 @@ export function createRestorePipelineHarness(opts?: { streamService?: unknown })
       terminalSessionRegistry,
       eventsService,
       streamService,
-      runtimeContextCapture,
-      claudeLaunchSettings,
-      codexPluginProfiles,
-      providerPluginPolicy,
+      providerRuntimePlan,
+      preparedProviderRuntime,
+      providerRuntimePreparation,
     },
   };
 }

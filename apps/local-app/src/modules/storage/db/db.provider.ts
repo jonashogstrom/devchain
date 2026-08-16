@@ -11,6 +11,27 @@ const logger = createLogger('DbProvider');
 
 export const DB_CONNECTION = 'DB_CONNECTION';
 
+type ProcessReportWithNetworkControl = typeof process.report & {
+  excludeNetwork: boolean;
+};
+
+type DatabaseFactory = (dbPath: string) => Database.Database;
+
+export function openDatabaseWithNetworkReportExcluded(
+  dbPath: string,
+  createDatabase: DatabaseFactory = (path) => new Database(path),
+): Database.Database {
+  const diagnosticReport = process.report as ProcessReportWithNetworkControl;
+  const previousExcludeNetwork = diagnosticReport.excludeNetwork;
+
+  diagnosticReport.excludeNetwork = true;
+  try {
+    return createDatabase(dbPath);
+  } finally {
+    diagnosticReport.excludeNetwork = previousExcludeNetwork;
+  }
+}
+
 export const dbProvider: Provider = {
   provide: DB_CONNECTION,
   useFactory: (): BetterSQLite3Database => {
@@ -18,7 +39,7 @@ export const dbProvider: Provider = {
 
     logger.info({ dbPath: config.dbPath }, 'Initializing SQLite database');
 
-    const sqlite = new Database(config.dbPath);
+    const sqlite = openDatabaseWithNetworkReportExcluded(config.dbPath);
 
     // Enable WAL mode for better concurrency
     sqlite.pragma('journal_mode = WAL');

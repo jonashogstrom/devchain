@@ -43,6 +43,7 @@ describe('SubscriberExecutorService characterization', () => {
         .mockReturnValue({ id: 'session-1', agentId: 'agent-1', tmuxSessionId: 'tmux-1' }),
     };
     const amd = { deliver: jest.fn() };
+    const teams = { listTeamsByAgent: jest.fn().mockResolvedValue([]) };
     const eventLog = { recordHandledOk: jest.fn(), recordHandledFail: jest.fn() };
     const moduleRef = { get: jest.fn().mockReturnValue({ launch: jest.fn() }) };
     const service = new SubscriberExecutorService(
@@ -54,6 +55,7 @@ describe('SubscriberExecutorService characterization', () => {
       eventLog as never,
       new EventEmitter2(),
       new AutomationSchedulerService(),
+      teams as never,
       moduleRef as never,
     );
 
@@ -89,6 +91,7 @@ describe('SubscriberExecutorService characterization', () => {
         terminalIO,
         sessionsService: sessions,
         amd,
+        teamsService: teams,
         projectId: 'project-1',
         tmuxSessionName: 'tmux-1',
       }),

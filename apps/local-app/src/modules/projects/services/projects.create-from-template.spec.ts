@@ -474,6 +474,27 @@ describe('ProjectsService.createFromTemplate (real storage)', () => {
       expect(persisted.name).toBe('Test Project');
     });
 
+    it('persists an explicit destination workspace without importing workspace data', async () => {
+      const destination = await h.storage.createProjectWorkspace('Destination');
+      const unified = bundledUnified(emptyTemplate());
+      const { deps } = buildDeps(h, unified);
+
+      const result = (await createFromTemplateWithHelper(
+        {
+          name: 'Placed Project',
+          rootPath: '/placed',
+          slug: 'my-template',
+          workspaceId: destination.id,
+        },
+        deps as never,
+      )) as AnyRec;
+
+      expect(result.project.workspaceId).toBe(destination.id);
+      expect((await h.storage.getProject(result.project.id as string)).workspaceId).toBe(
+        destination.id,
+      );
+    });
+
     it('passes the version to UnifiedTemplateService.getTemplate when provided', async () => {
       const unified = bundledUnified(emptyTemplate(), { source: 'registry', version: '1.2.0' });
       const { deps } = buildDeps(h, unified);

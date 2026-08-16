@@ -47,6 +47,8 @@ interface DeviceE2eeExchange {
   deviceEncPubKey: string;
   deviceEncKid: string;
   pairingMac: string;
+  installId?: string;
+  deviceName?: string;
 }
 
 // base64url <-> JSON helpers for the QR payload (ASCII-only fields, so btoa/atob are safe).
@@ -136,7 +138,14 @@ export function useQrAuth(identityServiceUrl: string, mode: 'claim' | 'provision
       const res = await fetch('/api/e2ee/pairing/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId, ...e2ee }),
+        body: JSON.stringify({
+          channelId,
+          deviceEncPubKey: e2ee.deviceEncPubKey,
+          deviceEncKid: e2ee.deviceEncKid,
+          pairingMac: e2ee.pairingMac,
+          ...(e2ee.installId !== undefined ? { installId: e2ee.installId } : {}),
+          ...(e2ee.deviceName !== undefined ? { label: e2ee.deviceName } : {}),
+        }),
       });
       if (!res.ok) return;
       // Surface the safety number so the user can compare both screens (Task:8). The QR

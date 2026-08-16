@@ -119,7 +119,8 @@ export const EVENT_FIELDS_CATALOG: Record<string, SubscribableEventDefinition> =
   'epic.updated': {
     name: 'epic.updated',
     label: 'Epic Updated',
-    description: 'Fired when an epic is updated (title, status, agent, or parent changed)',
+    description:
+      'Fired when an epic is updated (title, status, agent, parent, or stored tags changed)',
     category: 'epic',
     fields: [
       // Base fields

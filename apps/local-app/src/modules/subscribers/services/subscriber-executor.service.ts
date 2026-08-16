@@ -87,7 +87,6 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
   /** Event handler reference for cleanup */
   private eventHandler: ((eventName: string | string[], ...args: unknown[]) => void) | null = null;
 
-  private teamsServiceRef?: TeamsService;
   private sessionRuntimeRef?: SessionRuntime;
 
   constructor(
@@ -99,18 +98,9 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
     private readonly eventLogService: EventLogService,
     private readonly eventEmitter: EventEmitter2,
     private readonly scheduler: AutomationSchedulerService,
+    private readonly teamsService: TeamsService,
     private readonly moduleRef: ModuleRef,
   ) {}
-
-  private getTeamsService(): TeamsService {
-    if (!this.teamsServiceRef) {
-      this.teamsServiceRef = this.moduleRef.get(TeamsService, { strict: false });
-      if (!this.teamsServiceRef) {
-        throw new Error('TeamsService is not available in the current module context');
-      }
-    }
-    return this.teamsServiceRef;
-  }
 
   private getSessionRuntime(): SessionRuntime {
     if (!this.sessionRuntimeRef) {
@@ -738,7 +728,7 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
             try {
               const { vars, recipientLegacyVariables } = await buildPromptRenderContext({
                 recipientAgentId: payload.agentId ?? undefined,
-                teams: this.getTeamsService(),
+                teams: this.teamsService,
                 extras: context,
               });
               resolved[inputName] = renderTemplate(customValue, vars, [
@@ -945,6 +935,7 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
       sessionCoordinator: this.sessionCoordinator,
       amd: this.amd,
       storage: this.storage,
+      teamsService: this.teamsService,
       sessionId,
       agentId: payload.agentId ?? null,
       projectId,
@@ -978,7 +969,7 @@ export class SubscriberExecutorService implements OnModuleInit, OnModuleDestroy 
     this.setCooldown(subscriber.id, cooldownKey);
 
     // 9. Handle retry on failure if configured
-    if (!actionResult.success && subscriber.retryOnError) {
+    if (!actionResult.success && subscriber.retryOnError && actionResult.retryable !== false) {
       this.logger.debug(
         { subscriberId: subscriber.id, error: actionResult.error },
         'Action failed, retrying after 1s delay',

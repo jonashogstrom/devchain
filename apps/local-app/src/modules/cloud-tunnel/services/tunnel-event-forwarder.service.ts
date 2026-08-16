@@ -9,6 +9,7 @@ import { createLogger } from '../../../common/logging/logger';
 import { broadcastRegistry } from '../../events/catalog/broadcast-registry';
 import { projectBroadcast } from '../../events/catalog/project-broadcast';
 import { ActiveSessionLookup } from '../../sessions/services/active-session-lookup.service';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 import { TunnelClientService } from './tunnel-client.service';
 import { TunnelPushCryptoService } from './tunnel-push-crypto.service';
 
@@ -91,6 +92,7 @@ export class TunnelEventForwarderService implements OnModuleInit, OnModuleDestro
     private readonly activeSessions: ActiveSessionLookup,
     private readonly tunnelClient: TunnelClientService,
     private readonly pushCrypto: TunnelPushCryptoService,
+    private readonly workspaceMode: WorkspaceModeCoordinatorService,
   ) {}
 
   onModuleInit(): void {
@@ -122,6 +124,11 @@ export class TunnelEventForwarderService implements OnModuleInit, OnModuleDestro
       // Nothing can be sent while the tunnel is down — skip before doing any work.
       // Mobile recovers via per-topic catch-up on reconnect (stream is a hint).
       if (!this.tunnelClient.canPush()) return;
+
+      if (!(await this.allowsScopedDelivery())) {
+        logger.debug({ event }, 'Project push withheld while workspace delivery is restricted');
+        return;
+      }
 
       // AUTH-THEN-ENCRYPT: source-side scope authorization runs FIRST (the local-app
       // originates these frames), before any payload is sealed.
@@ -170,11 +177,17 @@ export class TunnelEventForwarderService implements OnModuleInit, OnModuleDestro
           eventType: projected.type,
           payload: outboundPayload,
         };
+        if (!(await this.allowsScopedDelivery())) return;
         this.tunnelClient.sendPush(frame);
       }
     } catch (err) {
       logger.error({ err, event }, 'Tunnel event forwarding failed');
     }
+  }
+
+  private async allowsScopedDelivery(): Promise<boolean> {
+    const mode = await this.workspaceMode.getSnapshot().catch(() => null);
+    return !!mode && !mode.multiWorkspaceMode && !mode.failClosedPending;
   }
 
   /**

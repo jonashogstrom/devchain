@@ -40,18 +40,6 @@ jest.mock('../../utils/tmux-naming.util', () => ({
   buildTmuxSessionName: (...args: string[]) => `tmux-${args.join('-')}`,
 }));
 
-jest.mock('../provider-launch-config', () => ({
-  resolve: jest.fn().mockImplementation((input: { providerSessionId?: string }) => {
-    const sessionId = input.providerSessionId ?? 'provider-session-1';
-    return {
-      argv: ['test-provider', '--resume', sessionId],
-      commandArgs: ['test-provider', '--resume', sessionId],
-      env: null,
-    };
-  }),
-  ProfileOptionsError: class ProfileOptionsError extends Error {},
-}));
-
 // ── Imports ────────────────────────────────────────────────────────────
 
 import { createRestorePipelineHarness } from './__test-utils__/pipeline-harness';

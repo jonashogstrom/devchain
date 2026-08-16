@@ -15,6 +15,7 @@ export interface CreateFromRegistryInput {
   projectName: string;
   projectDescription?: string;
   rootPath: string;
+  workspaceId?: string;
 }
 
 export interface CreateFromRegistryResult {
@@ -22,6 +23,7 @@ export interface CreateFromRegistryResult {
     id: string;
     name: string;
     rootPath: string;
+    workspaceId: string;
   };
   fromRegistry: true;
   templateSlug: string;
@@ -51,7 +53,7 @@ export class ProjectRegistryImportService {
   async createProjectFromRegistry(
     input: CreateFromRegistryInput,
   ): Promise<CreateFromRegistryResult> {
-    const { slug, version, projectName, projectDescription, rootPath } = input;
+    const { slug, version, projectName, projectDescription, rootPath, workspaceId } = input;
 
     logger.info({ slug, version, projectName, rootPath }, 'Creating project from registry');
 
@@ -79,6 +81,7 @@ export class ProjectRegistryImportService {
       description: projectDescription ?? null,
       rootPath,
       isTemplate: false,
+      ...(workspaceId ? { workspaceId } : {}),
     });
 
     logger.info({ projectId: project.id }, 'Created bare project');
@@ -188,6 +191,7 @@ export class ProjectRegistryImportService {
         id: project.id,
         name: project.name,
         rootPath: project.rootPath,
+        workspaceId: project.workspaceId,
       },
       fromRegistry: true,
       templateSlug: slug,

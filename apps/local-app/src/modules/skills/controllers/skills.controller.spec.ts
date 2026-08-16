@@ -1,11 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { SkillsController } from './skills.controller';
-import { SkillSyncService } from '../services/skill-sync.service';
+import { SkillSourceLifecycleService } from '../services/skill-source-lifecycle.service';
 import { SkillsService } from '../services/skills.service';
 
 describe('SkillsController', () => {
   let controller: SkillsController;
-  let skillSyncService: {
+  let skillSourceLifecycle: {
     syncAll: jest.Mock;
     syncSource: jest.Mock;
   };
@@ -29,7 +29,7 @@ describe('SkillsController', () => {
   const skillId = '00000000-0000-0000-0000-000000000002';
 
   beforeEach(async () => {
-    skillSyncService = {
+    skillSourceLifecycle = {
       syncAll: jest.fn(),
       syncSource: jest.fn(),
     };
@@ -68,8 +68,8 @@ describe('SkillsController', () => {
           useValue: skillsService,
         },
         {
-          provide: SkillSyncService,
-          useValue: skillSyncService,
+          provide: SkillSourceLifecycleService,
+          useValue: skillSourceLifecycle,
         },
       ],
     }).compile();
@@ -78,7 +78,7 @@ describe('SkillsController', () => {
   });
 
   it('returns explicit already_running sync result for concurrent sync calls', async () => {
-    skillSyncService.syncAll.mockResolvedValue({
+    skillSourceLifecycle.syncAll.mockResolvedValue({
       status: 'already_running',
       added: 0,
       updated: 0,
@@ -90,12 +90,12 @@ describe('SkillsController', () => {
 
     const result = await controller.syncSkills({});
 
-    expect(skillSyncService.syncAll).toHaveBeenCalledTimes(1);
+    expect(skillSourceLifecycle.syncAll).toHaveBeenCalledTimes(1);
     expect(result.status).toBe('already_running');
   });
 
   it('calls syncSource when sourceName is provided', async () => {
-    skillSyncService.syncSource.mockResolvedValue({
+    skillSourceLifecycle.syncSource.mockResolvedValue({
       status: 'completed',
       added: 1,
       updated: 0,
@@ -107,7 +107,7 @@ describe('SkillsController', () => {
 
     const result = await controller.syncSkills({ sourceName: 'openai' });
 
-    expect(skillSyncService.syncSource).toHaveBeenCalledWith('openai');
+    expect(skillSourceLifecycle.syncSource).toHaveBeenCalledWith('openai');
     expect(result.status).toBe('completed');
     expect(result.added).toBe(1);
   });

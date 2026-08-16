@@ -79,6 +79,27 @@ describe('CatalogBroadcasterService', () => {
     ).toHaveLength(0);
   });
 
+  it('broadcasts tag-only epic updates to boards without assignment visualization', () => {
+    emitter.emit('epic.updated', {
+      epicId: 'e1',
+      projectId: 'p1',
+      version: 2,
+      epicTitle: 'Some epic',
+      changes: {},
+    });
+
+    expect(mockBroadcaster.broadcastEvent).toHaveBeenCalledWith(
+      'project/p1/epics',
+      'updated',
+      expect.objectContaining({ epicId: 'e1', version: 2, changes: {} }),
+    );
+    expect(
+      (mockBroadcaster.broadcastEvent as jest.Mock).mock.calls.filter(
+        ([topic]: [string]) => topic === 'project/p1/agent-messages',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('treats a first assignment as having no source and an unassignment as nothing', () => {
     emitter.emit('epic.updated', {
       epicId: 'e1',

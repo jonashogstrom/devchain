@@ -44,10 +44,10 @@ const SCREEN: ViewportScreen = {
   rows: 24,
 };
 
-function mobileService(): CryptoEnvelopeService {
+function mobileService(device = mobile, deviceSharedKey = sharedKey): CryptoEnvelopeService {
   const provider: E2eeKeyProvider = {
-    resolveSealKey: () => ({ kid: mobile.kid, key: sharedKey }),
-    getKeyById: (kid) => (kid === pc.kid || kid === mobile.kid ? sharedKey : undefined),
+    resolveSealKey: () => ({ kid: device.kid, key: deviceSharedKey }),
+    getKeyById: (kid) => (kid === pc.kid || kid === device.kid ? deviceSharedKey : undefined),
   };
   return new CryptoEnvelopeService(provider, makeRng(0x3333));
 }
@@ -75,7 +75,9 @@ const pairedDevice: FakeDevice = {
 
 function makeService(devices: FakeDevice[], opts?: { e2eeRequired?: boolean }) {
   const keypair = { getOrCreate: jest.fn().mockResolvedValue(pc) };
-  const deviceStore = { list: jest.fn(() => devices) };
+  const deviceStore = {
+    get: jest.fn((kid: string) => devices.find((device) => device.kid === kid) ?? null),
+  };
   const svc = new TunnelViewportCryptoService(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     keypair as any,
@@ -89,7 +91,7 @@ function makeService(devices: FakeDevice[], opts?: { e2eeRequired?: boolean }) {
 describe('TunnelViewportCryptoService', () => {
   it('seals a full screen — the phone opens it with matching sessionId + seq', async () => {
     const { svc } = makeService([pairedDevice]);
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, mobile.kid);
     expect(channel.mode).toBe('encrypted');
 
     const env = (await channel.sealScreen!(SESSION_ID, 7, SCREEN)) as E2eeEnvelope;
@@ -100,7 +102,7 @@ describe('TunnelViewportCryptoService', () => {
 
   it('binds sessionId + seq into the AAD — a different seq or session fails closed', async () => {
     const { svc } = makeService([pairedDevice]);
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, mobile.kid);
     const env = (await channel.sealScreen!(SESSION_ID, 7, SCREEN)) as E2eeEnvelope;
 
     await expect(mobileService().open(env, openCtx(SESSION_ID, 8))).rejects.toBeInstanceOf(
@@ -113,21 +115,21 @@ describe('TunnelViewportCryptoService', () => {
 
   it('falls back to plaintext when no device is paired', async () => {
     const { svc } = makeService([]);
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, null);
     expect(channel.mode).toBe('plaintext');
     expect(channel.sealScreen).toBeUndefined();
   });
 
   it('blocks when E2EE is required but no device is paired', async () => {
     const { svc } = makeService([], { e2eeRequired: true });
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, null);
     expect(channel.mode).toBe('blocked');
     expect(channel.reason).toBe('peer-incapable-required');
   });
 
   it('treats a missing instanceId (pre-ready) as plaintext — cannot bind AAD', async () => {
     const { svc } = makeService([pairedDevice]);
-    const channel = await svc.resolveViewportChannel(null);
+    const channel = await svc.resolveViewportChannel(null, null);
     expect(channel.mode).toBe('plaintext');
   });
 
@@ -136,17 +138,36 @@ describe('TunnelViewportCryptoService', () => {
     // content in plaintext under strict mode — the frame is withheld.
     const { svc, keypair } = makeService([pairedDevice], { e2eeRequired: true });
     keypair.getOrCreate.mockRejectedValueOnce(new Error('keystore unavailable'));
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, mobile.kid);
     expect(channel.mode).toBe('blocked');
     expect(channel.reason).toBe('peer-incapable-required');
     expect(channel.sealScreen).toBeUndefined();
   });
 
-  it('falls back to plaintext when the local keypair fails and E2EE is optional (back-compat)', async () => {
+  it('blocks an owner-bound lease when the local keypair fails even if E2EE is optional', async () => {
     const { svc, keypair } = makeService([pairedDevice]);
     keypair.getOrCreate.mockRejectedValueOnce(new Error('keystore unavailable'));
-    const channel = await svc.resolveViewportChannel(INSTANCE_ID);
-    expect(channel.mode).toBe('plaintext');
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, mobile.kid);
+    expect(channel.mode).toBe('blocked');
     expect(channel.sealScreen).toBeUndefined();
+  });
+
+  it('seals for the exact owner kid rather than the most recently paired device', async () => {
+    const other = generateX25519KeyPair(makeRng(0x4444));
+    const otherSharedKey = deriveSharedKey(other.privateKey, pc.publicKey);
+    const otherDevice: FakeDevice = {
+      kid: other.kid,
+      publicKeyB64: bytesToBase64(other.publicKey),
+      trust: 'verified',
+      addedAt: '2026-02-01T00:00:00.000Z',
+    };
+    const { svc } = makeService([pairedDevice, otherDevice]);
+    const channel = await svc.resolveViewportChannel(INSTANCE_ID, mobile.kid);
+    const env = (await channel.sealScreen!(SESSION_ID, 0, SCREEN)) as E2eeEnvelope;
+
+    await expect(mobileService().open(env, openCtx(SESSION_ID, 0))).resolves.toEqual(SCREEN);
+    await expect(
+      mobileService(other, otherSharedKey).open(env, openCtx(SESSION_ID, 0)),
+    ).rejects.toBeInstanceOf(E2eeAuthenticationError);
   });
 });

@@ -479,16 +479,13 @@ describe('useQrAuth', () => {
       expect(JSON.parse(completeCall![1].body)).toEqual({ channelId: 'ch-1', ...deviceE2ee });
     });
 
-    // Phase-1 Task:5 (paired-device-dedup): the renderer spreads `...e2ee` blindly, so an
-    // installId relayed by identity-service through the QR channel reaches the complete body
-    // (the new-phone → PC installId delivery seam). This is the cross-component half of
-    // "new phone + PC: installId carried through" — `completeE2ee` does NOT enumerate fields.
-    it('forwards a relayed installId to the complete body via the ...e2ee spread (Task:5)', async () => {
+    it('maps relayed install identity and device name into the complete body', async () => {
       const deviceE2eeWithInstall = {
         deviceEncPubKey: 'mobpub',
         deviceEncKid: 'mobkid',
         pairingMac: 'themac',
         installId: '11111111-1111-4111-8111-111111111111',
+        deviceName: 'Pixel 8',
       };
       mockFetch([
         initiateOk(),
@@ -516,10 +513,13 @@ describe('useQrAuth', () => {
         (c) => c[0] === '/api/e2ee/pairing/complete',
       );
       expect(completeCall).toBeDefined();
-      // installId rides the spread into the complete body unchanged.
       expect(JSON.parse(completeCall![1].body)).toEqual({
         channelId: 'ch-1',
-        ...deviceE2eeWithInstall,
+        deviceEncPubKey: 'mobpub',
+        deviceEncKid: 'mobkid',
+        pairingMac: 'themac',
+        installId: '11111111-1111-4111-8111-111111111111',
+        label: 'Pixel 8',
       });
     });
   });

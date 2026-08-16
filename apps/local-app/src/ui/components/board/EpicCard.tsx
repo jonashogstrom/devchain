@@ -1,5 +1,4 @@
 import { useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/components/ui/card';
 import { EpicTooltipWrapper } from '@/ui/components/shared/EpicTooltipWrapper';
 import { cn } from '@/ui/lib/utils';
@@ -15,13 +14,13 @@ export interface EpicCardProps {
   onKeyboardMove: (epic: Epic, direction: 'left' | 'right') => void;
   onToggleParentFilter: (epic: Epic) => void;
   isActiveParent: boolean;
+  onOpenEpicDetails: (epic: Epic) => void;
   statuses: Status[];
   renderPreview?: (subCount?: number) => React.ReactNode;
   statusLabel?: string;
   statusColor?: string;
   agentName?: string | null;
   onBulkEdit?: (e: React.MouseEvent) => void;
-  onViewDetails?: (e: React.MouseEvent) => void;
   onMoveToWorktree?: (e: React.MouseEvent) => void;
   subEpicCountsByStatus?: Record<string, number>;
 }
@@ -36,17 +35,16 @@ export function EpicCard({
   onKeyboardMove,
   onToggleParentFilter,
   isActiveParent,
+  onOpenEpicDetails,
   statuses,
   renderPreview = () => null,
   statusLabel,
   statusColor,
   agentName,
   onBulkEdit,
-  onViewDetails,
   onMoveToWorktree,
   subEpicCountsByStatus,
 }: EpicCardProps) {
-  const navigate = useNavigate();
   const showFilterToggle = epic.parentId === null;
 
   const subEpicSummary = useMemo(
@@ -62,11 +60,10 @@ export function EpicCard({
 
   const hasSubEpicSummary = subEpicSummary.length > 0;
   const totalSubEpicCount = subEpicSummary.reduce((sum, entry) => sum + entry.count, 0);
-
-  const handleFilterToggle = (event?: React.MouseEvent) => {
-    event?.stopPropagation();
-    onToggleParentFilter(epic);
-  };
+  const titleClassName =
+    showFilterToggle && isActiveParent
+      ? 'text-primary underline decoration-2'
+      : 'text-primary hover:underline';
 
   return (
     <Card
@@ -82,7 +79,7 @@ export function EpicCard({
       aria-label={`Epic: ${epic.title}. Press Enter to open, arrow keys to move between columns, E to edit, Delete to remove.`}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {
-          navigate(`/epics/${epic.id}`);
+          onOpenEpicDetails(epic);
         } else if (e.key === 'e' || e.key === 'E') {
           e.preventDefault();
           onEdit(epic);
@@ -111,14 +108,7 @@ export function EpicCard({
               </span>
             )}
             <CardTitle
-              className={cn(
-                'text-sm font-semibold cursor-pointer truncate',
-                showFilterToggle
-                  ? isActiveParent
-                    ? 'text-primary underline decoration-2'
-                    : 'text-primary hover:underline'
-                  : 'text-primary hover:underline',
-              )}
+              className={cn('text-sm font-semibold cursor-pointer truncate', titleClassName)}
               data-testid={`epic-title-${epic.id}`}
             >
               <EpicTooltipWrapper
@@ -140,7 +130,10 @@ export function EpicCard({
                   e.stopPropagation();
                   onDelete(epic);
                 }}
-                onViewDetails={onViewDetails}
+                onViewDetails={(e) => {
+                  e.stopPropagation();
+                  onOpenEpicDetails(epic);
+                }}
                 onToggleParentFilter={(e) => {
                   e.stopPropagation();
                   onToggleParentFilter(epic);
@@ -156,9 +149,9 @@ export function EpicCard({
                   onClick={(e) => {
                     e.stopPropagation();
                     if (showFilterToggle) {
-                      handleFilterToggle();
+                      onToggleParentFilter(epic);
                     } else {
-                      navigate(`/epics/${epic.id}`);
+                      onOpenEpicDetails(epic);
                     }
                   }}
                   aria-label={`Open epic ${epic.title}`}

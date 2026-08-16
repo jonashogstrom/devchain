@@ -350,5 +350,22 @@ describe('prompt-tools', () => {
       expect(data.prompts).toHaveLength(1);
       expect(data.prompts[0].title).toBe('Hello Prompt');
     });
+
+    it('returns session resolution failures before listing prompts', async () => {
+      const ctx = makeCtx({
+        resolveSessionContext: jest.fn().mockResolvedValue({
+          success: false,
+          error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' },
+        }),
+      });
+
+      await expect(handleListPrompts(ctx, { sessionId: 'missing-session' })).resolves.toMatchObject(
+        {
+          success: false,
+          error: { code: 'SESSION_NOT_FOUND' },
+        },
+      );
+      expect(ctx.storage.listPrompts).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,379 +1,427 @@
-import { type ChangeEventHandler, useCallback, useEffect, useState } from 'react';
-import { DeleteProjectDialog } from '@/ui/components/project/DeleteProjectDialog';
-import { ImportResultDialog } from '@/ui/components/project/ImportResultDialog';
-import { UpgradeDialog } from '@/ui/components/project/UpgradeDialog';
-import { ExportDialog } from '@/ui/components/project/ExportDialog';
-import { ProjectConfigurationModal } from '@/ui/components/project/ProjectConfigurationModal';
-import { EditProjectDialog } from '@/ui/components/project/EditProjectDialog';
-import { ImportSourceModal } from '@/ui/components/project/ImportSourceModal';
 import { CreateProjectDialog } from '@/ui/components/project/CreateProjectDialog';
+import { DeleteProjectDialog } from '@/ui/components/project/DeleteProjectDialog';
+import { EditProjectDialog } from '@/ui/components/project/EditProjectDialog';
+import { ExportDialog } from '@/ui/components/project/ExportDialog';
+import { ImportResultDialog } from '@/ui/components/project/ImportResultDialog';
+import { ImportSourceModal } from '@/ui/components/project/ImportSourceModal';
+import { ProjectConfigurationModal } from '@/ui/components/project/ProjectConfigurationModal';
+import { ProjectSetupWizard } from '@/ui/components/project/ProjectSetupWizard';
 import { ProviderMappingModal } from '@/ui/components/project/ProviderMappingModal';
 import { ProviderMismatchWarningModal } from '@/ui/components/project/ProviderMismatchWarningModal';
-import { ProjectSetupWizard } from '@/ui/components/project/ProjectSetupWizard';
-import { useCreateProjectWizard } from '@/ui/hooks/useCreateProjectWizard';
+import { UpgradeDialog } from '@/ui/components/project/UpgradeDialog';
+import { ConfirmDialog } from '@/ui/components/shared/ConfirmDialog';
+import { Button } from '@/ui/components/ui/button';
 import {
-  useImportProjectWizard,
-  useUpgradeProjectWizard,
-  type ImportResult,
-} from '@/ui/hooks/useImportProjectWizard';
-import { useToast } from '@/ui/hooks/use-toast';
-import type {
-  SetupPreviewRequest,
-  UpgradeProjectResponse,
-} from '@/ui/pages/projects/lib/project-api';
-import type { ProjectsPageController } from '@/ui/hooks/useProjectsPageController';
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/ui/components/ui/dialog';
+import { Input } from '@/ui/components/ui/input';
+import { Label } from '@/ui/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/ui/components/ui/select';
+import type { ProjectsDialogsModel, ProjectWizardModel } from './projects-page-presentation';
 
 interface ProjectsDialogsProps {
-  controller: ProjectsPageController;
+  model: ProjectsDialogsModel;
 }
 
-export function ProjectsDialogs({ controller }: ProjectsDialogsProps) {
-  const {
-    showDialog,
-    setShowDialog,
-    formData,
-    setFormData,
-    pathValidation,
-    handlePathChange,
-    handleSubmit,
-    resetForm,
-    updateMutation,
-    deleteConfirm,
-    setDeleteConfirm,
-    confirmDelete,
-    deleteMutation,
-    fileInputRef,
-    showImportModal,
-    setShowImportModal,
-    importTarget,
-    selectedTemplateId,
-    handleImportTemplateChange,
-    templates,
-    selectedImportTemplateSource,
-    sortedImportVersions,
-    selectedImportVersion,
-    setSelectedImportVersion,
-    handleImportFromFile,
-    showTemplateDialog,
-    setShowTemplateDialog,
-    handleTemplateSubmit,
-    templateSourceTab,
-    setTemplateSourceTab,
-    templateFormData,
-    setTemplateFormData,
-    selectedTemplate,
-    sortedVersions,
-    handleTemplateChange,
-    handleTemplatePathChange,
-    handleTemplateFilePathChange,
-    templatePathValidation,
-    templateFilePathValidation,
-    resetTemplateForm,
-    createFromTemplateMutation,
-    upgradeTarget,
-    handleCloseUpgradeDialog,
-    exportTarget,
-    isLoadingExportManifest,
-    exportManifest,
-    handleCloseExportDialog,
-    configureTarget,
-    setConfigureTarget,
-    providerMappingData,
-    showProviderMappingModal,
-    handleProviderMappingCancel,
-    handleProviderMappingConfirm,
-    showProviderWarningModal,
-    providerWarnings,
-    handleWarningModalNavigate,
-  } = controller;
-
-  const { toast } = useToast();
-
-  // Create flow: the setup wizard replaces the legacy single-step team-preconfig sequencing.
-  // Nothing is created until the wizard's final Create (one atomic mutation).
-  const createWizard = useCreateProjectWizard(createFromTemplateMutation);
-
-  // Import flow: the SAME wizard (Providers → Agents → Teams → Review) replaces the legacy
-  // MissingProviders / ProviderMapping / ImportConfirm / TeamPreconfig dialog chain. The destructive
-  // commit fires only from the wizard's final Review step. The result lands here for the result dialog.
-  const [importResult, setImportResult] = useState<ImportResult | null>(null);
-  const importWizard = useImportProjectWizard({
-    onImported: setImportResult,
-    toast,
-  });
-
-  const [upgradeResult, setUpgradeResult] = useState<UpgradeProjectResponse | null>(null);
-  const upgradeActionName =
-    upgradeTarget?.project.templateMetadata?.source === 'bundled' ? 'Update' : 'Upgrade';
-  const upgradeWizard = useUpgradeProjectWizard({
-    actionName: upgradeActionName,
-    onFinished: setUpgradeResult,
-    onClosed: handleCloseUpgradeDialog,
-    toast,
-  });
-
-  useEffect(() => {
-    if (!upgradeTarget || !upgradeTarget.project.templateMetadata || upgradeResult) return;
-    upgradeWizard.openUpgradeWizard({
-      id: upgradeTarget.project.id,
-      name: upgradeTarget.project.name,
-      targetVersion: upgradeTarget.targetVersion,
-    });
-  }, [upgradeResult, upgradeTarget, upgradeWizard.openUpgradeWizard]);
-
-  // Source pick → open the import wizard. Template imports resolve via slug/version; file imports read
-  // the JSON and pass it as setup-preview `rawContent` (Task 1's file mode).
-  const startImportFromTemplate = useCallback(() => {
-    if (!importTarget || !selectedTemplateId) return;
-    const request: SetupPreviewRequest = {
-      slug: selectedTemplateId,
-      ...(selectedImportTemplateSource === 'registry' && selectedImportVersion
-        ? { version: selectedImportVersion }
-        : {}),
-    };
-    setShowImportModal(false);
-    importWizard.openImportWizard(importTarget, request);
-  }, [
-    importTarget,
-    selectedTemplateId,
-    selectedImportTemplateSource,
-    selectedImportVersion,
-    setShowImportModal,
-    importWizard,
-  ]);
-
-  const onImportFileSelected: ChangeEventHandler<HTMLInputElement> = useCallback(
-    async (event) => {
-      const file = event.target.files?.[0];
-      if (!file || !importTarget) return;
-      setShowImportModal(false);
-      try {
-        const rawContent = JSON.parse(await file.text());
-        importWizard.openImportWizard(importTarget, { rawContent });
-      } catch {
-        toast({
-          title: 'Import failed',
-          description: 'Unable to read or parse the selected JSON file.',
-          variant: 'destructive',
-        });
+function SetupWizard({ model }: { model: ProjectWizardModel }) {
+  return (
+    <ProjectSetupWizard
+      open={model.open}
+      onOpenChange={model.onOpenChange}
+      controller={model.controller}
+      title={model.title}
+      description={model.description}
+      submitLabel={model.submitLabel}
+      isLoading={model.isLoading}
+      isSubmitting={model.isSubmitting}
+      errorContent={
+        model.errorMessage ? (
+          <div className="rounded-md border border-destructive/50 p-4 text-sm text-destructive">
+            {model.errorMessage}
+          </div>
+        ) : undefined
       }
-    },
-    [importTarget, setShowImportModal, importWizard, toast],
+    />
   );
+}
+
+function ProjectMoveDescription({ model }: { model: ProjectsDialogsModel['move'] }) {
+  let impactMessage: string;
+  if (model.pairedDeviceImpact.unavailable || model.pairedDeviceImpact.isLoading) {
+    impactMessage =
+      'Paired-device impact is unavailable. This move may change device access and will close any matching active mobile view.';
+  } else if (model.pairedDeviceImpact.devices.length > 0) {
+    const deviceCount = model.pairedDeviceImpact.devices.length;
+    const deviceLabel = deviceCount === 1 ? 'device' : 'devices';
+    impactMessage = `This may change access for ${deviceCount} paired ${deviceLabel} and will close any matching active mobile view.`;
+  } else {
+    impactMessage =
+      'No paired devices are currently connected. The project workspace will still change immediately.';
+  }
+
+  return (
+    <span className="space-y-2">
+      <span className="block">
+        Move from {model.sourceWorkspaceName ?? 'the current workspace'} to{' '}
+        {model.destinationWorkspaceName ?? 'the selected workspace'}.
+      </span>
+      <span className="block">{impactMessage}</span>
+    </span>
+  );
+}
+
+function WorkspaceDialogs({ model }: { model: ProjectsDialogsModel['workspaces'] }) {
+  return (
+    <>
+      <Dialog open={model.create.open} onOpenChange={model.create.onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create Workspace</DialogTitle>
+            <DialogDescription>
+              Add an independent workspace for organizing projects.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              model.create.submit();
+            }}
+            className="space-y-4"
+          >
+            <div>
+              <Label htmlFor="new-workspace-name">Name</Label>
+              <Input
+                id="new-workspace-name"
+                name="newWorkspaceName"
+                autoComplete="off"
+                value={model.create.name}
+                onChange={(event) => model.create.changeName(event.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+            {model.create.secondWorkspaceImpact.required && (
+              <div className="space-y-3 rounded-md border border-border p-3 text-sm">
+                <p className="font-medium">Paired devices affected by multi-workspace mode</p>
+                {model.create.secondWorkspaceImpact.isLoading ? (
+                  <p className="text-muted-foreground">Checking paired devices…</p>
+                ) : model.create.secondWorkspaceImpact.error ? (
+                  <p className="text-destructive">{model.create.secondWorkspaceImpact.error}</p>
+                ) : model.create.secondWorkspaceImpact.devices.length === 0 ? (
+                  <p className="text-muted-foreground">No paired devices are currently affected.</p>
+                ) : (
+                  <ul className="list-disc space-y-1 pl-5">
+                    {model.create.secondWorkspaceImpact.devices.map((device) => (
+                      <li key={device.kid}>
+                        <span className="block">
+                          {device.localAlias ?? device.label ?? `Device ${device.kid.slice(0, 8)}`}
+                        </span>
+                        {device.localAlias !== undefined && device.label !== undefined && (
+                          <span className="block text-xs text-muted-foreground">
+                            Reported name: {device.label}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {model.create.secondWorkspaceImpact.devices.length > 0 && (
+                  <p>
+                    <span className="font-medium">Phone compatibility:</span> Workspace features
+                    require the latest mobile app. Update and re-pair your phone before using
+                    multiple workspaces.
+                  </p>
+                )}
+                <p>
+                  <span className="font-medium">Local App E2EE:</span> update or restart the Local
+                  App if it reports that desktop encryption is unavailable.
+                </p>
+                <p className="text-muted-foreground">
+                  Existing devices initially keep Default-only access. You can change each exact
+                  subset in Paired devices after creating the workspace.
+                </p>
+              </div>
+            )}
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => model.create.onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  model.create.isSubmitting ||
+                  !model.create.name.trim() ||
+                  (model.create.secondWorkspaceImpact.required &&
+                    (model.create.secondWorkspaceImpact.isLoading ||
+                      model.create.secondWorkspaceImpact.error !== null))
+                }
+              >
+                Create
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={model.rename.open} onOpenChange={model.rename.onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename Workspace</DialogTitle>
+            <DialogDescription>Projects stay assigned to the same workspace.</DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              model.rename.submit();
+            }}
+            className="space-y-4"
+          >
+            <div>
+              <Label htmlFor="rename-workspace-name">Name</Label>
+              <Input
+                id="rename-workspace-name"
+                name="workspaceName"
+                autoComplete="off"
+                value={model.rename.name}
+                onChange={(event) => model.rename.changeName(event.target.value)}
+                required
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => model.rename.onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={model.rename.isSubmitting || !model.rename.name.trim()}
+              >
+                Rename
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={model.delete.open} onOpenChange={model.delete.onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {model.delete.workspaceName ?? 'workspace'}?</DialogTitle>
+            <DialogDescription>
+              This will move {model.delete.projectCount} project(s) and remap{' '}
+              {model.delete.deviceGrantCount} paired-device grant(s). Choose a replacement
+              workspace.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label htmlFor="replacement-workspace">Replacement workspace</Label>
+            <Select
+              name="replacementWorkspaceId"
+              value={model.delete.replacementWorkspaceId}
+              onValueChange={model.delete.changeReplacement}
+            >
+              <SelectTrigger id="replacement-workspace">
+                <SelectValue placeholder="Select a replacement" />
+              </SelectTrigger>
+              <SelectContent>
+                {model.delete.replacementOptions.map((workspace) => (
+                  <SelectItem key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => model.delete.onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={model.delete.confirm}
+              disabled={model.delete.isDeleting || !model.delete.replacementWorkspaceId}
+            >
+              Delete and move
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+export function ProjectsDialogs({ model }: ProjectsDialogsProps) {
+  const createMapping = model.create.providerMapping;
+  const upgradeResult = model.upgrade.result;
 
   return (
     <>
-      {/* Edit Project Dialog */}
       <EditProjectDialog
-        open={showDialog}
-        onOpenChange={setShowDialog}
-        formData={formData}
-        setFormData={setFormData}
-        pathValidation={pathValidation}
-        onPathChange={handlePathChange}
-        onSubmit={handleSubmit}
-        onCancel={() => {
-          setShowDialog(false);
-          resetForm();
+        open={model.edit.open}
+        onOpenChange={model.edit.onOpenChange}
+        formData={model.edit.values}
+        onNameChange={model.edit.changeName}
+        onDescriptionChange={model.edit.changeDescription}
+        onIsTemplateChange={model.edit.changeIsTemplate}
+        pathValidation={model.edit.pathValidation}
+        onPathChange={model.edit.changeRootPath}
+        onSubmit={(event) => {
+          event.preventDefault();
+          model.edit.submit();
         }}
-        isSubmitting={updateMutation.isPending}
+        onCancel={model.edit.cancel}
+        isSubmitting={model.edit.isSubmitting}
       />
 
-      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={model.move.open}
+        onOpenChange={model.move.onOpenChange}
+        onConfirm={model.move.confirm}
+        title={`Move ${model.move.projectName ?? 'project'}?`}
+        confirmText="Move Project"
+        loading={model.move.isMoving}
+        description={<ProjectMoveDescription model={model.move} />}
+      />
+
       <DeleteProjectDialog
-        projectName={deleteConfirm?.name}
-        open={!!deleteConfirm}
-        onOpenChange={(open) => !open && setDeleteConfirm(null)}
-        onConfirm={confirmDelete}
-        isDeleting={deleteMutation.isPending}
+        projectName={model.delete.projectName}
+        open={model.delete.open}
+        onOpenChange={model.delete.onOpenChange}
+        onConfirm={model.delete.confirm}
+        isDeleting={model.delete.isDeleting}
       />
 
-      {/* Hidden file picker for Import — reads JSON and opens the import wizard via rawContent. */}
       <input
-        ref={fileInputRef}
+        ref={model.import.fileInputRef}
         type="file"
         accept="application/json,.json"
         className="hidden"
-        onChange={onImportFileSelected}
+        onChange={(event) => model.import.selectFile(event.target.files?.[0])}
       />
 
-      {/* Import Source Modal — picks a template/file source, then opens the import wizard. */}
       <ImportSourceModal
-        open={showImportModal}
-        onOpenChange={setShowImportModal}
-        importTargetName={importTarget?.name}
-        selectedTemplateId={selectedTemplateId}
-        onTemplateChange={handleImportTemplateChange}
-        templates={templates}
-        selectedImportTemplateSource={selectedImportTemplateSource}
-        sortedImportVersions={sortedImportVersions}
-        selectedImportVersion={selectedImportVersion}
-        onSelectedImportVersionChange={setSelectedImportVersion}
-        onImportFromTemplate={startImportFromTemplate}
-        onImportFromFile={handleImportFromFile}
-        isImporting={importWizard.isOpen}
+        open={model.import.source.open}
+        onOpenChange={model.import.source.onOpenChange}
+        importTargetName={model.import.source.targetName}
+        selectedTemplateId={model.import.source.selectedTemplateId}
+        onTemplateChange={model.import.source.selectTemplate}
+        templates={model.import.source.templates}
+        selectedImportTemplateSource={model.import.source.selectedTemplateSource}
+        sortedImportVersions={model.import.source.sortedVersions}
+        selectedImportVersion={model.import.source.selectedVersion}
+        onSelectedImportVersionChange={model.import.source.selectVersion}
+        onImportFromTemplate={model.import.source.importTemplate}
+        onImportFromFile={model.import.source.openFilePicker}
+        isImporting={model.import.source.isImporting}
       />
 
-      {/* Project Setup Wizard (import flow): Providers → Agents → Teams → Review, single destructive
-          commit fired only from the Review step. */}
-      <ProjectSetupWizard
-        open={importWizard.isOpen}
-        onOpenChange={importWizard.onOpenChange}
-        controller={importWizard.controller}
-        title={
-          importWizard.importTarget
-            ? `Import into ${importWizard.importTarget.name}`
-            : 'Import into project'
-        }
-        description="Configure providers, agents, and teams, then review the changes before replacing the project."
-        submitLabel="Replace Project"
-        isLoading={importWizard.isLoading}
-        isSubmitting={importWizard.isSubmitting}
-        errorContent={
-          importWizard.isError ? (
-            <div className="rounded-md border border-destructive/50 p-4 text-sm text-destructive">
-              Failed to load the template preview. Close and try again.
-            </div>
-          ) : undefined
-        }
-      />
+      <SetupWizard model={model.import.wizard} />
 
-      {/* Upgrade uses the same configured replace controller as import. The preview is resolved from
-          the target version and no current project configuration is passed into wizard state. */}
-      <ProjectSetupWizard
-        open={upgradeWizard.isOpen}
-        onOpenChange={upgradeWizard.onOpenChange}
-        controller={upgradeWizard.controller}
-        title={
-          upgradeWizard.upgradeTarget
-            ? `${upgradeActionName} ${upgradeWizard.upgradeTarget.name}`
-            : `${upgradeActionName} project`
-        }
-        description="Configure providers, agents, and teams from the target template, then review the replacement before applying it."
-        submitLabel={`Apply ${upgradeActionName}`}
-        isLoading={upgradeWizard.isLoading}
-        isSubmitting={upgradeWizard.isSubmitting}
-        errorContent={
-          upgradeWizard.isError ? (
-            <div className="rounded-md border border-destructive/50 p-4 text-sm text-destructive">
-              Failed to load the target template preview. Close and try again.
-            </div>
-          ) : undefined
-        }
-      />
+      <SetupWizard model={model.upgrade.wizard} />
 
-      {/* Import Result Dialog — driven by the wizard's commit result. */}
       <ImportResultDialog
-        open={importResult !== null}
-        onOpenChange={(open) => !open && setImportResult(null)}
-        importResult={importResult}
+        open={model.import.result !== null}
+        onOpenChange={(open) => !open && model.import.closeResult()}
+        importResult={model.import.result}
       />
 
-      {/* Create Project Dialog (template-based or file-based) — "Continue" opens the setup wizard. */}
       <CreateProjectDialog
-        open={showTemplateDialog}
-        onOpenChange={setShowTemplateDialog}
-        onSubmit={(event) =>
-          handleTemplateSubmit(event, (payload) => {
-            setShowTemplateDialog(false);
-            createWizard.openWizard(payload);
-          })
-        }
-        templateSourceTab={templateSourceTab}
-        onTemplateSourceTabChange={setTemplateSourceTab}
-        templateFormData={templateFormData}
-        setTemplateFormData={setTemplateFormData}
-        templates={templates}
-        selectedTemplateSource={selectedTemplate?.source}
-        sortedVersions={sortedVersions}
-        onTemplateChange={handleTemplateChange}
-        onTemplatePathChange={handleTemplatePathChange}
-        onTemplateFilePathChange={handleTemplateFilePathChange}
-        templatePathValidation={templatePathValidation}
-        templateFilePathValidation={templateFilePathValidation}
-        onCancel={() => {
-          setShowTemplateDialog(false);
-          resetTemplateForm();
+        open={model.create.source.open}
+        onOpenChange={model.create.source.onOpenChange}
+        onSubmit={(event) => {
+          event.preventDefault();
+          model.create.source.submit();
         }}
-        isSubmitting={createFromTemplateMutation.isPending}
+        templateSourceTab={model.create.source.sourceTab}
+        onTemplateSourceTabChange={model.create.source.changeSourceTab}
+        templateFormData={model.create.source.values}
+        onNameChange={model.create.source.changeName}
+        onDescriptionChange={model.create.source.changeDescription}
+        onVersionChange={model.create.source.changeVersion}
+        workspaces={model.create.source.workspaces}
+        showWorkspaceSelector={model.create.source.showWorkspaceSelector}
+        onWorkspaceChange={model.create.source.changeWorkspace}
+        templates={model.create.source.templates}
+        selectedTemplateSource={model.create.source.selectedTemplateSource}
+        sortedVersions={model.create.source.sortedVersions}
+        onTemplateChange={model.create.source.selectTemplate}
+        onTemplatePathChange={model.create.source.changeRootPath}
+        onTemplateFilePathChange={model.create.source.changeTemplateFilePath}
+        templatePathValidation={model.create.source.pathValidation}
+        templateFilePathValidation={model.create.source.filePathValidation}
+        onCancel={model.create.source.cancel}
+        isSubmitting={model.create.source.isSubmitting}
       />
 
-      {/* Project Setup Wizard (create flow): Providers → Agents → Teams, single final mutation. */}
-      <ProjectSetupWizard
-        open={createWizard.isOpen}
-        onOpenChange={createWizard.onOpenChange}
-        controller={createWizard.controller}
-        title="Set up project"
-        description="Configure providers, agents, and teams before creating the project."
-        isLoading={createWizard.isLoading}
-        isSubmitting={createWizard.isSubmitting}
-        errorContent={
-          createWizard.isError ? (
-            <div className="rounded-md border border-destructive/50 p-4 text-sm text-destructive">
-              Failed to load the template preview. Close and try again.
-            </div>
-          ) : undefined
-        }
-      />
+      <SetupWizard model={model.create.wizard} />
 
-      {/* Upgrade result and recovery dialog — commit is owned by the shared wizard above. */}
-      {upgradeTarget && upgradeTarget.project.templateMetadata && upgradeResult && (
+      {upgradeResult && (
         <UpgradeDialog
-          projectId={upgradeTarget.project.id}
-          projectName={upgradeTarget.project.name}
-          targetVersion={upgradeTarget.targetVersion}
-          source={upgradeTarget.project.templateMetadata.source}
-          result={upgradeResult}
+          projectId={upgradeResult.projectId}
+          projectName={upgradeResult.projectName}
+          targetVersion={upgradeResult.targetVersion}
+          source={upgradeResult.source}
+          result={upgradeResult.result}
           open={true}
-          onClose={() => {
-            setUpgradeResult(null);
-            handleCloseUpgradeDialog();
-          }}
+          onClose={upgradeResult.close}
         />
       )}
 
-      {/* Export Dialog - waits for manifest fetch before rendering */}
-      {exportTarget && !isLoadingExportManifest && (
+      {model.export && (
         <ExportDialog
-          projectId={exportTarget.id}
-          projectName={exportTarget.name}
-          existingManifest={exportManifest ?? undefined}
+          projectId={model.export.projectId}
+          projectName={model.export.projectName}
+          existingManifest={model.export.existingManifest}
           open={true}
-          onClose={handleCloseExportDialog}
+          onClose={model.export.close}
         />
       )}
 
-      {/* Configuration Modal */}
-      {configureTarget && (
+      {model.configuration && (
         <ProjectConfigurationModal
-          projectId={configureTarget.id}
+          projectId={model.configuration.projectId}
           open={true}
-          onOpenChange={(open) => !open && setConfigureTarget(null)}
+          onOpenChange={(open) => !open && model.configuration?.close()}
         />
       )}
 
-      {/* Provider Mapping Modal for create-from-template */}
-      {providerMappingData && (
+      {createMapping && (
         <ProviderMappingModal
-          open={showProviderMappingModal}
-          onOpenChange={(open) => {
-            if (!open) {
-              handleProviderMappingCancel();
-            }
-          }}
-          missingProviders={providerMappingData.missingProviders}
-          familyAlternatives={providerMappingData.familyAlternatives}
-          canImport={providerMappingData.canImport}
-          onConfirm={handleProviderMappingConfirm}
-          loading={createFromTemplateMutation.isPending}
+          open={createMapping.open}
+          onOpenChange={(open) => !open && createMapping.cancel()}
+          missingProviders={createMapping.missingProviders}
+          familyAlternatives={createMapping.familyAlternatives}
+          canImport={createMapping.canImport}
+          onConfirm={createMapping.confirm}
+          loading={createMapping.isSubmitting}
         />
       )}
 
       <ProviderMismatchWarningModal
-        open={showProviderWarningModal}
-        warnings={providerWarnings ?? []}
-        onNavigate={handleWarningModalNavigate}
+        open={model.create.warning.open}
+        warnings={model.create.warning.warnings}
+        onNavigate={model.create.warning.navigate}
       />
+
+      {model.workspaces && <WorkspaceDialogs model={model.workspaces} />}
     </>
   );
 }

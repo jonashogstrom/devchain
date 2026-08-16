@@ -16,8 +16,11 @@ import { ProjectCommunicationService } from './project-communication.service';
 
 const SOURCE_ID = '11111111-1111-4111-8111-111111111111';
 const TARGET_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const FOREIGN_ID = 'aaaaaaaa-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const OTHER_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const TEMPLATE_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const WORKSPACE_ONE_ID = '10000000-0000-4000-8000-000000000001';
+const WORKSPACE_TWO_ID = '20000000-0000-4000-8000-000000000002';
 
 type CommunicationStorage = Pick<
   StorageService,
@@ -29,14 +32,30 @@ describe('ProjectCommunicationService', () => {
   let storage: jest.Mocked<CommunicationStorage>;
   let delivery: jest.Mocked<Pick<AgentMessageDeliveryService, 'deliverAgentMessage'>>;
 
-  const source = createMockProject({ id: SOURCE_ID, name: 'Source', rootPath: '/private/source' });
+  const source = createMockProject({
+    id: SOURCE_ID,
+    workspaceId: WORKSPACE_ONE_ID,
+    name: 'Source',
+    rootPath: '/private/source',
+  });
   const caller = createMockAgent({
     id: 'caller-agent',
     projectId: SOURCE_ID,
     isProjectOwner: true,
     name: 'Source Owner',
   });
-  const target = createMockProject({ id: TARGET_ID, name: 'Target', rootPath: '/private/target' });
+  const target = createMockProject({
+    id: TARGET_ID,
+    workspaceId: WORKSPACE_ONE_ID,
+    name: 'Target',
+    rootPath: '/private/target',
+  });
+  const foreign = createMockProject({
+    id: FOREIGN_ID,
+    workspaceId: WORKSPACE_TWO_ID,
+    name: 'Foreign Secret',
+    rootPath: '/private/foreign',
+  });
   const targetOwner = createMockAgent({
     id: 'target-owner',
     projectId: TARGET_ID,
@@ -51,7 +70,12 @@ describe('ProjectCommunicationService', () => {
 
     storage = {
       getAgent: jest.fn().mockResolvedValue(caller),
-      getProject: jest.fn().mockResolvedValue(source),
+      getProject: jest.fn().mockImplementation(async (projectId: string) => {
+        if (projectId === SOURCE_ID) return source;
+        if (projectId === TARGET_ID) return target;
+        if (projectId === FOREIGN_ID) return foreign;
+        throw new NotFoundError('Project', projectId);
+      }),
       listProjects: jest.fn().mockResolvedValue({
         items: [source],
         total: 1,
@@ -169,24 +193,28 @@ describe('ProjectCommunicationService', () => {
     it('collects a complete snapshot, maps safe fields, sorts, then paginates', async () => {
       const alphaHighId = createMockProject({
         id: OTHER_ID,
+        workspaceId: WORKSPACE_ONE_ID,
         name: 'alpha',
         description: 'second alpha',
         rootPath: '/private/alpha-high',
       });
       const alphaLowId = createMockProject({
         id: TARGET_ID,
+        workspaceId: WORKSPACE_ONE_ID,
         name: 'Alpha',
         description: 'first alpha',
         rootPath: '/private/alpha-low',
       });
       const ownerless = createMockProject({
         id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        workspaceId: WORKSPACE_ONE_ID,
         name: 'Zulu',
         description: null,
         rootPath: '/private/ownerless',
       });
       const template = createMockProject({
         id: TEMPLATE_ID,
+        workspaceId: WORKSPACE_ONE_ID,
         name: 'Template',
         isTemplate: true,
         rootPath: '/private/template',
@@ -194,13 +222,13 @@ describe('ProjectCommunicationService', () => {
       storage.listProjects
         .mockResolvedValueOnce({
           items: [ownerless, source, template],
-          total: 5,
+          total: 6,
           limit: 3,
           offset: 0,
         })
         .mockResolvedValueOnce({
-          items: [alphaHighId, alphaLowId],
-          total: 5,
+          items: [foreign, alphaHighId, alphaLowId],
+          total: 6,
           limit: 3,
           offset: 3,
         });
@@ -208,8 +236,16 @@ describe('ProjectCommunicationService', () => {
 
       const result = await service.listTargets(caller.id, { limit: 2, offset: 1 });
 
-      expect(storage.listProjects).toHaveBeenNthCalledWith(1, { limit: 100, offset: 0 });
-      expect(storage.listProjects).toHaveBeenNthCalledWith(2, { limit: 100, offset: 3 });
+      expect(storage.listProjects).toHaveBeenNthCalledWith(1, {
+        workspaceId: WORKSPACE_ONE_ID,
+        limit: 100,
+        offset: 0,
+      });
+      expect(storage.listProjects).toHaveBeenNthCalledWith(2, {
+        workspaceId: WORKSPACE_ONE_ID,
+        limit: 100,
+        offset: 3,
+      });
       expect(storage.listProjectOwners).toHaveBeenCalledTimes(1);
       expect(storage.listProjectOwners).toHaveBeenCalledWith([
         ownerless.id,
@@ -240,6 +276,28 @@ describe('ProjectCommunicationService', () => {
         },
       });
       expect(JSON.stringify(result)).not.toContain('rootPath');
+      expect(JSON.stringify(result)).not.toContain(FOREIGN_ID);
+      expect(JSON.stringify(result)).not.toContain('Foreign Secret');
+    });
+
+    it('derives directory scope from the source project workspace on every call', async () => {
+      const movedSource = { ...source, workspaceId: WORKSPACE_TWO_ID };
+      storage.getProject.mockResolvedValueOnce(source).mockResolvedValueOnce(movedSource);
+      storage.listProjects.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 });
+
+      await service.listTargets(caller.id, { limit: 10, offset: 0 });
+      await service.listTargets(caller.id, { limit: 10, offset: 0 });
+
+      expect(storage.listProjects).toHaveBeenNthCalledWith(1, {
+        workspaceId: WORKSPACE_ONE_ID,
+        limit: 100,
+        offset: 0,
+      });
+      expect(storage.listProjects).toHaveBeenNthCalledWith(2, {
+        workspaceId: WORKSPACE_TWO_ID,
+        limit: 100,
+        offset: 0,
+      });
     });
   });
 
@@ -252,7 +310,15 @@ describe('ProjectCommunicationService', () => {
       ['PROJECT_NOT_FOUND', []],
       [
         'AMBIGUOUS_PROJECT',
-        [target, createMockProject({ id: OTHER_ID, name: 'Other', rootPath: '/private/other' })],
+        [
+          target,
+          createMockProject({
+            id: OTHER_ID,
+            workspaceId: WORKSPACE_ONE_ID,
+            name: 'Other',
+            rootPath: '/private/other',
+          }),
+        ],
       ],
     ] as const)('rejects %s resolution without a delivery side effect', async (code, matches) => {
       storage.getProjectsByIdPrefix.mockResolvedValue([...matches]);
@@ -261,6 +327,40 @@ describe('ProjectCommunicationService', () => {
 
       expect(result).toMatchObject({ error: { code } });
       expect(delivery.deliverAgentMessage).not.toHaveBeenCalled();
+    });
+
+    it('returns not found for a foreign exact ID without exposing foreign metadata', async () => {
+      const loggerSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      storage.getProjectsByIdPrefix.mockResolvedValue([foreign]);
+
+      const result = await send(FOREIGN_ID);
+
+      expect(result).toEqual({
+        error: { code: 'PROJECT_NOT_FOUND', message: 'No project matches that project ID' },
+      });
+      expect(storage.listProjectOwners).not.toHaveBeenCalled();
+      expect(delivery.deliverAgentMessage).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(FOREIGN_ID);
+      expect(JSON.stringify(result)).not.toContain('Foreign Secret');
+      expect(JSON.stringify(loggerSpy.mock.calls)).not.toContain(FOREIGN_ID);
+      expect(JSON.stringify(loggerSpy.mock.calls)).not.toContain('Foreign Secret');
+    });
+
+    it('resolves a prefix shared with a foreign project to the same-workspace target', async () => {
+      storage.getProjectsByIdPrefix.mockResolvedValue([foreign, target]);
+
+      const result = await send(TARGET_ID.slice(0, 8));
+
+      expect(result).toMatchObject({
+        result: {
+          mode: 'project',
+          targetProject: { id: TARGET_ID, name: target.name },
+          deliveryStatus: 'queued',
+        },
+      });
+      expect(delivery.deliverAgentMessage).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(result)).not.toContain(FOREIGN_ID);
+      expect(JSON.stringify(result)).not.toContain('Foreign Secret');
     });
 
     it('rejects a template source before resolving the target', async () => {
@@ -337,6 +437,56 @@ describe('ProjectCommunicationService', () => {
       });
     });
 
+    it('fails closed when the source workspace changes after prefix resolution', async () => {
+      storage.getProject
+        .mockResolvedValueOnce(source)
+        .mockResolvedValueOnce({ ...source, workspaceId: WORKSPACE_TWO_ID });
+
+      const result = await send();
+
+      expect(result).toEqual({
+        error: { code: 'PROJECT_NOT_FOUND', message: 'No project matches that project ID' },
+      });
+      expect(storage.getProject).toHaveBeenCalledTimes(2);
+      expect(delivery.deliverAgentMessage).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the target moves workspace immediately before delivery', async () => {
+      storage.getProject
+        .mockResolvedValueOnce(source)
+        .mockResolvedValueOnce(source)
+        .mockResolvedValueOnce({ ...target, workspaceId: WORKSPACE_TWO_ID });
+
+      const result = await send();
+
+      expect(result).toEqual({
+        error: { code: 'PROJECT_NOT_FOUND', message: 'No project matches that project ID' },
+      });
+      expect(storage.listProjectOwners.mock.invocationCallOrder[0]).toBeLessThan(
+        storage.getProject.mock.invocationCallOrder[1],
+      );
+      expect(delivery.deliverAgentMessage).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(TARGET_ID);
+      expect(JSON.stringify(result)).not.toContain(target.name);
+    });
+
+    it('uses current target membership on the next call after a workspace move', async () => {
+      let currentTarget = target;
+      storage.getProjectsByIdPrefix.mockImplementation(async () => [currentTarget]);
+      storage.getProject.mockImplementation(async (projectId: string) => {
+        if (projectId === SOURCE_ID) return source;
+        if (projectId === TARGET_ID) return currentTarget;
+        throw new NotFoundError('Project', projectId);
+      });
+
+      await expect(send()).resolves.toMatchObject({ result: { deliveryStatus: 'queued' } });
+      currentTarget = { ...target, workspaceId: WORKSPACE_TWO_ID };
+      await expect(send()).resolves.toEqual({
+        error: { code: 'PROJECT_NOT_FOUND', message: 'No project matches that project ID' },
+      });
+      expect(delivery.deliverAgentMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('sanitizes a failed delivery and never tries an alternate recipient', async () => {
       const failed: DeliveryOutcome = {
         status: 'failed',
@@ -389,7 +539,6 @@ describe('ProjectCommunicationService', () => {
       expect(loggerSpy).toHaveBeenCalledWith({
         code: 'PROJECT_COMMUNICATION_FAILED',
         callerAgentId: caller.id,
-        targetProjectId: target.id,
       });
     });
   });

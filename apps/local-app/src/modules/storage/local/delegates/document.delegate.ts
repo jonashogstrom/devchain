@@ -1,4 +1,11 @@
 import type { SQL } from 'drizzle-orm';
+import {
+  and as andSync,
+  eq as eqSync,
+  isNull as isNullSync,
+  ne as neSync,
+  or as orSync,
+} from 'drizzle-orm';
 import type {
   DocumentIdentifier,
   DocumentListFilters,
@@ -11,30 +18,20 @@ import type {
   Tag,
   UpdateDocument,
 } from '../../models/domain.models';
-import {
-  NotFoundError,
-  OptimisticLockError,
-  ValidationError,
-} from '../../../../common/errors/error-types';
+import { NotFoundError, ValidationError } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
+import {
+  documentTags as documentTagsTable,
+  documents as documentsTable,
+  tags as tagsTable,
+} from '../../db/schema';
 import { normalizeTagList, slugify } from '../helpers/storage-helpers';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('DocumentStorageDelegate');
 
 export interface DocumentStorageDelegateDependencies {
-  createTag: (data: CreateTag) => Promise<Tag>;
-  getDocument: (identifier: DocumentIdentifier) => Promise<Document>;
-  generateDocumentSlug: (
-    projectId: string | null,
-    desired: string,
-    excludeId?: string,
-  ) => Promise<string>;
-  setDocumentTags: (
-    documentId: string,
-    tagNames: string[],
-    projectId: string | null,
-  ) => Promise<void>;
+  createTag: (data: CreateTag) => Tag;
 }
 
 export class DocumentStorageDelegate extends BaseStorageDelegate {
@@ -108,9 +105,7 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
       };
     }
 
-    const documentsWithTags = await Promise.all(
-      rows.map((row) => this.dependencies.getDocument({ id: row.id })),
-    );
+    const documentsWithTags = rows.map((row) => this.getDocumentSync({ id: row.id }));
 
     let filtered = documentsWithTags;
     if (filters.tags?.length) {
@@ -133,36 +128,43 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
   }
 
   async getDocument(identifier: DocumentIdentifier): Promise<Document> {
-    const { documents, documentTags, tags } = await import('../../db/schema');
-    const { eq, and, isNull } = await import('drizzle-orm');
+    return this.getDocumentSync(identifier);
+  }
 
+  private getDocumentSync(identifier: DocumentIdentifier): Document {
     let whereCondition;
     if (identifier.id) {
-      whereCondition = eq(documents.id, identifier.id);
+      whereCondition = eqSync(documentsTable.id, identifier.id);
     } else if (identifier.slug) {
       if (identifier.projectId === undefined) {
         throw new ValidationError('projectId is required when querying document by slug');
       }
       whereCondition =
         identifier.projectId === null
-          ? and(isNull(documents.projectId), eq(documents.slug, identifier.slug))
-          : and(eq(documents.projectId, identifier.projectId), eq(documents.slug, identifier.slug));
+          ? andSync(
+              isNullSync(documentsTable.projectId),
+              eqSync(documentsTable.slug, identifier.slug),
+            )
+          : andSync(
+              eqSync(documentsTable.projectId, identifier.projectId),
+              eqSync(documentsTable.slug, identifier.slug),
+            );
     } else {
       throw new ValidationError('Document identifier requires either id or slug');
     }
 
-    const result = await this.db.select().from(documents).where(whereCondition).limit(1);
-    const record = result[0];
+    const record = this.db.select().from(documentsTable).where(whereCondition).limit(1).get();
     if (!record) {
       const lookup = identifier.id ?? `${identifier.projectId ?? 'global'}:${identifier.slug}`;
       throw new NotFoundError('Document', lookup || 'unknown');
     }
 
-    const tagRows = await this.db
-      .select({ tag: tags })
-      .from(documentTags)
-      .innerJoin(tags, eq(documentTags.tagId, tags.id))
-      .where(eq(documentTags.documentId, record.id));
+    const tagRows = this.db
+      .select({ tag: tagsTable })
+      .from(documentTagsTable)
+      .innerJoin(tagsTable, eqSync(documentTagsTable.tagId, tagsTable.id))
+      .where(eqSync(documentTagsTable.documentId, record.id))
+      .all();
 
     return {
       ...record,
@@ -178,7 +180,7 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
     const { documents } = await import('../../db/schema');
 
     const slugSource = data.slug ?? data.title;
-    const slug = await this.dependencies.generateDocumentSlug(normalizedProjectId, slugSource);
+    const slug = this.generateDocumentSlugSync(normalizedProjectId, slugSource);
     const tags = normalizeTagList(data.tags);
 
     const id = randomUUID();
@@ -195,57 +197,62 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
     });
 
     if (tags.length) {
-      await this.dependencies.setDocumentTags(id, tags, normalizedProjectId);
+      this.setDocumentTagsSync(id, tags, normalizedProjectId);
     }
 
     logger.info({ documentId: id }, 'Created document');
-    return this.dependencies.getDocument({ id });
+    return this.getDocumentSync({ id });
   }
 
   async updateDocument(id: string, data: UpdateDocument): Promise<Document> {
-    const { documents } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
-
-    const current = await this.dependencies.getDocument({ id });
-    if (data.version !== undefined && data.version !== current.version) {
-      throw new OptimisticLockError('Document', id, {
-        expectedVersion: data.version,
-        actualVersion: current.version,
-      });
-    }
-
-    const updatePayload: Record<string, unknown> = {
-      updatedAt: now,
-      version: current.version + 1,
-    };
-
-    if (data.title !== undefined) {
-      updatePayload.title = data.title;
-    }
-    if (data.contentMd !== undefined) {
-      updatePayload.contentMd = data.contentMd;
-    }
-    if (data.archived !== undefined) {
-      updatePayload.archived = data.archived;
-    }
-    if (data.slug !== undefined) {
-      updatePayload.slug = await this.dependencies.generateDocumentSlug(
-        current.projectId,
-        data.slug,
-        id,
-      );
-    }
-
-    await this.db.update(documents).set(updatePayload).where(eq(documents.id, id));
-
-    if (data.tags !== undefined) {
-      const tags = normalizeTagList(data.tags);
-      await this.dependencies.setDocumentTags(id, tags, current.projectId);
-    }
+    const result = await this.versionedMutationExecutor.execute({
+      resource: 'Document',
+      id,
+      expectedVersion: data.version,
+      loadCurrent: () => this.getDocumentSync({ id }),
+      versionOf: (current) => current.version,
+      prepare: ({ current }) => {
+        const updatePayload: Record<string, unknown> = {};
+        if (data.title !== undefined) updatePayload.title = data.title;
+        if (data.contentMd !== undefined) updatePayload.contentMd = data.contentMd;
+        if (data.archived !== undefined) updatePayload.archived = data.archived;
+        if (data.slug !== undefined) {
+          updatePayload.slug = this.generateDocumentSlugSync(current.projectId, data.slug, id);
+        }
+        return {
+          kind: 'write',
+          state: {
+            updatePayload,
+            requestedTags: data.tags === undefined ? undefined : normalizeTagList(data.tags),
+            now: new Date().toISOString(),
+          },
+        };
+      },
+      write: (context, state) =>
+        this.db
+          .update(documentsTable)
+          .set({
+            ...state.updatePayload,
+            updatedAt: state.now,
+            version: context.nextVersion,
+          })
+          .where(
+            andSync(
+              eqSync(documentsTable.id, id),
+              eqSync(documentsTable.version, context.actualVersion),
+            ),
+          )
+          .run().changes,
+      afterWrite: ({ current }, state) => {
+        if (state.requestedTags !== undefined) {
+          this.setDocumentTagsSync(id, state.requestedTags, current.projectId);
+        }
+      },
+      loadResult: () => this.getDocumentSync({ id }),
+    });
 
     logger.info({ documentId: id }, 'Updated document');
-    return this.dependencies.getDocument({ id });
+    return result;
   }
 
   async deleteDocument(id: string): Promise<void> {
@@ -255,14 +262,11 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
     logger.info({ documentId: id }, 'Deleted document');
   }
 
-  async generateDocumentSlug(
+  private generateDocumentSlugSync(
     projectId: string | null,
     desired: string,
     excludeId?: string,
-  ): Promise<string> {
-    const { documents } = await import('../../db/schema');
-    const { eq, and, isNull, ne } = await import('drizzle-orm');
-
+  ): string {
     const base = slugify(desired || 'document') || 'document';
     let candidate = base;
     let attempt = 1;
@@ -273,19 +277,22 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const projectCondition =
-        projectId === null ? isNull(documents.projectId) : eq(documents.projectId, projectId);
-      const slugCondition = eq(documents.slug, candidate);
+        projectId === null
+          ? isNullSync(documentsTable.projectId)
+          : eqSync(documentsTable.projectId, projectId);
+      const slugCondition = eqSync(documentsTable.slug, candidate);
       const whereClause = excludeId
-        ? and(slugCondition, projectCondition, ne(documents.id, excludeId))
-        : and(slugCondition, projectCondition);
+        ? andSync(slugCondition, projectCondition, neSync(documentsTable.id, excludeId))
+        : andSync(slugCondition, projectCondition);
 
-      const existing = await this.db
-        .select({ id: documents.id })
-        .from(documents)
+      const existing = this.db
+        .select({ id: documentsTable.id })
+        .from(documentsTable)
         .where(whereClause)
-        .limit(1);
+        .limit(1)
+        .get();
 
-      if (!existing[0]) {
+      if (!existing) {
         return candidate;
       }
 
@@ -294,39 +301,30 @@ export class DocumentStorageDelegate extends BaseStorageDelegate {
     }
   }
 
-  async setDocumentTags(
+  private setDocumentTagsSync(
     documentId: string,
     tagNames: string[],
     projectId: string | null,
-  ): Promise<void> {
+  ): void {
     const normalizedTags = normalizeTagList(tagNames);
-    const { documentTags, tags } = await import('../../db/schema');
-    const { eq, and, or, isNull } = await import('drizzle-orm');
 
-    await this.db.delete(documentTags).where(eq(documentTags.documentId, documentId));
+    this.db.delete(documentTagsTable).where(eqSync(documentTagsTable.documentId, documentId)).run();
 
     for (const tagName of normalizedTags) {
       const projectCondition =
         projectId === null
-          ? isNull(tags.projectId)
-          : or(eq(tags.projectId, projectId), isNull(tags.projectId));
+          ? isNullSync(tagsTable.projectId)
+          : orSync(eqSync(tagsTable.projectId, projectId), isNullSync(tagsTable.projectId));
 
-      const existing = await this.db
+      const existing = this.db
         .select()
-        .from(tags)
-        .where(and(eq(tags.name, tagName), projectCondition))
-        .limit(1);
+        .from(tagsTable)
+        .where(andSync(eqSync(tagsTable.name, tagName), projectCondition))
+        .limit(1)
+        .get();
 
-      let tagId = existing[0]?.id as string | undefined;
-      if (!tagId) {
-        const newTag = await this.dependencies.createTag({ projectId, name: tagName });
-        tagId = newTag.id;
-      }
-
-      await this.db.insert(documentTags).values({
-        documentId,
-        tagId,
-      });
+      const tag = existing ?? this.dependencies.createTag({ projectId, name: tagName });
+      this.db.insert(documentTagsTable).values({ documentId, tagId: tag.id }).run();
     }
   }
 }

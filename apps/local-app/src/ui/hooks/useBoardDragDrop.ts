@@ -19,7 +19,7 @@ export interface UseBoardDragDropResult {
   activeDropStatusId: string | null;
   handleDragStart: (epic: Epic) => void;
   handleDragEnd: () => void;
-  handleDragOverStatus: (statusId: string, event: React.DragEvent) => void;
+  handleDragOverStatus: (statusId: string) => void;
   handleDrop: (statusId: string) => void;
 }
 
@@ -53,8 +53,7 @@ export function useBoardDragDrop({
   }, []);
 
   const handleDragOverStatus = useCallback(
-    (statusId: string, event: React.DragEvent) => {
-      event.preventDefault();
+    (statusId: string) => {
       if (activeDropStatusId !== statusId) {
         setActiveDropStatusId(statusId);
       }

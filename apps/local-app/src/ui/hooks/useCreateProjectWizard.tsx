@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  fetchSetupPreview,
-  type SetupPreviewRequest,
-  type SetupPreviewResponse,
-} from '@/ui/pages/projects/lib/project-api';
-import type { CreateFromTemplatePayload } from '@/ui/hooks/useTemplateForm';
+import type {
+  CreateFromTemplateInput,
+  SetupPreviewRequest,
+  SetupPreviewResponse,
+} from '@/ui/pages/projects/lib/project-contracts';
+import { projectsQueryKeys } from '@/ui/pages/projects/lib/project-query-keys';
+import type { ProjectsPageApi } from '@/ui/pages/projects/lib/projects-page-api';
+import { projectsHttpApi } from '@/ui/pages/projects/lib/projects-http-api';
 import {
   useProjectSetupWizard,
   type ProjectSetupWizardController,
@@ -27,7 +29,7 @@ export type CreateWizardState = WizardConfigState;
 
 /** Minimal shape of the create mutation this hook drives. */
 interface CreateMutationLike {
-  mutate: (payload: CreateFromTemplatePayload) => void;
+  mutate: (payload: CreateFromTemplateInput) => void;
   isPending: boolean;
   isSuccess: boolean;
 }
@@ -35,7 +37,7 @@ interface CreateMutationLike {
 export interface CreateProjectWizardResult {
   isOpen: boolean;
   /** Open the wizard for a validated base payload (name/rootPath/template identity). */
-  openWizard: (basePayload: CreateFromTemplatePayload) => void;
+  openWizard: (basePayload: CreateFromTemplateInput) => void;
   onOpenChange: (open: boolean) => void;
   controller: ProjectSetupWizardController;
   /** True while the setup-preview is loading or the session state is initializing. */
@@ -48,7 +50,7 @@ export interface CreateProjectWizardResult {
   preview: SetupPreviewResponse | null;
 }
 
-function toPreviewRequest(payload: CreateFromTemplatePayload): SetupPreviewRequest | null {
+function toPreviewRequest(payload: CreateFromTemplateInput): SetupPreviewRequest | null {
   if (payload.templatePath) return { templatePath: payload.templatePath };
   if (payload.templateId) {
     return { slug: payload.templateId, ...(payload.version ? { version: payload.version } : {}) };
@@ -65,9 +67,12 @@ function toPreviewRequest(payload: CreateFromTemplatePayload): SetupPreviewReque
  *
  * Nothing is created until the user confirms on the last step.
  */
-export function useCreateProjectWizard(mutation: CreateMutationLike): CreateProjectWizardResult {
+export function useCreateProjectWizard(
+  mutation: CreateMutationLike,
+  api: ProjectsPageApi = projectsHttpApi,
+): CreateProjectWizardResult {
   const [isOpen, setIsOpen] = useState(false);
-  const [basePayload, setBasePayload] = useState<CreateFromTemplatePayload | null>(null);
+  const [basePayload, setBasePayload] = useState<CreateFromTemplateInput | null>(null);
   const [state, setState] = useState<CreateWizardState | null>(null);
   const submittedRef = useRef(false);
 
@@ -77,8 +82,8 @@ export function useCreateProjectWizard(mutation: CreateMutationLike): CreateProj
   );
 
   const previewQuery = useQuery({
-    queryKey: ['setup-preview', previewRequest],
-    queryFn: () => fetchSetupPreview(previewRequest!),
+    queryKey: projectsQueryKeys.setupPreview(previewRequest),
+    queryFn: () => api.loadSetupPreview(previewRequest!),
     enabled: isOpen && previewRequest !== null,
     // One fetch per wizard session, shared to all steps — never refetch mid-flow.
     staleTime: Infinity,
@@ -116,7 +121,7 @@ export function useCreateProjectWizard(mutation: CreateMutationLike): CreateProj
   const { reset } = controller;
 
   const openWizard = useCallback(
-    (payload: CreateFromTemplatePayload) => {
+    (payload: CreateFromTemplateInput) => {
       submittedRef.current = false;
       setBasePayload(payload);
       setState(null);

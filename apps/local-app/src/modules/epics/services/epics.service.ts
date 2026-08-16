@@ -193,8 +193,8 @@ export class EpicsService {
     // Publish epic.updated event (best-effort persisted event - failures logged but don't block update)
     try {
       const changes = await this.buildEpicChangesWithNames(before, updated, data);
-      // Only publish if there are actual changes
-      if (Object.keys(changes).length > 0) {
+      const tagsChanged = !this.haveSameExactTags(before.tags, updated.tags);
+      if (Object.keys(changes).length > 0 || tagsChanged) {
         // Resolve project name for context
         let projectName: string | undefined;
         try {
@@ -712,6 +712,12 @@ export class EpicsService {
       createdAt,
       updatedAt,
     };
+  }
+
+  private haveSameExactTags(left: string[], right: string[]): boolean {
+    const leftSet = new Set(left);
+    const rightSet = new Set(right);
+    return leftSet.size === rightSet.size && [...leftSet].every((tag) => rightSet.has(tag));
   }
 
   /**

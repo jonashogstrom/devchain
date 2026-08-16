@@ -25,6 +25,7 @@ const COMMENT_ID = '00000000-0000-0000-0000-000000000003';
 const AGENT_ID = '00000000-0000-0000-0000-000000000004';
 const AGENT_NAME = 'Agent-A';
 const SESSION_ID = '00000000-0000-0000-0000-000000000005';
+const EPIC_ID = '00000000-0000-0000-0000-000000000006';
 
 function makeAgentCtx(): AgentSessionContext {
   return {
@@ -198,11 +199,12 @@ describe('review-tools handlers', () => {
       expect(result.data.total).toBe(1);
     });
 
-    it('passes status and pagination params to service', async () => {
+    it('passes status, epic, and pagination params to service', async () => {
       const ctx = makeCtx();
       await handleListReviews(ctx, {
         sessionId: SESSION_ID,
         status: 'pending',
+        epicId: EPIC_ID,
         limit: 50,
         offset: 10,
       });
@@ -210,7 +212,7 @@ describe('review-tools handlers', () => {
         status: 'pending',
         limit: 50,
         offset: 10,
-        epicId: undefined,
+        epicId: EPIC_ID,
       });
     });
   });

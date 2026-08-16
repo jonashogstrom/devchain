@@ -29,6 +29,7 @@ import * as actionsRegistry from '../actions/actions.registry';
 import type { ActionDefinition, ActionResult } from '../actions/action.interface';
 import * as eventFieldsCatalog from '../events/event-fields-catalog';
 import * as eventsService from '../../events/services/events.service';
+import { TeamsService } from '../../teams/services/teams.service';
 
 describe('SubscriberExecutorService', () => {
   let service: SubscriberExecutorService;
@@ -198,6 +199,10 @@ describe('SubscriberExecutorService', () => {
         {
           provide: AutomationSchedulerService,
           useValue: mockScheduler,
+        },
+        {
+          provide: TeamsService,
+          useValue: mockTeamsService,
         },
         {
           provide: ModuleRef,
@@ -1456,6 +1461,7 @@ describe('SubscriberExecutorService', () => {
         const context = mockExecute.mock.calls[0][0];
         expect(context.terminalIO).toBeDefined();
         expect(context.sessionsService).toBeDefined();
+        expect(context.teamsService).toBe(mockTeamsService);
         expect(context.logger).toBeDefined();
       });
     });
@@ -1512,6 +1518,24 @@ describe('SubscriberExecutorService', () => {
         await service.executeSubscriber(subscriber, 'test.event', payload);
 
         expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not retry an action that returns retryable false', async () => {
+        mockExecute.mockResolvedValue({
+          success: false,
+          error: 'Permanent action failure',
+          retryable: false,
+        });
+
+        const subscriber = createMockSubscriber({ retryOnError: true });
+        const result = await service.executeSubscriber(
+          subscriber,
+          'test.event',
+          createMockPayload(),
+        );
+
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+        expect(result).toMatchObject({ success: false, error: 'Permanent action failure' });
       });
     });
 
@@ -1591,6 +1615,7 @@ describe('SubscriberExecutorService', () => {
         mockEventLogService as unknown as EventLogService,
         mockEventEmitter as unknown as EventEmitter2,
         realScheduler,
+        mockTeamsService as unknown as TeamsService,
         mockModuleRef as unknown as ModuleRef,
       );
 
@@ -2152,6 +2177,18 @@ describe('SubscriberExecutorService', () => {
         expect(result.text).toBe('lead-only line');
       });
 
+      it('uses the constructor-injected TeamsService without a ModuleRef lookup', async () => {
+        const result = await resolveMessage(
+          '{{#if is_team_lead}}lead-only line{{/if}}',
+          { agentId: 'agent-456' },
+          [{ name: 'Alpha', teamLeadAgentId: 'agent-456' }],
+        );
+
+        expect(result.text).toBe('lead-only line');
+        expect(mockTeamsService.listTeamsByAgent).toHaveBeenCalledWith('agent-456');
+        expect(mockModuleRef.get).not.toHaveBeenCalled();
+      });
+
       it('{{#if is_team_lead}} renders empty when agent is not team lead', async () => {
         const result = await resolveMessage(
           '{{#if is_team_lead}}lead-only line{{/if}}',
@@ -2532,7 +2569,8 @@ describe('EventEmitter2 onAny eventName capture (integration)', () => {
         {} as unknown as never, // eventLogService
         { addListener: jest.fn(), onAny: jest.fn() } as unknown as never, // eventEmitter
         {} as unknown as never, // scheduler
-        nullModuleRef as unknown as never, // moduleRef (11th param)
+        {} as unknown as never, // teamsService
+        nullModuleRef as unknown as never, // moduleRef
       );
 
       expect(() =>

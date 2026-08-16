@@ -10,7 +10,7 @@ export interface CollapsedColumnProps {
   subEpicCounts?: Record<string, number>;
   onExpand: () => void;
   onAddEpic: (statusId: string) => void;
-  onDragOver: (e: React.DragEvent) => void;
+  onDragOver: () => void;
   onDrop: () => void;
   isActiveDrop: boolean;
   onDragStartEpic: (epic: Epic) => void;
@@ -64,7 +64,10 @@ export function CollapsedColumn({
         isActiveDrop && 'border-primary/60 bg-primary/5',
       )}
       style={{ height: '100%' }}
-      onDragOver={onDragOver}
+      onDragOver={(event) => {
+        event.preventDefault();
+        onDragOver();
+      }}
       onDrop={onDrop}
       aria-label={`${status.label} column (${count} epic${count !== 1 ? 's' : ''}). Press Enter or Space to expand, + to add epic.`}
       tabIndex={0}

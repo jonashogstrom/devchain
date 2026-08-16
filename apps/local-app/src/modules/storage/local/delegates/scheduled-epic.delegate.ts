@@ -12,8 +12,15 @@ import type {
   ListScheduledEpicsOptions,
   ListScheduledEpicRunsOptions,
   ClaimRunResult,
+  UpdateScheduledEpicOptions,
 } from '../../interfaces/storage.interface';
-import { NotFoundError, ConflictError } from '../../../../common/errors/error-types';
+import { and as andSync, eq as eqSync } from 'drizzle-orm';
+import {
+  NotFoundError,
+  ConflictError,
+  OptimisticLockError,
+} from '../../../../common/errors/error-types';
+import { scheduledEpics as scheduledEpicsTable } from '../../db/schema';
 import { normalizeListOptions } from '../helpers/storage-helpers';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
@@ -91,20 +98,22 @@ export class ScheduledEpicStorageDelegate extends BaseStorageDelegate {
   }
 
   async getScheduledEpic(id: string): Promise<ScheduledEpic> {
-    const { scheduledEpics } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    return this.getScheduledEpicSync(id);
+  }
 
-    const result = await this.db
+  private getScheduledEpicSync(id: string): ScheduledEpic {
+    const row = this.db
       .select()
-      .from(scheduledEpics)
-      .where(eq(scheduledEpics.id, id))
-      .limit(1);
+      .from(scheduledEpicsTable)
+      .where(eqSync(scheduledEpicsTable.id, id))
+      .limit(1)
+      .get();
 
-    if (!result[0]) {
+    if (!row) {
       throw new NotFoundError('ScheduledEpic', id);
     }
 
-    return this.mapScheduledEpicRow(result[0] as unknown as Record<string, unknown>);
+    return this.mapScheduledEpicRow(row as unknown as Record<string, unknown>);
   }
 
   async listScheduledEpics(
@@ -145,25 +154,62 @@ export class ScheduledEpicStorageDelegate extends BaseStorageDelegate {
     id: string,
     data: UpdateScheduledEpic,
     expectedVersion: number,
+    options?: UpdateScheduledEpicOptions,
   ): Promise<ScheduledEpic> {
-    const { scheduledEpics } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
-
-    const current = await this.getScheduledEpic(id);
-    if (current.configVersion !== expectedVersion) {
-      throw new ConflictError(
-        `ScheduledEpic version conflict: expected ${expectedVersion}, current ${current.configVersion}`,
-        { id, expectedVersion, currentVersion: current.configVersion },
-      );
+    try {
+      return await this.versionedMutationExecutor.execute({
+        resource: 'ScheduledEpic',
+        id,
+        expectedVersion,
+        loadCurrent: () => this.getScheduledEpicSync(id),
+        versionOf: (current) => current.configVersion,
+        prepare: () => ({
+          kind: 'write',
+          state: {
+            updateData: {
+              ...data,
+              ...(options?.derivedRuntimeState ?? {}),
+            },
+            now: new Date().toISOString(),
+          },
+        }),
+        write: (context, state) =>
+          this.db
+            .update(scheduledEpicsTable)
+            .set({
+              ...state.updateData,
+              configVersion: context.nextVersion,
+              updatedAt: state.now,
+            })
+            .where(
+              andSync(
+                eqSync(scheduledEpicsTable.id, id),
+                eqSync(scheduledEpicsTable.configVersion, context.actualVersion),
+              ),
+            )
+            .run().changes,
+        loadResult: () => this.getScheduledEpicSync(id),
+      });
+    } catch (error) {
+      if (error instanceof OptimisticLockError) {
+        const currentVersion = error.details?.actualVersion;
+        if (typeof currentVersion === 'number') {
+          throw this.scheduledEpicConflict(id, expectedVersion, currentVersion);
+        }
+      }
+      throw error;
     }
+  }
 
-    await this.db
-      .update(scheduledEpics)
-      .set({ ...data, configVersion: expectedVersion + 1, updatedAt: now })
-      .where(eq(scheduledEpics.id, id));
-
-    return this.getScheduledEpic(id);
+  private scheduledEpicConflict(
+    id: string,
+    expectedVersion: number,
+    currentVersion: number,
+  ): ConflictError {
+    return new ConflictError(
+      `ScheduledEpic version conflict: expected ${expectedVersion}, current ${currentVersion}`,
+      { id, expectedVersion, currentVersion },
+    );
   }
 
   async deleteScheduledEpic(id: string): Promise<void> {

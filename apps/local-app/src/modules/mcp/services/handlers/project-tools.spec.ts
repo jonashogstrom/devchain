@@ -125,4 +125,17 @@ describe('project-tools handlers', () => {
       },
     });
   });
+
+  it('returns session resolution failures before project discovery', async () => {
+    const ctx = makeContext();
+    (ctx.resolveSessionContext as jest.Mock).mockResolvedValue({
+      success: false,
+      error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' },
+    });
+
+    await expect(
+      handleProjectsList(ctx, { sessionId: SESSION_ID, limit: 100, offset: 0 }),
+    ).resolves.toMatchObject({ success: false, error: { code: 'SESSION_NOT_FOUND' } });
+    expect(ctx.projectCommunicationService.listTargets).not.toHaveBeenCalled();
+  });
 });

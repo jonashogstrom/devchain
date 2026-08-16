@@ -2,10 +2,11 @@ import React, { useEffect, useMemo } from 'react';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useCreateProjectWizard } from './useCreateProjectWizard';
-import type { CreateFromTemplatePayload } from './useTemplateForm';
-import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+import type { CreateFromTemplateInput } from '@/ui/pages/projects/lib/project-contracts';
+import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-contracts';
+import { InMemoryProjectsPageApi } from '../../../test/helpers/in-memory-projects-page-api';
 
-const BASE: CreateFromTemplatePayload = { name: 'X', rootPath: '/tmp/x', templateId: 'tpl' };
+const BASE: CreateFromTemplateInput = { name: 'X', rootPath: '/tmp/x', templateId: 'tpl' };
 
 /** One family (reasoning) with two available providers — used for the ≥1-selected gate. */
 function oneFamilyPreview(): SetupPreviewResponse {
@@ -101,15 +102,6 @@ function twoFamilyPreview(): SetupPreviewResponse {
   };
 }
 
-function installSetupPreviewFetch(preview: SetupPreviewResponse) {
-  global.fetch = jest.fn(async (input: RequestInfo | URL) => {
-    if (String(input) === '/api/projects/setup-preview') {
-      return { ok: true, json: async () => preview } as Response;
-    }
-    return { ok: true, json: async () => ({}) } as Response;
-  }) as unknown as typeof fetch;
-}
-
 interface CreateMutationLike {
   mutate: jest.Mock;
   isPending: boolean;
@@ -122,12 +114,12 @@ interface CreateMutationLike {
  * Step-1 gating wiring — selection → lifted state → getUncoveredFamilies → canProceed → button —
  * WITHOUT the Dialog chrome. No mutation fires (we never reach submit).
  */
-function WizardHarness() {
+function WizardHarness({ api }: { api: InMemoryProjectsPageApi }) {
   const mutation = useMemo<CreateMutationLike>(
     () => ({ mutate: jest.fn(), isPending: false, isSuccess: false }),
     [],
   );
-  const wiz = useCreateProjectWizard(mutation);
+  const wiz = useCreateProjectWizard(mutation, api);
   useEffect(() => {
     // openWizard is stable (useCallback over reset); run once on mount.
     wiz.openWizard(BASE);
@@ -142,26 +134,23 @@ function WizardHarness() {
   );
 }
 
-function renderWizard() {
+function renderWizard(preview: SetupPreviewResponse) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const api = new InMemoryProjectsPageApi({ setupPreview: preview });
   return render(
     <QueryClientProvider client={queryClient}>
-      <WizardHarness />
+      <WizardHarness api={api} />
     </QueryClientProvider>,
   );
 }
 
 describe('useCreateProjectWizard — Step 1 provider gating', () => {
-  const originalFetch = global.fetch;
-
   afterEach(() => {
-    global.fetch = originalFetch;
     jest.restoreAllMocks();
   });
 
   it('starts with nothing selected and Next disabled; selecting a provider enables it', async () => {
-    installSetupPreviewFetch(oneFamilyPreview());
-    renderWizard();
+    renderWizard(oneFamilyPreview());
 
     // Step body renders once the setup-preview resolves — with NO preselection.
     await screen.findByRole('checkbox', { name: 'Claude provider' });
@@ -175,8 +164,7 @@ describe('useCreateProjectWizard — Step 1 provider gating', () => {
   });
 
   it('disables Next again when the selection is emptied', async () => {
-    installSetupPreviewFetch(oneFamilyPreview());
-    renderWizard();
+    renderWizard(oneFamilyPreview());
 
     await screen.findByRole('checkbox', { name: 'Claude provider' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Claude provider' }));
@@ -187,8 +175,7 @@ describe('useCreateProjectWizard — Step 1 provider gating', () => {
   });
 
   it('disables Next and warns when a family loses coverage even with providers selected', async () => {
-    installSetupPreviewFetch(twoFamilyPreview());
-    renderWizard();
+    renderWizard(twoFamilyPreview());
 
     await screen.findByRole('checkbox', { name: 'Codex provider' });
     // Select claude only: reasoning is covered, but vision (codex-only) stays uncovered.
@@ -208,8 +195,14 @@ describe('useCreateProjectWizard — Step 1 provider gating', () => {
  * rendered on Step 1 — later steps are driven purely through the controller.
  */
 let lastWiz: ReturnType<typeof useCreateProjectWizard> | null = null;
-function EmissionHarness({ mutation }: { mutation: CreateMutationLike }) {
-  const wiz = useCreateProjectWizard(mutation);
+function EmissionHarness({
+  mutation,
+  api,
+}: {
+  mutation: CreateMutationLike;
+  api: InMemoryProjectsPageApi;
+}) {
+  const wiz = useCreateProjectWizard(mutation, api);
   lastWiz = wiz;
   useEffect(() => {
     wiz.openWizard(BASE);
@@ -221,21 +214,19 @@ function EmissionHarness({ mutation }: { mutation: CreateMutationLike }) {
   );
 }
 
-function renderEmissionHarness(mutation: CreateMutationLike) {
+function renderEmissionHarness(mutation: CreateMutationLike, preview: SetupPreviewResponse) {
   lastWiz = null;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const api = new InMemoryProjectsPageApi({ setupPreview: preview });
   return render(
     <QueryClientProvider client={queryClient}>
-      <EmissionHarness mutation={mutation} />
+      <EmissionHarness mutation={mutation} api={api} />
     </QueryClientProvider>,
   );
 }
 
 describe('useCreateProjectWizard — Step 1 family→provider mapping emission', () => {
-  const originalFetch = global.fetch;
-
   afterEach(() => {
-    global.fetch = originalFetch;
     jest.restoreAllMocks();
   });
 
@@ -244,10 +235,8 @@ describe('useCreateProjectWizard — Step 1 family→provider mapping emission',
     // selected by the user. Without familyProviderMappings the backend returns
     // providerMappingRequired (template-loader.ts:449-477); with it, the mapping resolves the
     // family client-side.
-    installSetupPreviewFetch(multiAlternativePreview());
-
     const mutation = { mutate: jest.fn(), isPending: false, isSuccess: false };
-    renderEmissionHarness(mutation);
+    renderEmissionHarness(mutation, multiAlternativePreview());
 
     await screen.findByRole('checkbox', { name: 'Codex provider' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Codex provider' }));
@@ -274,10 +263,8 @@ describe('useCreateProjectWizard — Step 1 family→provider mapping emission',
 
   it('omits familyProviderMappings when the default provider is already selected', async () => {
     // oneFamilyPreview: default 'claude' is installed and gets selected → no mapping needed.
-    installSetupPreviewFetch(oneFamilyPreview());
-
     const mutation = { mutate: jest.fn(), isPending: false, isSuccess: false };
-    renderEmissionHarness(mutation);
+    renderEmissionHarness(mutation, oneFamilyPreview());
 
     await screen.findByRole('checkbox', { name: 'Claude provider' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Claude provider' }));

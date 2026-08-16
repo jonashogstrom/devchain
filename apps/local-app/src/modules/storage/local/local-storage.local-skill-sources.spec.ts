@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { join } from 'path';
-import { ConflictError, NotFoundError, ValidationError } from '../../../common/errors/error-types';
+import { ConflictError, NotFoundError } from '../../../common/errors/error-types';
 import { LocalStorageService } from './local-storage.service';
 
 describe('LocalStorageService - LocalSkillSources integration', () => {
@@ -42,13 +42,17 @@ describe('LocalStorageService - LocalSkillSources integration', () => {
     await expect(service.getLocalSkillSource('missing-id')).resolves.toBeNull();
   });
 
-  it('rejects built-in source names for local sources', async () => {
-    await expect(
-      service.createLocalSkillSource({
-        name: 'openai',
-        folderPath: '/tmp/openai-local',
-      }),
-    ).rejects.toThrow(ValidationError);
+  it('looks up local sources deliberately by normalized name', async () => {
+    const source = await service.createLocalSkillSource({
+      name: 'Local-Lookup',
+      folderPath: '/tmp/local-lookup',
+    });
+
+    await expect(service.getLocalSkillSourceByName(' LOCAL-LOOKUP ')).resolves.toMatchObject({
+      id: source.id,
+      name: 'local-lookup',
+    });
+    await expect(service.getLocalSkillSourceByName('missing-local-source')).resolves.toBeNull();
   });
 
   it('rejects local source names that collide with community source names', async () => {

@@ -24,13 +24,14 @@ import { RealtimeBroadcastModule } from '../realtime/realtime-broadcast.module';
 import { SessionsReadModule } from './sessions-read.module';
 import { SessionLauncherFacade } from './services/session-launcher-facade.service';
 import { RuntimeContextCaptureModule } from '../runtime-context-capture/runtime-context-capture.module';
+import { ProviderRuntimePreparationService } from './services/provider-runtime-preparation';
 
 @Module({
   imports: [
     StorageModule,
     SessionsReadModule,
     RealtimeBroadcastModule,
-    forwardRef(() => TerminalModule),
+    TerminalModule,
     forwardRef(() => CoreNormalModule),
     EventsCoreModule,
     forwardRef(() => SettingsModule),
@@ -48,6 +49,7 @@ import { RuntimeContextCaptureModule } from '../runtime-context-capture/runtime-
     DeliveryFailureNotifierService,
     SessionLaunchPipeline,
     SessionRestorePipeline,
+    ProviderRuntimePreparationService,
     SessionRuntime,
     SessionLauncherFacade,
     TeamsStore,

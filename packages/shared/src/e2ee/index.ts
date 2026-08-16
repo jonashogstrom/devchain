@@ -64,6 +64,9 @@ export {
 export { E2EE_SAFETY_NUMBER_GROUPS, deriveSafetyNumber } from './safety-number.js';
 export {
   E2EE_NEGOTIATION_VERSION,
+  WORKSPACE_SUPPORT_VERSION,
+  isWorkspaceSupportCapability,
+  buildWorkspaceSupportCapability,
   isE2eeCapability,
   isCapable,
   negotiateE2ee,
@@ -72,4 +75,5 @@ export {
   type E2eeNegotiationMode,
   type E2eeNegotiationReason,
   type E2eeNegotiationResult,
+  type WorkspaceSupportCapability,
 } from './negotiation.js';

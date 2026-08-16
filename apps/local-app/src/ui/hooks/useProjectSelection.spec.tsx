@@ -4,15 +4,20 @@ import { act, useEffect } from 'react';
 import { waitFor } from '@testing-library/react';
 import { createRoot, Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { projectsQueryKeys } from '@/ui/pages/projects/lib/project-query-keys';
 import {
   ProjectSelectionProvider,
   useSelectedProject,
   PROJECT_STORAGE_KEY,
+  WORKSPACE_PROJECTS_STORAGE_KEY,
+  WORKSPACE_STORAGE_KEY,
   fetchProjects,
 } from './useProjectSelection';
 
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 const originalFetch = global.fetch;
+const DEFAULT_WORKSPACE_ID = 'workspace-default';
+const SECOND_WORKSPACE_ID = 'workspace-second';
 let mockActiveWorktree: { id: string; name: string; devchainProjectId: string | null } | null =
   null;
 let mockRuntimeResolved = true;
@@ -44,6 +49,7 @@ describe('ProjectSelectionProvider', () => {
     mockRuntimeResolved = true;
     localStorage.clear();
     sessionStorage.clear();
+    window.history.replaceState({}, '', '/');
   });
 
   afterEach(async () => {
@@ -66,6 +72,7 @@ describe('ProjectSelectionProvider', () => {
     items: [
       {
         id: 'project-alpha',
+        workspaceId: DEFAULT_WORKSPACE_ID,
         name: 'Alpha Project',
         description: null,
         rootPath: '/tmp/alpha',
@@ -74,6 +81,7 @@ describe('ProjectSelectionProvider', () => {
       },
       {
         id: 'project-beta',
+        workspaceId: DEFAULT_WORKSPACE_ID,
         name: 'Beta Project',
         description: null,
         rootPath: '/tmp/beta',
@@ -83,6 +91,82 @@ describe('ProjectSelectionProvider', () => {
     ],
     total: 2,
   };
+  const mockWorkspacesResponse = [
+    {
+      id: DEFAULT_WORKSPACE_ID,
+      name: 'Default',
+      isDefault: true,
+      position: 0,
+      projectCount: 2,
+      deviceGrantCount: 0,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    },
+  ];
+  const secondWorkspace = {
+    ...mockWorkspacesResponse[0],
+    id: SECOND_WORKSPACE_ID,
+    name: 'Second',
+    isDefault: false,
+    position: 1,
+  };
+  const secondWorkspaceProjects = {
+    items: [
+      {
+        ...mockProjectsResponse.items[0],
+        id: 'project-gamma',
+        workspaceId: SECOND_WORKSPACE_ID,
+        name: 'Gamma Project',
+        rootPath: '/tmp/gamma',
+      },
+      {
+        ...mockProjectsResponse.items[1],
+        id: 'project-delta',
+        workspaceId: SECOND_WORKSPACE_ID,
+        name: 'Delta Project',
+        rootPath: '/tmp/delta',
+      },
+    ],
+    total: 2,
+  };
+
+  function setupMultiWorkspaceFetch() {
+    const mockFetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/stats')) {
+        return { ok: true, json: async () => mockStatsResponse } as Response;
+      }
+      if (url === '/api/workspaces') {
+        return {
+          ok: true,
+          json: async () => [mockWorkspacesResponse[0], secondWorkspace],
+        } as Response;
+      }
+      if (url.startsWith('/api/projects/by-path?')) {
+        return {
+          ok: true,
+          json: async () => secondWorkspaceProjects.items[0],
+        } as Response;
+      }
+      const detailMatch = url.match(/^\/api\/projects\/([^/?]+)$/);
+      if (detailMatch) {
+        const id = decodeURIComponent(detailMatch[1]);
+        const project = [...mockProjectsResponse.items, ...secondWorkspaceProjects.items].find(
+          (item) => item.id === id,
+        );
+        return { ok: Boolean(project), json: async () => project ?? {} } as Response;
+      }
+      if (url === `/api/projects?workspaceId=${SECOND_WORKSPACE_ID}`) {
+        return { ok: true, json: async () => secondWorkspaceProjects } as Response;
+      }
+      if (url === `/api/projects?workspaceId=${DEFAULT_WORKSPACE_ID}`) {
+        return { ok: true, json: async () => mockProjectsResponse } as Response;
+      }
+      return { ok: false, json: async () => ({}) } as Response;
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+    return mockFetch;
+  }
   const mockStatsResponse = { epicsCount: 0, agentsCount: 0 };
 
   function setupMockFetch() {
@@ -92,6 +176,24 @@ describe('ProjectSelectionProvider', () => {
         return {
           ok: true,
           json: async () => mockStatsResponse,
+        } as Response;
+      }
+
+      if (url === '/api/workspaces') {
+        return {
+          ok: true,
+          json: async () => mockWorkspacesResponse,
+        } as Response;
+      }
+
+      const projectDetailMatch = url.match(/^\/api\/projects\/([^/?]+)$/);
+      if (projectDetailMatch) {
+        const project = mockProjectsResponse.items.find(
+          (item) => item.id === decodeURIComponent(projectDetailMatch[1]),
+        );
+        return {
+          ok: Boolean(project),
+          json: async () => project ?? {},
         } as Response;
       }
 
@@ -112,11 +214,29 @@ describe('ProjectSelectionProvider', () => {
     return mockFetch;
   }
 
+  function setupEmptyWorkspaceFetch() {
+    const mockFetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/workspaces') {
+        return { ok: true, json: async () => mockWorkspacesResponse } as Response;
+      }
+      if (url.includes('/api/projects')) {
+        return { ok: true, json: async () => ({ items: [], total: 0 }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+  }
+
   interface TrackerState {
+    currentWorkspace: string | undefined;
     currentSelection: string | undefined;
     currentProject: string | undefined;
     projectsLoading: boolean;
+    workspaceSelectionLocked: boolean;
+    updateWorkspace: (workspaceId: string) => void;
     updateSelection: (projectId?: string) => void;
+    activateProject: (project: { id: string; workspaceId: string }) => void;
   }
 
   function renderTracker(): TrackerState {
@@ -125,22 +245,47 @@ describe('ProjectSelectionProvider', () => {
 
   function renderTrackerWithControls(): { state: TrackerState; rerender: () => void } {
     const state: TrackerState = {
+      currentWorkspace: undefined,
       currentSelection: undefined,
       currentProject: undefined,
       projectsLoading: false,
+      workspaceSelectionLocked: false,
+      updateWorkspace: () => undefined,
       updateSelection: () => undefined,
+      activateProject: () => undefined,
     };
 
     const Tracker = () => {
-      const { selectedProjectId, selectedProject, projectsLoading, setSelectedProjectId } =
-        useSelectedProject();
+      const {
+        selectedWorkspaceId,
+        selectedProjectId,
+        selectedProject,
+        projectsLoading,
+        isWorkspaceSelectionLocked,
+        setSelectedWorkspaceId,
+        setSelectedProjectId,
+        activateProject,
+      } = useSelectedProject();
 
       useEffect(() => {
+        state.currentWorkspace = selectedWorkspaceId;
         state.currentSelection = selectedProjectId;
         state.currentProject = selectedProject?.id;
         state.projectsLoading = projectsLoading;
+        state.workspaceSelectionLocked = isWorkspaceSelectionLocked;
+        state.updateWorkspace = setSelectedWorkspaceId;
         state.updateSelection = setSelectedProjectId;
-      }, [selectedProjectId, selectedProject, projectsLoading, setSelectedProjectId]);
+        state.activateProject = activateProject;
+      }, [
+        activateProject,
+        isWorkspaceSelectionLocked,
+        projectsLoading,
+        selectedProject,
+        selectedProjectId,
+        selectedWorkspaceId,
+        setSelectedProjectId,
+        setSelectedWorkspaceId,
+      ]);
 
       return null;
     };
@@ -174,9 +319,9 @@ describe('ProjectSelectionProvider', () => {
     setupMockFetch();
 
     const state = renderTracker();
-    await act(async () => await flushPromises());
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
 
-    expect(state.currentSelection).toBe('project-alpha');
+    await waitFor(() => expect(state.currentSelection).toBe('project-alpha'));
   });
 
   it('sessionStorage takes precedence over localStorage for reading', async () => {
@@ -185,16 +330,14 @@ describe('ProjectSelectionProvider', () => {
     setupMockFetch();
 
     const state = renderTracker();
-    await act(async () => await flushPromises());
-
-    expect(state.currentSelection).toBe('project-beta');
+    await waitFor(() => expect(state.currentSelection).toBe('project-beta'));
   });
 
   it('writes to both sessionStorage and localStorage when setting selection', async () => {
     setupMockFetch();
 
     const state = renderTracker();
-    await act(async () => await flushPromises());
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
 
     await act(async () => {
       state.updateSelection('project-alpha');
@@ -205,21 +348,23 @@ describe('ProjectSelectionProvider', () => {
     expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
   });
 
-  it('clears sessionStorage but keeps localStorage when clearing selection', async () => {
-    localStorage.setItem(PROJECT_STORAGE_KEY, 'project-alpha');
-    sessionStorage.setItem(PROJECT_STORAGE_KEY, 'project-alpha');
+  it('reselects the first project after clearing a selection in a nonempty workspace', async () => {
+    localStorage.setItem(PROJECT_STORAGE_KEY, 'project-beta');
+    sessionStorage.setItem(PROJECT_STORAGE_KEY, 'project-beta');
     setupMockFetch();
 
     const state = renderTracker();
-    await act(async () => await flushPromises());
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
 
     await act(async () => {
       state.updateSelection(undefined);
       await flushPromises();
     });
 
-    expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBeNull();
-    // localStorage is kept as fallback for new tabs
+    // Clearing is temporary in a nonempty workspace: reconciliation selects the
+    // first project instead of resurrecting the cleared localStorage value.
+    await waitFor(() => expect(state.currentSelection).toBe('project-alpha'));
+    expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
     expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
   });
 
@@ -234,6 +379,10 @@ describe('ProjectSelectionProvider', () => {
           ok: true,
           json: async () => mockStatsResponse,
         } as Response;
+      }
+
+      if (url === '/api/workspaces') {
+        return { ok: true, json: async () => mockWorkspacesResponse } as Response;
       }
 
       if (url.includes('/api/projects')) {
@@ -261,7 +410,7 @@ describe('ProjectSelectionProvider', () => {
     });
   });
 
-  it('clears both storages when localStorage value is also invalid', async () => {
+  it('selects the first project when both stored selections are invalid', async () => {
     localStorage.setItem(PROJECT_STORAGE_KEY, 'non-existent-project-alpha');
     sessionStorage.setItem(PROJECT_STORAGE_KEY, 'non-existent-project-beta');
 
@@ -272,6 +421,10 @@ describe('ProjectSelectionProvider', () => {
           ok: true,
           json: async () => mockStatsResponse,
         } as Response;
+      }
+
+      if (url === '/api/workspaces') {
+        return { ok: true, json: async () => mockWorkspacesResponse } as Response;
       }
 
       if (url.includes('/api/projects')) {
@@ -292,13 +445,63 @@ describe('ProjectSelectionProvider', () => {
     const state = renderTracker();
     await act(async () => await flushPromises());
 
-    // Both values are invalid - should clear selection
+    // Both stored values are invalid: the first returned project is selected and persisted.
     await waitFor(() => {
+      expect(state.currentSelection).toBe('project-alpha');
+      expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
+    });
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
+    expect(JSON.parse(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-alpha',
+    });
+    expect(JSON.parse(localStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-alpha',
+    });
+  });
+
+  it('selects the first project when a workspace has no stored selection', async () => {
+    setupMultiWorkspaceFetch();
+    const state = renderTracker();
+
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-alpha');
+    });
+
+    act(() => state.updateWorkspace(SECOND_WORKSPACE_ID));
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-gamma');
+    });
+  });
+
+  it('keeps an empty workspace unselected without a reconciliation loop', async () => {
+    setupEmptyWorkspaceFetch();
+
+    const state = renderTracker();
+    await act(async () => await flushPromises());
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
+    expect(state.currentSelection).toBeUndefined();
+    expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBeNull();
+    expect(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY)).toBeNull();
+  });
+
+  it('clears a stale selection once when the workspace is empty', async () => {
+    localStorage.setItem(PROJECT_STORAGE_KEY, 'deleted-project');
+    sessionStorage.setItem(PROJECT_STORAGE_KEY, 'deleted-project');
+    setupEmptyWorkspaceFetch();
+
+    const state = renderTracker();
+    await act(async () => await flushPromises());
+
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
       expect(state.currentSelection).toBeUndefined();
       expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBeNull();
     });
-    // localStorage is kept even when invalid (serves as new tab default that gets validated)
-    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('non-existent-project-alpha');
+    // localStorage is kept even when stale (serves as new tab default that gets validated)
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('deleted-project');
   });
 
   it('new tabs initialize from localStorage when sessionStorage is empty', async () => {
@@ -311,10 +514,269 @@ describe('ProjectSelectionProvider', () => {
     const state = renderTracker();
     await act(async () => await flushPromises());
 
-    expect(state.currentSelection).toBe('project-beta');
+    await waitFor(() => {
+      expect(state.currentSelection).toBe('project-beta');
+      expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-beta');
+    });
     // After initialization, both should have the value
+    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-beta');
+  });
+
+  it('uses the explicit Default workspace for fresh and stale workspace state', async () => {
+    sessionStorage.setItem(WORKSPACE_STORAGE_KEY, 'workspace-stale');
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, 'workspace-stale');
+    const mockFetch = setupMultiWorkspaceFetch();
+
+    const state = renderTracker();
+
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
+      expect(sessionStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe(DEFAULT_WORKSPACE_ID);
+      expect(localStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe(DEFAULT_WORKSPACE_ID);
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      `/api/projects?workspaceId=${DEFAULT_WORKSPACE_ID}`,
+      expect.any(Object),
+    );
+  });
+
+  it('restores the last valid project independently for each workspace', async () => {
+    setupMultiWorkspaceFetch();
+    const state = renderTracker();
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
+    act(() => state.updateSelection('project-alpha'));
+    await waitFor(() => expect(state.currentSelection).toBe('project-alpha'));
+
+    act(() => state.updateWorkspace(SECOND_WORKSPACE_ID));
+    await waitFor(() => expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID));
+    act(() => state.updateSelection('project-gamma'));
+    await waitFor(() => expect(state.currentSelection).toBe('project-gamma'));
+
+    act(() => state.updateWorkspace(DEFAULT_WORKSPACE_ID));
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-alpha');
+    });
+
+    expect(JSON.parse(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-alpha',
+      [SECOND_WORKSPACE_ID]: 'project-gamma',
+    });
+  });
+
+  it('atomically activates a management project in its own workspace', async () => {
+    setupMultiWorkspaceFetch();
+    const state = renderTracker();
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
+    act(() => state.activateProject(secondWorkspaceProjects.items[1]));
+
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-delta');
+      expect(state.currentProject).toBe('project-delta');
+    });
+    expect(sessionStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe(SECOND_WORKSPACE_ID);
+    // The Default workspace entry comes from the initial first-project fallback.
+    expect(JSON.parse(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-alpha',
+      [SECOND_WORKSPACE_ID]: 'project-delta',
+    });
+  });
+
+  it('preserves a pending activation through stale target cache and refetch', async () => {
+    let resolveSecondWorkspaceProjects: ((response: Response) => void) | undefined;
+    const freshSecondWorkspaceProjects = {
+      items: [
+        ...secondWorkspaceProjects.items,
+        {
+          ...secondWorkspaceProjects.items[0],
+          id: 'project-new',
+          name: 'New Project',
+          rootPath: '/tmp/new',
+        },
+      ],
+      total: 3,
+    };
+    const fetchMock = jest.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/workspaces') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [mockWorkspacesResponse[0], secondWorkspace],
+        } as Response);
+      }
+      if (url === `/api/projects?workspaceId=${DEFAULT_WORKSPACE_ID}`) {
+        return Promise.resolve({ ok: true, json: async () => mockProjectsResponse } as Response);
+      }
+      if (url === `/api/projects?workspaceId=${SECOND_WORKSPACE_ID}`) {
+        return new Promise<Response>((resolve) => {
+          resolveSecondWorkspaceProjects = resolve;
+        });
+      }
+      if (url.endsWith('/stats')) {
+        return Promise.resolve({ ok: true, json: async () => mockStatsResponse } as Response);
+      }
+      return Promise.resolve({ ok: false, json: async () => ({}) } as Response);
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    queryClient.setQueryData(
+      projectsQueryKeys.available(SECOND_WORKSPACE_ID),
+      secondWorkspaceProjects,
+    );
+    const state = renderTracker();
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
+    act(() => state.activateProject({ id: 'project-new', workspaceId: SECOND_WORKSPACE_ID }));
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID));
+    expect(state.currentSelection).toBe('project-new');
+    // The Default workspace entry comes from the initial first-project fallback.
+    expect(JSON.parse(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-alpha',
+      [SECOND_WORKSPACE_ID]: 'project-new',
+    });
+
+    resolveSecondWorkspaceProjects?.({
+      ok: true,
+      json: async () => freshSecondWorkspaceProjects,
+    } as Response);
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-new');
+      expect(state.currentProject).toBe('project-new');
+    });
+  });
+
+  it('keeps the new workspace active when the previous workspace response finishes late', async () => {
+    let resolveDefaultProjects: ((response: Response) => void) | undefined;
+    const fetchMock = jest.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/workspaces') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [mockWorkspacesResponse[0], secondWorkspace],
+        } as Response);
+      }
+      if (url === `/api/projects?workspaceId=${DEFAULT_WORKSPACE_ID}`) {
+        return new Promise<Response>((resolve) => {
+          resolveDefaultProjects = resolve;
+        });
+      }
+      if (url === `/api/projects?workspaceId=${SECOND_WORKSPACE_ID}`) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ items: [secondWorkspaceProjects.items[0]], total: 1 }),
+        } as Response);
+      }
+      if (url.endsWith('/stats')) {
+        return Promise.resolve({ ok: true, json: async () => mockStatsResponse } as Response);
+      }
+      return Promise.resolve({ ok: false, json: async () => ({}) } as Response);
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const state = renderTracker();
+
+    await waitFor(() => expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID));
+    act(() => state.updateWorkspace(SECOND_WORKSPACE_ID));
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-gamma');
+    });
+
+    resolveDefaultProjects?.({
+      ok: true,
+      json: async () => mockProjectsResponse,
+    } as Response);
+    await act(async () => await flushPromises());
+
+    expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+    expect(state.currentSelection).toBe('project-gamma');
+  });
+
+  it('keeps a warm-cache URL project ahead of the first-project fallback', async () => {
+    window.history.replaceState({}, '', '/?projectId=project-beta');
+    sessionStorage.setItem(WORKSPACE_STORAGE_KEY, DEFAULT_WORKSPACE_ID);
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, DEFAULT_WORKSPACE_ID);
+    setupMockFetch();
+    queryClient.setQueryData(['workspaces'], mockWorkspacesResponse);
+    queryClient.setQueryData(
+      projectsQueryKeys.available(DEFAULT_WORKSPACE_ID),
+      mockProjectsResponse,
+    );
+    queryClient.setQueryData(
+      projectsQueryKeys.detail({ id: 'project-beta' }),
+      mockProjectsResponse.items[1],
+    );
+
+    const state = renderTracker();
+
+    await waitFor(() => {
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-beta');
+      expect(state.currentProject).toBe('project-beta');
+    });
     expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-beta');
     expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-beta');
+    expect(JSON.parse(sessionStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-beta',
+    });
+    expect(JSON.parse(localStorage.getItem(WORKSPACE_PROJECTS_STORAGE_KEY) ?? '{}')).toEqual({
+      [DEFAULT_WORKSPACE_ID]: 'project-beta',
+    });
+  });
+
+  it.each([
+    ['projectId', 'project-gamma', '/api/projects/project-gamma'],
+    ['projectPath', '/tmp/gamma', '/api/projects/by-path?path=%2Ftmp%2Fgamma'],
+  ])(
+    'resolves a URL %s through project detail before activating its workspace',
+    async (key, value, detailUrl) => {
+      window.history.replaceState({}, '', `/?${key}=${encodeURIComponent(value)}`);
+      const mockFetch = setupMultiWorkspaceFetch();
+
+      const state = renderTracker();
+
+      await waitFor(() => {
+        expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+        expect(state.currentSelection).toBe('project-gamma');
+        expect(state.currentProject).toBe('project-gamma');
+      });
+      const detailCall = mockFetch.mock.calls.findIndex((call) => call[0] === detailUrl);
+      const availableCall = mockFetch.mock.calls.findIndex(
+        (call) => call[0] === `/api/projects?workspaceId=${SECOND_WORKSPACE_ID}`,
+      );
+      expect(detailCall).toBeGreaterThanOrEqual(0);
+      expect(availableCall).toBeGreaterThan(detailCall);
+    },
+  );
+
+  it('locks workspace changes to the active worktree project and restores on unlock', async () => {
+    setupMultiWorkspaceFetch();
+    sessionStorage.setItem(WORKSPACE_STORAGE_KEY, DEFAULT_WORKSPACE_ID);
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, DEFAULT_WORKSPACE_ID);
+    mockActiveWorktree = {
+      id: 'wt-1',
+      name: 'feature-auth',
+      devchainProjectId: 'project-gamma',
+    };
+    const { state, rerender } = renderTrackerWithControls();
+
+    await waitFor(() => {
+      expect(state.workspaceSelectionLocked).toBe(true);
+      expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+      expect(state.currentSelection).toBe('project-gamma');
+    });
+    act(() => state.updateWorkspace(DEFAULT_WORKSPACE_ID));
+    expect(state.currentWorkspace).toBe(SECOND_WORKSPACE_ID);
+
+    mockActiveWorktree = null;
+    rerender();
+    await waitFor(() => {
+      expect(state.workspaceSelectionLocked).toBe(false);
+      expect(state.currentWorkspace).toBe(DEFAULT_WORKSPACE_ID);
+    });
   });
 
   it('preserves selection during stale data window after worktree unlock', async () => {
@@ -323,6 +785,7 @@ describe('ProjectSelectionProvider', () => {
       items: [
         {
           id: 'wt-project-1',
+          workspaceId: DEFAULT_WORKSPACE_ID,
           name: 'Worktree Project',
           description: null,
           rootPath: '/tmp/wt',
@@ -339,6 +802,12 @@ describe('ProjectSelectionProvider', () => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url.endsWith('/stats')) {
         return { ok: true, json: async () => mockStatsResponse } as Response;
+      }
+      if (url === '/api/workspaces') {
+        return { ok: true, json: async () => mockWorkspacesResponse } as Response;
+      }
+      if (url === '/api/projects/wt-project-1') {
+        return { ok: true, json: async () => worktreeProjects.items[0] } as Response;
       }
       if (url.includes('/api/projects')) {
         return {
@@ -371,10 +840,9 @@ describe('ProjectSelectionProvider', () => {
     // Without wasLockedRef, validation would see 'project-alpha' NOT in ['wt-project-1'] → clear.
     mockActiveWorktree = null;
     rerender();
-    await act(async () => await flushPromises());
 
     // AC1: selection preserved during stale data window
-    expect(state.currentSelection).toBe('project-alpha');
+    await waitFor(() => expect(state.currentSelection).toBe('project-alpha'));
     expect(sessionStorage.getItem(PROJECT_STORAGE_KEY)).toBe('project-alpha');
 
     // Simulate fresh main projects arriving (cache refreshed after cleanup)
@@ -448,7 +916,10 @@ describe('ProjectSelectionProvider', () => {
     await act(async () => await flushPromises());
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/projects', expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(
+        `/api/projects?workspaceId=${DEFAULT_WORKSPACE_ID}`,
+        expect.any(Object),
+      );
       expect(state.currentSelection).toBe('project-alpha');
       expect(state.currentProject).toBe('project-alpha');
       expect(state.projectsLoading).toBe(false);

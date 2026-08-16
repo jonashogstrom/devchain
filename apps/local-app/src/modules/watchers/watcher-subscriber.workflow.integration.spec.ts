@@ -82,7 +82,7 @@ describe('Watcher → Subscriber E2E Flow', () => {
     ...overrides,
   });
 
-  // T3-FIX: Add immediate: true to actionInputs so messages bypass pool and call pasteAndSubmit directly
+  // Most fixtures retain the legacy mapping so the end-to-end executor path keeps compatibility coverage.
   const createMockSubscriber = (overrides: Partial<Subscriber> = {}): Subscriber => ({
     id: 'subscriber-1',
     projectId: 'project-1',
@@ -284,7 +284,7 @@ describe('Watcher → Subscriber E2E Flow', () => {
         eventName: 'error.detected',
         actionInputs: {
           text: { source: 'custom', customValue: '/fix-error' },
-          immediate: { source: 'custom', customValue: 'true' },
+          deliveryMode: { source: 'custom', customValue: 'immediate' },
         },
       });
       const session = createMockSession();

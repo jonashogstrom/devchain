@@ -8,6 +8,7 @@ import type { SessionsMessageLogReadFacade } from '../../sessions/services/sessi
 import type { SessionLifecycleFacade } from '../../sessions/services/session-lifecycle-facade.service';
 import type { TeamsService } from '../../teams/services/teams.service';
 import type { PendingAskUserQuestionService } from '../../hooks/services/pending-ask-user-question.service';
+import type { E2eeTrustService } from '../../e2ee/services/e2ee-trust.service';
 import { LifecycleOperationTracker } from './lifecycle-operation-tracker';
 import {
   AppError,
@@ -67,6 +68,7 @@ function build(overrides: {
   sessionLifecycle?: Partial<SessionLifecycleFacade>;
   teamsService?: Partial<TeamsService>;
   pendingAskUserQuestion?: Partial<PendingAskUserQuestionService>;
+  e2eeTrust?: Partial<E2eeTrustService>;
 }) {
   const storage = {
     listAgents: jest.fn(),
@@ -120,6 +122,10 @@ function build(overrides: {
     clearBySession: jest.fn().mockReturnValue(0),
     ...overrides.pendingAskUserQuestion,
   } as unknown as PendingAskUserQuestionService;
+  const e2eeTrust = {
+    resolveEffectiveDeviceName: jest.fn().mockReturnValue(undefined),
+    ...overrides.e2eeTrust,
+  } as unknown as E2eeTrustService;
   const operationTracker = new LifecycleOperationTracker();
   const service = new MobileChatRpcService(
     storage,
@@ -132,6 +138,7 @@ function build(overrides: {
     operationTracker,
     teamsService,
     pendingAskUserQuestion,
+    e2eeTrust,
   );
   return {
     service,
@@ -145,6 +152,7 @@ function build(overrides: {
     operationTracker,
     teamsService,
     pendingAskUserQuestion,
+    e2eeTrust,
   };
 }
 
@@ -816,6 +824,7 @@ describe('MobileChatRpcService.sendMessage', () => {
     deliver?: unknown;
     /** Entries returned by pendingAskUserQuestion.getBySession (default: none). */
     pending?: unknown[];
+    effectiveSenderName?: string;
   }) {
     return build({
       storage: {
@@ -838,11 +847,18 @@ describe('MobileChatRpcService.sendMessage', () => {
       ...(over.pending !== undefined
         ? { pendingAskUserQuestion: { getBySession: jest.fn().mockReturnValue(over.pending) } }
         : {}),
+      ...(over.effectiveSenderName !== undefined
+        ? {
+            e2eeTrust: {
+              resolveEffectiveDeviceName: jest.fn().mockReturnValue(over.effectiveSenderName),
+            },
+          }
+        : {}),
     });
   }
 
   it('delivers thread-free (mcp.direct) by agent UUID and returns queued', async () => {
-    const { service, agentMessageDelivery } = buildSend({});
+    const { service, agentMessageDelivery, e2eeTrust } = buildSend({});
 
     const result = await service.sendMessage({
       agentId: AGENT_A,
@@ -861,6 +877,7 @@ describe('MobileChatRpcService.sendMessage', () => {
       body: 'hello agent',
       source: 'mobile',
       projectId: PROJECT_ID,
+      senderName: 'Mobile User',
       senderType: 'user',
       // plain framing: the human user's turn is delivered as raw text with NO
       // agent-oriented banner (regression guard that mobile stays thread-free + plain)
@@ -868,8 +885,44 @@ describe('MobileChatRpcService.sendMessage', () => {
     });
     expect(message.threadId).toBeUndefined();
     expect(message.framing).toBe('plain');
+    expect(e2eeTrust.resolveEffectiveDeviceName).not.toHaveBeenCalled();
     // deliver-only: immediate + requireActiveSession (no auto-launch)
     expect(policy).toEqual({ immediate: true, requireActiveSession: true });
+  });
+
+  it('uses the decrypt-authenticated device name and sender-footer framing when resolved', async () => {
+    const { service, agentMessageDelivery, e2eeTrust } = buildSend({
+      effectiveSenderName: 'Desk Phone',
+    });
+
+    await service.sendMessage(
+      {
+        agentId: AGENT_A,
+        projectId: PROJECT_ID,
+        text: 'from phone',
+        senderName: 'Spoofed Name',
+        deviceName: 'Spoofed Device',
+        __senderKid: 'spoofed-kid',
+      },
+      { senderKid: 'authenticated-kid' },
+    );
+
+    expect(e2eeTrust.resolveEffectiveDeviceName).toHaveBeenCalledWith('authenticated-kid');
+    const [, message] = (agentMessageDelivery.deliver as jest.Mock).mock.calls[0];
+    expect(message).toMatchObject({ senderName: 'Desk Phone', framing: 'sender-footer' });
+  });
+
+  it('keeps unresolved authenticated kids unattributed under plain framing', async () => {
+    const { service, agentMessageDelivery, e2eeTrust } = buildSend({});
+
+    await service.sendMessage(
+      { agentId: AGENT_A, projectId: PROJECT_ID, text: 'from unknown phone' },
+      { senderKid: 'unknown-kid' },
+    );
+
+    expect(e2eeTrust.resolveEffectiveDeviceName).toHaveBeenCalledWith('unknown-kid');
+    const [, message] = (agentMessageDelivery.deliver as jest.Mock).mock.calls[0];
+    expect(message).toMatchObject({ senderName: 'Mobile User', framing: 'plain' });
   });
 
   it('maps a delivered outcome to status:delivered', async () => {

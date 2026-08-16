@@ -81,6 +81,11 @@ describe('EVENT_FIELDS_CATALOG', () => {
         nullable: true,
       });
     });
+
+    it('advertises stored tag changes without adding tag fields', () => {
+      expect(entry.description).toContain('stored tags changed');
+      expect(entry.fields.some((field) => field.field.includes('tags'))).toBe(false);
+    });
   });
 
   describe('scheduled_epic.executed', () => {

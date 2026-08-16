@@ -5,6 +5,7 @@ import {
   type BeginQrPairingResult,
   type CompleteQrPairingResult,
 } from '../services/e2ee-pairing.service';
+import { normalizeDeviceLabel } from '../services/e2ee-device-label';
 
 interface BeginBody {
   channelId?: string;
@@ -43,12 +44,13 @@ export class E2eePairingController {
     if (!body.deviceEncPubKey || !body.deviceEncKid || !body.pairingMac) {
       throw new ValidationError('deviceEncPubKey, deviceEncKid and pairingMac are required');
     }
+    const label = normalizeDeviceLabel(body.label);
     return this.pairing.completeQrPairing({
       channelId: body.channelId,
       deviceEncPubKey: body.deviceEncPubKey,
       deviceEncKid: body.deviceEncKid,
       pairingMac: body.pairingMac,
-      ...(body.label !== undefined ? { label: body.label } : {}),
+      ...(label ? { label } : {}),
       ...(body.installId !== undefined ? { installId: body.installId } : {}),
     });
   }

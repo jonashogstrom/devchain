@@ -10,6 +10,7 @@ import { EgressQueueService } from './egress-queue.service';
 import { EventMapperService } from './event-mapper.service';
 import { ProjectEgressConfigService } from './project-egress-config.service';
 import { GUEST_SANDBOX_ROOT_PATH } from '../../guests/constants';
+import type { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const mockEventMetadata = new Map<unknown, { id: string }>();
 
@@ -28,6 +29,7 @@ describe('CloudEgressBridgeService', () => {
   let cloudSession: jest.Mocked<CloudSessionManagerService>;
   let egressQueue: jest.Mocked<EgressQueueService>;
   let projectConfig: ProjectEgressConfigService;
+  let workspaceMode: { getSnapshot: jest.Mock };
 
   beforeEach(() => {
     sqlite = new Database(':memory:');
@@ -49,12 +51,18 @@ describe('CloudEgressBridgeService', () => {
     } as unknown as jest.Mocked<EgressQueueService>;
 
     projectConfig = new ProjectEgressConfigService(db);
+    workspaceMode = {
+      getSnapshot: jest
+        .fn()
+        .mockResolvedValue({ multiWorkspaceMode: false, failClosedPending: false }),
+    };
 
     bridge = new CloudEgressBridgeService(
       cloudSession,
       egressQueue,
       new EventMapperService(),
       projectConfig,
+      workspaceMode as unknown as WorkspaceModeCoordinatorService,
     );
 
     mockEventMetadata.clear();
@@ -103,6 +111,26 @@ describe('CloudEgressBridgeService', () => {
     expect(enqueued.sourceEventId).toBe('evt-1');
     expect(enqueued.projectId).toBe('p1');
   });
+
+  it.each([
+    { multiWorkspaceMode: true, failClosedPending: false },
+    { multiWorkspaceMode: false, failClosedPending: true },
+  ])(
+    'suppresses project and session notification egress while workspace delivery is restricted',
+    async (mode) => {
+      workspaceMode.getSnapshot.mockResolvedValue(mode);
+      const epic = withMetadata(
+        { epicId: 'e1', projectId: 'p1', title: 'Test', statusId: null },
+        'evt-scoped',
+      );
+      const session = withMetadata({ sessionId: 's1', sessionName: 'test' }, 'evt-session');
+
+      await bridge.onEpicCreated(epic);
+      await bridge.onSessionCrashed(session);
+
+      expect(egressQueue.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('should skip events when not connected', async () => {
     cloudSession.getStatus.mockReturnValue({

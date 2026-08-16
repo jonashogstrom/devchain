@@ -6,13 +6,6 @@ const logger = createLogger('StorageHelpers');
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const COMMUNITY_SOURCE_NAME_PATTERN = /^[a-z0-9-]+$/;
-export const RESERVED_COMMUNITY_SOURCE_NAMES = new Set([
-  'anthropic',
-  'openai',
-  'microsoft',
-  'trailofbits',
-  'vercel',
-]);
 
 export interface NormalizedListOptions {
   limit: number;
@@ -195,25 +188,6 @@ export function serializeSkillsRequired(
 }
 
 export function normalizeCommunitySourceName(name: string): string {
-  const normalized = name.trim().toLowerCase();
-  if (!normalized) {
-    throw new ValidationError('name is required.', { fieldName: 'name' });
-  }
-  if (!COMMUNITY_SOURCE_NAME_PATTERN.test(normalized)) {
-    throw new ValidationError(
-      'Invalid community source name. Use lowercase letters, numbers, and hyphens only.',
-      { name: normalized },
-    );
-  }
-  if (RESERVED_COMMUNITY_SOURCE_NAMES.has(normalized)) {
-    throw new ValidationError('Community source name conflicts with a built-in source.', {
-      name: normalized,
-    });
-  }
-  return normalized;
-}
-
-export function normalizeCommunitySourceNameForLookup(name: string): string {
   const normalized = name.trim().toLowerCase();
   if (!normalized) {
     throw new ValidationError('name is required.', { fieldName: 'name' });

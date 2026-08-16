@@ -29,7 +29,6 @@ export interface EpicFormData {
 export interface EpicFormDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  editingEpic: Epic | null;
   activeProjectName?: string;
   formData: EpicFormData;
   onFormDataChange: (data: EpicFormData) => void;
@@ -44,7 +43,6 @@ export interface EpicFormDialogProps {
 export function EpicFormDialog({
   open,
   onOpenChange,
-  editingEpic,
   activeProjectName,
   formData,
   onFormDataChange,
@@ -59,11 +57,9 @@ export function EpicFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{editingEpic ? 'Edit Epic' : 'Create Epic'}</DialogTitle>
+          <DialogTitle>Create Epic</DialogTitle>
           <DialogDescription>
-            {editingEpic
-              ? 'Update the epic details'
-              : `Create a new epic for ${activeProjectName ?? 'this project'}`}
+            Create a new epic for {activeProjectName ?? 'this project'}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="space-y-4">
@@ -136,7 +132,7 @@ export function EpicFormDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={isSubmitting}>
-              {editingEpic ? 'Update' : 'Create'}
+              Create
             </Button>
           </DialogFooter>
         </form>

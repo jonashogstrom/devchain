@@ -36,11 +36,6 @@ jest.mock('../../utils/tmux-naming.util', () => ({
   buildTmuxSessionName: (...args: string[]) => `tmux-${args.join('-')}`,
 }));
 
-jest.mock('../provider-launch-config', () => ({
-  resolve: jest.fn().mockReturnValue({ argv: [], commandArgs: [], env: null }),
-  ProfileOptionsError: class ProfileOptionsError extends Error {},
-}));
-
 // ── Imports ────────────────────────────────────────────────────────────
 
 import { createLaunchPipelineHarness } from './__test-utils__/pipeline-harness';

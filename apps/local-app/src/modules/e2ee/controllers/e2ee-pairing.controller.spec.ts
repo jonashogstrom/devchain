@@ -38,7 +38,7 @@ describe('E2eePairingController', () => {
       deviceEncPubKey: 'dpub',
       deviceEncKid: 'dkid',
       pairingMac: 'mac',
-      label: 'Pixel',
+      label: '  Pixel  ',
     });
     expect(service.completeQrPairing).toHaveBeenCalledWith({
       channelId: 'chan-1',
@@ -48,6 +48,21 @@ describe('E2eePairingController', () => {
       label: 'Pixel',
     });
     expect(res.trust).toBe('verified');
+  });
+
+  it('complete omits a blank label and rejects labels over 120 characters', async () => {
+    const input = {
+      channelId: 'chan-1',
+      deviceEncPubKey: 'dpub',
+      deviceEncKid: 'dkid',
+      pairingMac: 'mac',
+    };
+    await controller.complete({ ...input, label: '   ' });
+    expect(service.completeQrPairing).toHaveBeenLastCalledWith(input);
+
+    await expect(controller.complete({ ...input, label: 'x'.repeat(121) })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
   });
 
   it('complete forwards an optional installId (M2 dedup) when present', async () => {

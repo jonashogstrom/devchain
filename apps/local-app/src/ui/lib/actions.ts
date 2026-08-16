@@ -44,6 +44,11 @@ export interface ActionMetadata {
   name: string;
   description: string;
   category: ActionCategory;
+  /**
+   * Whether subscriber configuration may enable automatic retry (defaults to true).
+   * Must mirror ActionDefinition.supportsRetry served by the Actions API.
+   */
+  supportsRetry?: boolean;
   inputs: ActionInput[];
 }
 

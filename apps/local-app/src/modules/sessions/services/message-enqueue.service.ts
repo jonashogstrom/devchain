@@ -3,6 +3,7 @@ import {
   SessionsMessagePoolService,
   type EnqueueResult,
   type FailureDisclosurePolicy,
+  type MessageDeliveryMode,
 } from './sessions-message-pool.service';
 
 export interface PoolMessage {
@@ -15,6 +16,7 @@ export interface PoolMessage {
   /** Delay (ms) after `preKeys`, before the paste. Ignored without `preKeys`. */
   readonly preDelayMs?: number;
   readonly senderAgentId?: string;
+  readonly deliveryMode?: MessageDeliveryMode;
   readonly immediate?: boolean;
   readonly projectId?: string;
   readonly agentName?: string;
@@ -51,6 +53,7 @@ export class MessageEnqueueService {
         preKeys: message.preKeys ? [...message.preKeys] : undefined,
         preDelayMs: message.preDelayMs,
         senderAgentId: message.senderAgentId,
+        deliveryMode: message.deliveryMode,
         immediate: message.immediate,
         projectId: message.projectId,
         agentName: message.agentName,

@@ -1,5 +1,5 @@
 import { deriveFamilyProviderMappings, getUncoveredFamilies } from './providerSelection';
-import type { SetupPreviewFamilyAlternative } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewFamilyAlternative } from '@/ui/pages/projects/lib/project-contracts';
 
 function family(
   over: Partial<SetupPreviewFamilyAlternative> & { familySlug: string },

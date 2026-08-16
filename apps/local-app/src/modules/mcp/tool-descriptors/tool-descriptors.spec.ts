@@ -1,4 +1,4 @@
-import { allMetadata, allBindings } from './index';
+import { allMetadata } from './index';
 import { ZodObject, ZodEffects, type ZodSchema } from 'zod';
 
 function unwrapZodSchema(schema: ZodSchema): ZodSchema {
@@ -49,47 +49,6 @@ describe('tool-descriptors', () => {
     });
   });
 
-  describe('bindings', () => {
-    it('has exactly 40 tool binding entries', () => {
-      expect(allBindings.length).toBe(40);
-    });
-
-    it('all bindings have name and handler function', () => {
-      allBindings.forEach(([name, handler]) => {
-        expect(typeof name).toBe('string');
-        expect(name).toMatch(/^devchain_/);
-        expect(typeof handler).toBe('function');
-      });
-    });
-
-    it('all binding names are unique', () => {
-      const names = allBindings.map(([name]) => name);
-      expect(new Set(names).size).toBe(names.length);
-    });
-  });
-
-  describe('metadata-binding alignment', () => {
-    const metadataNames = new Set(allMetadata.map((m) => m.name));
-    const bindingNames = new Set(allBindings.map(([name]) => name));
-
-    it('every metadata entry has a binding (no orphan metadata)', () => {
-      const orphans = allMetadata.filter((m) => !bindingNames.has(m.name));
-      expect(orphans.map((o) => o.name)).toEqual([]);
-    });
-
-    it('every binding has a metadata entry (no orphan handler)', () => {
-      const orphans = allBindings.filter(([name]) => !metadataNames.has(name));
-      expect(orphans.map(([name]) => name)).toEqual([]);
-    });
-
-    it('counts match: metadata == bindings == 40', () => {
-      expect(allMetadata.length).toBe(40);
-      expect(allBindings.length).toBe(40);
-      expect(metadataNames.size).toBe(40);
-      expect(bindingNames.size).toBe(40);
-    });
-  });
-
   describe('Zod schema contract', () => {
     const schemasWithParams = allMetadata.filter((m) => m.paramsSchema !== null);
 
@@ -130,17 +89,11 @@ describe('tool-descriptors', () => {
     });
   });
 
-  describe('devchain_apply_suggestion permanent registration', () => {
+  describe('devchain_apply_suggestion metadata registration', () => {
     it('exists in metadata', () => {
       const entry = allMetadata.find((m) => m.name === 'devchain_apply_suggestion');
       expect(entry).toBeDefined();
       expect(entry!.paramsSchema).not.toBeNull();
-    });
-
-    it('exists in bindings', () => {
-      const entry = allBindings.find(([name]) => name === 'devchain_apply_suggestion');
-      expect(entry).toBeDefined();
-      expect(typeof entry![1]).toBe('function');
     });
   });
 
@@ -202,16 +155,14 @@ describe('tool-descriptors', () => {
       'devchain_activity_finish',
     ];
 
-    it.each(retiredNames)('%s is absent from metadata and bindings', (name) => {
+    it.each(retiredNames)('%s is absent from metadata', (name) => {
       expect(allMetadata.some((entry) => entry.name === name)).toBe(false);
-      expect(allBindings.some(([bindingName]) => bindingName === name)).toBe(false);
     });
   });
 
   describe('devchain_projects_list', () => {
     it('has a strict, resource-first project directory descriptor', () => {
       const metadata = allMetadata.find((m) => m.name === 'devchain_projects_list');
-      const binding = allBindings.find(([name]) => name === 'devchain_projects_list');
       const schema = metadata?.inputSchema as {
         required?: string[];
         properties?: Record<string, unknown>;
@@ -219,7 +170,6 @@ describe('tool-descriptors', () => {
       };
 
       expect(metadata?.description).toContain('Project Owner');
-      expect(binding).toBeDefined();
       expect(schema.required).toEqual(['sessionId']);
       expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['limit', 'offset', 'sessionId']);
       expect(schema.additionalProperties).toBe(false);
@@ -251,12 +201,9 @@ describe('tool-descriptors', () => {
   });
 
   describe('devchain_delete_epic descriptor contract', () => {
-    it('exists in metadata and bindings', () => {
+    it('exists in metadata', () => {
       const metadata = allMetadata.find((m) => m.name === 'devchain_delete_epic');
-      const binding = allBindings.find(([name]) => name === 'devchain_delete_epic');
       expect(metadata).toBeDefined();
-      expect(binding).toBeDefined();
-      expect(typeof binding![1]).toBe('function');
     });
 
     it('uses strict schema with exactly sessionId and id required', () => {
@@ -290,12 +237,10 @@ describe('tool-descriptors', () => {
       'devchain_apply_suggestion',
     ];
 
-    it('includes all code review tools in metadata and bindings', () => {
+    it('includes all code review tools in metadata', () => {
       const metaNames = allMetadata.map((m) => m.name);
-      const bindNames = allBindings.map(([n]) => n);
       reviewToolNames.forEach((name) => {
         expect(metaNames).toContain(name);
-        expect(bindNames).toContain(name);
       });
     });
   });

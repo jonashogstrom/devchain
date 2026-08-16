@@ -10,6 +10,7 @@ import {
 import { SessionsService } from '../../sessions/services/sessions.service';
 import {
   STORAGE_SERVICE,
+  type DeleteAgentOptions,
   type StorageService,
   type ListResult,
 } from '../../storage/interfaces/storage.interface';
@@ -42,6 +43,10 @@ const logger = createLogger('TeamsService');
 export interface TeamWithLeadName extends Team {
   memberCount: number;
   teamLeadAgentName: string | null;
+}
+
+export interface AutomationAgentDeletionResult {
+  presetCleanupError?: string;
 }
 
 @Injectable()
@@ -400,6 +405,10 @@ export class TeamsService {
 
   async listTeamsByAgent(agentId: string): Promise<Team[]> {
     return this.teamsStore.listTeamsByAgent(agentId);
+  }
+
+  async listTeamsLedByAgent(agentId: string): Promise<Team[]> {
+    return this.teamsStore.getTeamLeadTeams(agentId);
   }
 
   async getRecipientContext(agentId: string, projectId: string): Promise<RecipientContext> {
@@ -1165,9 +1174,10 @@ export class TeamsService {
    *    project — stricter than `deleteTeamAgent`'s single-team check; server-enforced even if the
    *    UI is bypassed.
    * 2. Capture pre-delete team-membership metadata BEFORE the cascade removes the rows.
-   * 3. `storage.deleteAgent` (transactional: rejects running sessions, deletes stopped/failed,
-   *    auto-disbands an emptied team, cascades `team_members`). DEC-3: NO auto-terminate — a
-   *    `ConflictError` is surfaced as structured `AGENT_HAS_RUNNING_SESSIONS` (with the count).
+   * 3. `storage.deleteAgent` (transactional: rechecks Team Lead protection, rejects running
+   *    sessions, deletes stopped/failed sessions, auto-disbands an emptied team, and cascades
+   *    `team_members`). A running-session `ConflictError` is surfaced as structured
+   *    `AGENT_HAS_RUNNING_SESSIONS` (with the count).
    * 4. Best-effort preset cleanup (swallow on failure — the agent is already deleted; true
    *    best-effort, unlike the REST path which re-throws).
    * 5. Publish `agent.deleted`, plus `team.member.removed` (with full enrichment) for each team
@@ -1191,30 +1201,54 @@ export class TeamsService {
       );
     }
 
+    await this.deleteAgentWithSideEffects(input, agent, { protectTeamLead: true });
+  }
+
+  async deleteAgentForAutomation(input: {
+    projectId: string;
+    agentId: string;
+  }): Promise<AutomationAgentDeletionResult> {
+    const agent = await this.storage.getAgent(input.agentId);
+    return this.deleteAgentWithSideEffects(input, agent, {
+      protectProjectOwner: true,
+      protectTeamLead: true,
+    });
+  }
+
+  private async deleteAgentWithSideEffects(
+    input: { projectId: string; agentId: string },
+    agent: Agent,
+    options: DeleteAgentOptions,
+  ): Promise<AutomationAgentDeletionResult> {
     // Capture membership BEFORE delete (the cascade clears team_members).
     const memberTeams = (await this.teamsStore.listTeamsByAgent(input.agentId)).filter(
       (t) => t.projectId === input.projectId,
     );
 
     try {
-      await this.storage.deleteAgent(input.agentId);
+      await this.storage.deleteAgent(input.agentId, options);
     } catch (error) {
       if (error instanceof ConflictError) {
         // The delegate embeds the running-session count in the message; surface it structurally.
         const match = /(\d+)\s+active session/.exec(error.message);
-        throw new ConflictError(error.message, {
-          code: 'AGENT_HAS_RUNNING_SESSIONS',
-          agentId: input.agentId,
-          runningSessions: match ? Number(match[1]) : undefined,
-        });
+        if (match) {
+          throw new ConflictError(error.message, {
+            code: 'AGENT_HAS_RUNNING_SESSIONS',
+            agentId: input.agentId,
+            runningSessions: Number(match[1]),
+          });
+        }
       }
       throw error;
     }
 
-    // Best-effort preset cleanup (swallow — the delete already committed).
+    // The delete already committed. Preserve chat's best-effort behavior while returning the
+    // cleanup outcome so automation can report the post-delete failure truthfully.
+    let presetCleanupError: string | undefined;
     try {
       await this.settingsService.removeAgentFromProjectPresets(input.projectId, agent.name);
     } catch (error) {
+      presetCleanupError = error instanceof Error ? error.message : String(error);
       logger.error(
         { agentId: input.agentId, projectId: input.projectId, agentName: agent.name, error },
         'Failed to remove agent from project presets after deletion',
@@ -1245,7 +1279,7 @@ export class TeamsService {
       }
     }
 
-    // agent.deleted — human-initiated (actor: null), mirroring the generic controller delete.
+    // The deletion facade does not attribute an interactive actor.
     try {
       await this.eventsService?.publish('agent.deleted', {
         agentId: agent.id,
@@ -1261,5 +1295,7 @@ export class TeamsService {
         'Failed to publish agent.deleted event',
       );
     }
+
+    return { presetCleanupError };
   }
 }

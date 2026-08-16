@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DeliveryFormatter } from '../ports/delivery-formatter';
 import type { DeliveryMessage } from '../dtos/delivery.types';
 
-function sanitizeBannerLabel(value: string): string {
+function sanitizeOneLineLabel(value: string): string {
   return value
     .replace(/[\u0000-\u001f\u007f]/gu, ' ')
     .replace(/\s+/gu, ' ')
@@ -25,16 +25,21 @@ export class LegacyDeliveryFormatterAdapter extends DeliveryFormatter {
           // the raw body — no surrounding whitespace.
           return message.body;
         }
+        if (framing === 'sender-footer') {
+          const senderName = sanitizeOneLineLabel(message.senderName);
+          if (!senderName) return message.body;
+          return `${message.body}\n[SentBy:${JSON.stringify(senderName)}]`;
+        }
         const senderType = message.senderType ?? 'agent';
         return `\n[This message is sent from "${message.senderName}" ${senderType} use devchain_send_message tool for communication]\n${message.body}\n`;
       }
       case 'mcp.project': {
-        const ownerLabel = JSON.stringify(sanitizeBannerLabel(message.senderName));
+        const ownerLabel = JSON.stringify(sanitizeOneLineLabel(message.senderName));
         const projectLabel = JSON.stringify(
-          sanitizeBannerLabel(message.sourceProjectName ?? 'Unknown project'),
+          sanitizeOneLineLabel(message.sourceProjectName ?? 'Unknown project'),
         );
         const sourceProjectId = JSON.stringify(
-          sanitizeBannerLabel(message.sourceProjectId ?? 'unknown'),
+          sanitizeOneLineLabel(message.sourceProjectId ?? 'unknown'),
         );
         return `\n[This project message is sent from Project Owner ${ownerLabel} in project ${projectLabel}. To reply, use devchain_send_message with recipientProjectId: ${sourceProjectId}.]\n${message.body}\n`;
       }

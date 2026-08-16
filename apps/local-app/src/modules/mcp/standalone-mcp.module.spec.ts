@@ -1,10 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { StandaloneMcpModule } from './standalone-mcp.module';
 import { McpService } from './services/mcp.service';
-import { REALTIME_BROADCASTER } from '../realtime/ports/realtime-broadcaster.port';
 import { PtyService } from '../terminal/services/pty.service';
 import { DB_CONNECTION } from '../storage/db/db.provider';
 import { STORAGE_SERVICE } from '../storage/interfaces/storage.interface';
+import { MODULE_METADATA } from '@nestjs/common/constants';
+import { McpToolBindingRegistry } from './services/mcp-tool-binding.registry';
 
 describe('StandaloneMcpModule', () => {
   let module: TestingModule;
@@ -17,7 +18,6 @@ describe('StandaloneMcpModule', () => {
       .useValue({})
       .overrideProvider(STORAGE_SERVICE)
       .useValue({
-        getFeatureFlags: () => ({}),
         listProviders: () => ({ items: [] }),
       })
       .compile();
@@ -32,14 +32,25 @@ describe('StandaloneMcpModule', () => {
     expect(service).toBeDefined();
   });
 
-  it('does NOT include TerminalModule in graph (PtyService not resolvable)', () => {
-    expect(() => module.get(PtyService)).toThrow();
+  it('keeps only StorageModule in the standalone import graph', () => {
+    const imports = (Reflect.getMetadata(MODULE_METADATA.IMPORTS, StandaloneMcpModule) ??
+      []) as Array<{ name?: string }>;
+
+    expect(imports.map((importedModule) => importedModule.name)).toEqual(['StorageModule']);
   });
 
-  it('provides REALTIME_BROADCASTER as no-op', () => {
-    const broadcaster = module.get(REALTIME_BROADCASTER);
-    expect(broadcaster).toBeDefined();
-    expect(broadcaster.broadcastEvent('test', 'event', {})).toBeUndefined();
+  it('provides the binding registry privately', () => {
+    const providers = (Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StandaloneMcpModule) ??
+      []) as unknown[];
+    const exports = (Reflect.getMetadata(MODULE_METADATA.EXPORTS, StandaloneMcpModule) ??
+      []) as unknown[];
+
+    expect(providers).toContain(McpToolBindingRegistry);
+    expect(exports).not.toContain(McpToolBindingRegistry);
+  });
+
+  it('does NOT include TerminalModule in graph (PtyService not resolvable)', () => {
+    expect(() => module.get(PtyService)).toThrow();
   });
 
   it('preserves SERVICE_UNAVAILABLE response for tools with absent full-app deps', async () => {
@@ -53,7 +64,7 @@ describe('StandaloneMcpModule', () => {
     expect(response.error?.code).toBe('SERVICE_UNAVAILABLE');
   });
 
-  it('advertises project discovery but returns SERVICE_UNAVAILABLE in standalone mode', async () => {
+  it('keeps project discovery executable but unavailable in standalone mode', async () => {
     const service = module.get(McpService);
     const response = await service.handleToolCall('devchain_projects_list', {
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',

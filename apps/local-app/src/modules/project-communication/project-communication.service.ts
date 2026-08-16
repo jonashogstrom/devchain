@@ -46,11 +46,13 @@ export class ProjectCommunicationService {
         );
       }
 
-      const projects = await this.collectProjectSnapshot();
+      const sourceWorkspaceId = authorized.context.sourceProject.workspaceId;
+      const projects = await this.collectProjectSnapshot(sourceWorkspaceId);
       const candidates = projects.filter(
         (project) =>
+          this.sameId(project.workspaceId, sourceWorkspaceId) &&
           !project.isTemplate &&
-          project.id.toLowerCase() !== authorized.context.sourceProject.id.toLowerCase(),
+          !this.sameId(project.id, authorized.context.sourceProject.id),
       );
       const owners = await this.storage.listProjectOwners(candidates.map(({ id }) => id));
       const ownerProjectIds = new Set(
@@ -97,7 +99,6 @@ export class ProjectCommunicationService {
     input: SendToProjectInput,
   ): Promise<ProjectCommunicationOutcome<ProjectDeliveryResult>> {
     let resolvedCallerAgentId: string | undefined;
-    let targetProjectId: string | undefined;
 
     try {
       const authorized = await this.authorizeCaller(input.callerAgentId);
@@ -120,7 +121,9 @@ export class ProjectCommunicationService {
         );
       }
 
-      const matches = await this.storage.getProjectsByIdPrefix(input.recipientProjectId);
+      const matches = (await this.storage.getProjectsByIdPrefix(input.recipientProjectId)).filter(
+        (project) => this.sameId(project.workspaceId, sourceProject.workspaceId),
+      );
       if (matches.length === 0) {
         return this.failure('PROJECT_NOT_FOUND', 'No project matches that project ID');
       }
@@ -135,8 +138,7 @@ export class ProjectCommunicationService {
       }
 
       const targetProject = matches[0];
-      targetProjectId = targetProject.id;
-      if (targetProject.id.toLowerCase() === sourceProject.id.toLowerCase()) {
+      if (this.sameId(targetProject.id, sourceProject.id)) {
         return this.failure('SAME_PROJECT', 'Choose a project other than the current project');
       }
       if (targetProject.isTemplate) {
@@ -159,25 +161,32 @@ export class ProjectCommunicationService {
         );
       }
 
+      const currentProjects = await this.recheckDeliveryProjects(sourceProject, targetProject);
+      if ('error' in currentProjects) {
+        return currentProjects;
+      }
+      const currentSourceProject = currentProjects.context.sourceProject;
+      const currentTargetProject = currentProjects.context.targetProject;
+
       const outcome = await this.delivery.deliverAgentMessage(
         [{ agentId: owner.id, agentName: owner.name }],
         {
           routingKind: 'project',
-          sourceProjectId: sourceProject.id,
-          sourceProjectName: sourceProject.name,
-          targetProjectId: targetProject.id,
-          targetProjectName: targetProject.name,
+          sourceProjectId: currentSourceProject.id,
+          sourceProjectName: currentSourceProject.name,
+          targetProjectId: currentTargetProject.id,
+          targetProjectName: currentTargetProject.name,
         },
         {
           kind: 'mcp.project',
           body: input.message,
           source: 'mcp.send_message',
-          projectId: targetProject.id,
+          projectId: currentTargetProject.id,
           senderName: caller.name,
           senderType: 'agent',
           senderAgentId: caller.id,
-          sourceProjectId: sourceProject.id,
-          sourceProjectName: sourceProject.name,
+          sourceProjectId: currentSourceProject.id,
+          sourceProjectName: currentSourceProject.name,
         },
       );
       const deliveryError =
@@ -192,9 +201,9 @@ export class ProjectCommunicationService {
         result: {
           mode: 'project',
           targetProject: {
-            id: targetProject.id,
-            shortId: this.shortId(targetProject.id),
-            name: targetProject.name,
+            id: currentTargetProject.id,
+            shortId: this.shortId(currentTargetProject.id),
+            name: currentTargetProject.name,
           },
           deliveryStatus: outcome.status,
           ...(deliveryError ? { error: deliveryError } : {}),
@@ -204,7 +213,6 @@ export class ProjectCommunicationService {
       this.logger.error({
         code: 'PROJECT_COMMUNICATION_FAILED',
         ...(resolvedCallerAgentId ? { callerAgentId: resolvedCallerAgentId } : {}),
-        ...(targetProjectId ? { targetProjectId } : {}),
       });
       return this.failure(
         'PROJECT_COMMUNICATION_FAILED',
@@ -250,12 +258,76 @@ export class ProjectCommunicationService {
     }
   }
 
-  private async collectProjectSnapshot(): Promise<Project[]> {
+  private async recheckDeliveryProjects(
+    sourceProject: Project,
+    targetProject: Project,
+  ): Promise<
+    | { readonly context: { readonly sourceProject: Project; readonly targetProject: Project } }
+    | { readonly error: ProjectCommunicationError }
+  > {
+    let currentSourceProject: Project;
+    try {
+      currentSourceProject = await this.storage.getProject(sourceProject.id);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return this.failure(
+          'SOURCE_PROJECT_NOT_FOUND',
+          'The current agent project no longer exists',
+        );
+      }
+      throw error;
+    }
+
+    // Prefix resolution used the original source workspace. Fail closed if it moved
+    // rather than reusing a target selected under a now-stale authorization scope.
+    if (!this.sameId(currentSourceProject.workspaceId, sourceProject.workspaceId)) {
+      return this.failure('PROJECT_NOT_FOUND', 'No project matches that project ID');
+    }
+
+    let currentTargetProject: Project;
+    try {
+      currentTargetProject = await this.storage.getProject(targetProject.id);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return this.failure('PROJECT_NOT_FOUND', 'No project matches that project ID');
+      }
+      throw error;
+    }
+
+    if (!this.sameId(currentTargetProject.workspaceId, currentSourceProject.workspaceId)) {
+      return this.failure('PROJECT_NOT_FOUND', 'No project matches that project ID');
+    }
+    if (currentSourceProject.isTemplate) {
+      return this.failure(
+        'SOURCE_TEMPLATE_NOT_ALLOWED',
+        'Template projects cannot send cross-project messages',
+      );
+    }
+    if (currentTargetProject.isTemplate) {
+      return this.failure(
+        'TARGET_TEMPLATE_NOT_ALLOWED',
+        'Template projects cannot receive cross-project messages',
+      );
+    }
+
+    return {
+      context: {
+        sourceProject: currentSourceProject,
+        targetProject: currentTargetProject,
+      },
+    };
+  }
+
+  private async collectProjectSnapshot(workspaceId: string): Promise<Project[]> {
     const projects: Project[] = [];
     let offset = 0;
 
     while (true) {
-      const page = await this.storage.listProjects({ limit: SNAPSHOT_PAGE_SIZE, offset });
+      const page = await this.storage.listProjects({
+        workspaceId,
+        limit: SNAPSHOT_PAGE_SIZE,
+        offset,
+      });
       projects.push(...page.items);
       offset += page.items.length;
       if (page.items.length === 0 || offset >= page.total) {
@@ -278,5 +350,9 @@ export class ProjectCommunicationService {
 
   private compare(left: string, right: string): number {
     return left < right ? -1 : left > right ? 1 : 0;
+  }
+
+  private sameId(left: string, right: string): boolean {
+    return left.toLowerCase() === right.toLowerCase();
   }
 }

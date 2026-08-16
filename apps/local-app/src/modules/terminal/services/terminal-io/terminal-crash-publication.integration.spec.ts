@@ -2,8 +2,7 @@ import Database from 'better-sqlite3';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { EventsService } from '../../../events/services/events.service';
-import { SessionsService } from '../../../sessions/services/sessions.service';
-import { SessionCoordinatorService } from '../../../sessions/services/session-coordinator.service';
+import { SessionTerminalRuntimeService } from '../../../session-terminal-runtime/session-terminal-runtime.service';
 import { TerminalGateway } from '../../gateways/terminal.gateway';
 import { FakeProcessExecutor } from '../process-executor/fake-process-executor';
 import { TerminalIOService } from './terminal-io.service';
@@ -61,18 +60,9 @@ describe('terminal crash publication retry', () => {
     executor.setDefaultResponse({ type: 'failure', stderr: `can't find session: tmux-1` });
     terminalIO = new TerminalIOService(executor, events);
 
-    const sessionsService = new SessionsService(
+    const sessionTerminalRuntime = new SessionTerminalRuntimeService(
       db,
       {} as never,
-      terminalIO,
-      {} as never,
-      {} as never,
-      {} as never,
-      new SessionCoordinatorService(),
-      {} as never,
-      {} as never,
-      events,
-      { dispose: jest.fn() } as never,
       { clear: jest.fn() } as never,
       { cleanupSessionSync: jest.fn() } as never,
       { cleanupSession: jest.fn().mockResolvedValue(undefined) } as never,
@@ -82,7 +72,7 @@ describe('terminal crash publication retry', () => {
     const cleanupSessionLifecycle = jest.fn();
     const emit = jest.fn();
     Object.defineProperties(gateway, {
-      sessionsService: { value: sessionsService },
+      sessionTerminalRuntime: { value: sessionTerminalRuntime },
       cleanupSessionLifecycle: { value: cleanupSessionLifecycle },
       server: { value: { to: jest.fn().mockReturnValue({ emit }) } },
     });

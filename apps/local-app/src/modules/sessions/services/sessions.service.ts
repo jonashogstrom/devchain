@@ -327,92 +327,6 @@ export class SessionsService {
   }
 
   /**
-   * Minimal lookup for rehydrating the in-memory TerminalSessionRegistry
-   * when a running session predates the current process (e.g. after a server
-   * restart). Returns null if the session is not running or is missing the
-   * fields we need to rebuild the registry entry.
-   */
-  lookupRunningSessionMeta(
-    sessionId: string,
-  ): { tmuxSessionName: string; providerName: string } | null {
-    const row = this.sqlite
-      .prepare(
-        `SELECT tmux_session_id, provider_name_at_launch
-         FROM sessions
-         WHERE id = ? AND status = 'running'`,
-      )
-      .get(sessionId) as
-      | { tmux_session_id: string | null; provider_name_at_launch: string | null }
-      | undefined;
-    if (!row || !row.tmux_session_id || !row.provider_name_at_launch) return null;
-    return {
-      tmuxSessionName: row.tmux_session_id,
-      providerName: row.provider_name_at_launch,
-    };
-  }
-
-  /**
-   * Whether the terminal pipeline must add CR before bare LF for this session.
-   * Resolves session → provider → adapter and reads the adapter's
-   * `terminalOutputBehavior.rawLineEndings` flag. Defaults to `true`
-   * (normalize) for unknown providers or sessions whose lookup fails — safe
-   * because shell-style line wrapping is the broader default.
-   */
-  shouldNormalizeLfFor(sessionId: string): boolean {
-    const meta = this.lookupRunningSessionMeta(sessionId);
-    if (!meta) return true;
-    try {
-      const adapter = this.providerAdapterFactory.getAdapter(meta.providerName);
-      return !adapter.terminalOutputBehavior?.rawLineEndings;
-    } catch {
-      return true;
-    }
-  }
-
-  /**
-   * Whether this session's provider runs as a full-screen TUI on the terminal
-   * alternate screen. Resolves session → provider → adapter and reads the
-   * adapter's `terminalOutputBehavior.usesAlternateScreen` flag. Defaults to
-   * `false` for unknown providers or sessions whose lookup fails — safe because
-   * suppressing alt-screen (preserving scrollback) is the broader default.
-   */
-  usesAlternateScreenFor(sessionId: string): boolean {
-    const meta = this.lookupRunningSessionMeta(sessionId);
-    if (!meta) return false;
-    try {
-      const adapter = this.providerAdapterFactory.getAdapter(meta.providerName);
-      return adapter.terminalOutputBehavior?.usesAlternateScreen ?? false;
-    } catch {
-      return false;
-    }
-  }
-
-  listRunningSessionMetas(): Array<{
-    sessionId: string;
-    tmuxSessionName: string;
-    providerName: string;
-  }> {
-    const rows = this.sqlite
-      .prepare(
-        `SELECT id, tmux_session_id, provider_name_at_launch
-         FROM sessions
-         WHERE status = 'running'`,
-      )
-      .all() as Array<{
-      id: string;
-      tmux_session_id: string | null;
-      provider_name_at_launch: string | null;
-    }>;
-    return rows
-      .filter((r) => r.tmux_session_id && r.provider_name_at_launch)
-      .map((r) => ({
-        sessionId: r.id,
-        tmuxSessionName: r.tmux_session_id!,
-        providerName: r.provider_name_at_launch!,
-      }));
-  }
-
-  /**
    * Running sessions that already have a persisted transcript path — the inputs
    * needed to re-attach a transcript watcher after a local-app restart.
    *
@@ -615,29 +529,6 @@ export class SessionsService {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
-  }
-
-  /**
-   * Transition a running session to 'failed' status (e.g. when tmux session is gone).
-   * Preserves transcript/history rows; only updates the lifecycle status.
-   */
-  markSessionFailed(sessionId: string, reason: string): void {
-    logger.warn({ sessionId, reason }, 'Marking session as failed due to dead tmux');
-    this.runtimeContextCapture.clear(sessionId);
-    this.claudeLaunchSettings.cleanupSessionSync(sessionId);
-    void this.codexPluginProfiles.cleanupSession(sessionId).catch((error) => {
-      logger.warn({ sessionId, error }, 'Failed to clean Codex profile lifecycle after tmux death');
-    });
-    const now = new Date().toISOString();
-    this.sqlite
-      .prepare(
-        `UPDATE sessions SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
-      )
-      .run(now, now, sessionId);
-  }
-
-  async reconcileCodexPluginProfiles(nonLiveSessionIds: ReadonlySet<string>): Promise<void> {
-    await this.codexPluginProfiles.reconcileStartup(nonLiveSessionIds);
   }
 
   /**

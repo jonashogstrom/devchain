@@ -3,7 +3,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Step2Agents, type Step2AgentsProps } from './Step2Agents';
 import { initialAgentRows } from './agentPlan';
-import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-contracts';
 
 // Radix primitives need these in JSDOM.
 (global as unknown as { ResizeObserver: unknown }).ResizeObserver = class {

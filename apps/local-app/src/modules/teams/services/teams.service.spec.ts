@@ -26,6 +26,7 @@ function makeAgent(id: string, projectId: string = PROJECT_ID): Agent {
   return {
     id,
     projectId,
+    isProjectOwner: false,
     profileId: 'profile-1',
     providerConfigId: 'config-1',
     modelOverride: null,
@@ -184,6 +185,19 @@ describe('TeamsService', () => {
     }).compile();
 
     service = module.get<TeamsService>(TeamsService);
+  });
+
+  describe('listTeamsLedByAgent', () => {
+    it('uses the authoritative team-lead relationship', async () => {
+      const ledTeam = makeTeam({ id: 'led-team', teamLeadAgentId: AGENT_B });
+      teamsStore.getTeamLeadTeams.mockResolvedValue([ledTeam]);
+      teamsStore.listTeamsByAgent.mockResolvedValue([]);
+
+      await expect(service.listTeamsLedByAgent(AGENT_B)).resolves.toEqual([ledTeam]);
+
+      expect(teamsStore.getTeamLeadTeams).toHaveBeenCalledWith(AGENT_B);
+      expect(teamsStore.listTeamsByAgent).not.toHaveBeenCalled();
+    });
   });
 
   describe('createTeam', () => {
@@ -2499,7 +2513,9 @@ describe('TeamsService', () => {
     it('deletes a standalone agent: best-effort preset cleanup + agent.deleted (no team.member.removed)', async () => {
       await service.deleteAgentForChat({ projectId: PROJECT_ID, agentId: AGENT_B });
 
-      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B);
+      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B, {
+        protectTeamLead: true,
+      });
       expect(settingsService.removeAgentFromProjectPresets).toHaveBeenCalledWith(
         PROJECT_ID,
         'Agent-agent-b',
@@ -2553,14 +2569,108 @@ describe('TeamsService', () => {
       expect(eventsService.publish).not.toHaveBeenCalled();
     });
 
+    it('preserves the structured Team Lead error from the transactional recheck', async () => {
+      storageService.deleteAgent.mockRejectedValue(
+        new ConflictError('Agent became a Team Lead', {
+          code: 'AGENT_IS_TEAM_LEAD',
+          agentId: AGENT_B,
+          teamId: 'team-9',
+        }),
+      );
+
+      await expect(
+        service.deleteAgentForChat({ projectId: PROJECT_ID, agentId: AGENT_B }),
+      ).rejects.toMatchObject({
+        details: { code: 'AGENT_IS_TEAM_LEAD', agentId: AGENT_B, teamId: 'team-9' },
+      });
+      expect(settingsService.removeAgentFromProjectPresets).not.toHaveBeenCalled();
+      expect(eventsService.publish).not.toHaveBeenCalled();
+    });
+
     it('treats preset cleanup as best-effort: a failure does not block the delete or events', async () => {
       settingsService.removeAgentFromProjectPresets.mockRejectedValue(new Error('preset boom'));
 
       await expect(
         service.deleteAgentForChat({ projectId: PROJECT_ID, agentId: AGENT_B }),
       ).resolves.toBeUndefined();
-      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B);
+      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B, {
+        protectTeamLead: true,
+      });
       expect(eventsService.publish).toHaveBeenCalledWith('agent.deleted', expect.anything());
+    });
+  });
+
+  describe('deleteAgentForAutomation', () => {
+    beforeEach(() => {
+      teamsStore.listTeamsByAgent.mockResolvedValue([]);
+    });
+
+    it('enables Project Owner and Team Lead protection while retaining deletion side effects', async () => {
+      teamsStore.listTeamsByAgent.mockResolvedValue([
+        makeTeam({ id: 'team-3', name: 'Squad', teamLeadAgentId: AGENT_A }),
+      ]);
+
+      await service.deleteAgentForAutomation({ projectId: PROJECT_ID, agentId: AGENT_B });
+
+      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B, {
+        protectProjectOwner: true,
+        protectTeamLead: true,
+      });
+      expect(settingsService.removeAgentFromProjectPresets).toHaveBeenCalledWith(
+        PROJECT_ID,
+        'Agent-agent-b',
+      );
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        'team.member.removed',
+        expect.objectContaining({
+          teamId: 'team-3',
+          removedAgentId: AGENT_B,
+          removedAgentName: 'Agent-agent-b',
+        }),
+      );
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        'agent.deleted',
+        expect.objectContaining({ agentId: AGENT_B, projectId: PROJECT_ID, teamId: 'team-3' }),
+      );
+    });
+
+    it('does not run post-delete side effects when an atomic protection check rejects', async () => {
+      storageService.deleteAgent.mockRejectedValue(
+        new ConflictError('Agent became the Project Owner', {
+          code: 'AGENT_IS_PROJECT_OWNER',
+          agentId: AGENT_B,
+          projectId: PROJECT_ID,
+        }),
+      );
+
+      await expect(
+        service.deleteAgentForAutomation({ projectId: PROJECT_ID, agentId: AGENT_B }),
+      ).rejects.toMatchObject({
+        details: {
+          code: 'AGENT_IS_PROJECT_OWNER',
+          agentId: AGENT_B,
+          projectId: PROJECT_ID,
+        },
+      });
+      expect(settingsService.removeAgentFromProjectPresets).not.toHaveBeenCalled();
+      expect(eventsService.publish).not.toHaveBeenCalled();
+    });
+
+    it('returns a preset cleanup failure after deletion and still publishes deletion events', async () => {
+      settingsService.removeAgentFromProjectPresets.mockRejectedValue(new Error('preset boom'));
+
+      await expect(
+        service.deleteAgentForAutomation({ projectId: PROJECT_ID, agentId: AGENT_B }),
+      ).resolves.toEqual({ presetCleanupError: 'preset boom' });
+
+      expect(storageService.deleteAgent).toHaveBeenCalledWith(AGENT_B, {
+        protectProjectOwner: true,
+        protectTeamLead: true,
+      });
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        'agent.deleted',
+        expect.objectContaining({ agentId: AGENT_B, projectId: PROJECT_ID }),
+      );
     });
   });
 

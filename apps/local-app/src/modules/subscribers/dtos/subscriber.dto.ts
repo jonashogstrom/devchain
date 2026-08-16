@@ -62,6 +62,9 @@ export type EventFilter = z.infer<typeof EventFilterSchema>;
 // CREATE SUBSCRIBER SCHEMA
 // ============================================
 
+// REST validation ceiling shared by create and update; the DB column itself is unbounded
+const MAX_SUBSCRIBER_DELAY_MS = 120_000;
+
 export const CreateSubscriberSchema = z.object({
   projectId: z.string().uuid(),
   name: z.string().min(1).max(100),
@@ -71,7 +74,7 @@ export const CreateSubscriberSchema = z.object({
   eventFilter: EventFilterSchema.optional(),
   actionType: z.string().min(1).max(50),
   actionInputs: z.record(z.string(), ActionInputSchema),
-  delayMs: z.number().int().min(0).max(30000).optional().default(0),
+  delayMs: z.number().int().min(0).max(MAX_SUBSCRIBER_DELAY_MS).optional().default(0),
   cooldownMs: z.number().int().min(0).max(60000).optional().default(5000),
   retryOnError: z.boolean().optional().default(false),
   // Grouping & ordering
@@ -95,7 +98,7 @@ export const UpdateSubscriberSchema = z.object({
   eventFilter: EventFilterSchema.optional(),
   actionType: z.string().min(1).max(50).optional(),
   actionInputs: z.record(z.string(), ActionInputSchema).optional(),
-  delayMs: z.number().int().min(0).max(30000).optional(),
+  delayMs: z.number().int().min(0).max(MAX_SUBSCRIBER_DELAY_MS).optional(),
   cooldownMs: z.number().int().min(0).max(60000).optional(),
   retryOnError: z.boolean().optional(),
   // Grouping & ordering

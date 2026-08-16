@@ -53,6 +53,10 @@ describe('E2eePairingService (Task:4 — QR auto-verified key exchange)', () => 
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
@@ -122,6 +126,26 @@ describe('E2eePairingService (Task:4 — QR auto-verified key exchange)', () => 
     expect(stored?.verifiedVia).toBe('qr');
     expect(stored?.verifiedAt).toBeTruthy();
     expect(stored?.publicKeyB64).toBe(bytesToBase64(mobile.publicKey));
+  });
+
+  it('trims the reported label and rejects labels over 120 characters', async () => {
+    const mobile = fromX25519PrivateKey(bytes(0xb0c));
+    const begin = await service.beginQrPairing('chan-label');
+    await service.completeQrPairing({
+      ...mobileResponds('chan-label', begin.pairingSecret, mobile),
+      label: '  Pixel  ',
+    });
+    expect(deviceStore.get(mobile.kid)?.label).toBe('Pixel');
+
+    const next = fromX25519PrivateKey(bytes(0xb0d));
+    const nextBegin = await service.beginQrPairing('chan-long-label');
+    await expect(
+      service.completeQrPairing({
+        ...mobileResponds('chan-long-label', nextBegin.pairingSecret, next),
+        label: 'x'.repeat(121),
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(deviceStore.get(next.kid)).toBeNull();
   });
 
   it('QR complete supersedes ALL of the phone’s prior rows for the same installId (verified + unverified)', async () => {

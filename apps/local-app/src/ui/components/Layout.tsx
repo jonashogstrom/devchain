@@ -5,6 +5,7 @@ import { useSelectedProject } from '../hooks/useProjectSelection';
 import { useProjectActivityReporter } from '../hooks/useProjectActivityReporter';
 import { preloadReviewsPage } from '../pages/ReviewsPage.lazy';
 import { Button } from './ui/button';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Badge } from './ui/badge';
 import { Breadcrumbs, ToastHost, EpicSearchInput, type BreadcrumbItem } from './shared';
@@ -313,6 +314,10 @@ function LayoutShell({
   const location = useLocation();
   const navigate = useNavigate();
   const {
+    workspaces = [],
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    isWorkspaceSelectionLocked = false,
     projects,
     projectsLoading,
     projectsError,
@@ -1472,6 +1477,12 @@ function LayoutShell({
             </div>
 
             <div className="flex items-center gap-2">
+              <WorkspaceSwitcher
+                workspaces={workspaces}
+                selectedWorkspaceId={selectedWorkspaceId}
+                locked={isWorkspaceSelectionLocked}
+                onSelect={setSelectedWorkspaceId}
+              />
               {/* Project selector placeholder */}
               {/* Command menu button placeholder */}
               {projectsError ? (

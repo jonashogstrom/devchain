@@ -55,27 +55,62 @@ describe('LocalStorageService - source_project_enabled integration', () => {
     ]);
   });
 
-  it('seeds disabled rows in bulk and skips existing rows', async () => {
+  it('seeds an optioned community source disabled for existing projects', async () => {
     const project = await createProject('Project B', '/tmp/source-project-enabled-b');
 
-    await service.setSourceProjectEnabled(project.id, 'openai', true);
-    await service.seedSourceProjectDisabled(project.id, [' openai ', 'anthropic', 'anthropic', '']);
+    await service.createCommunitySkillSource(
+      {
+        name: 'community-later',
+        repoOwner: 'owner',
+        repoName: 'community-later-repo',
+        branch: 'main',
+      },
+      { seedExistingProjectsDisabled: true },
+    );
 
     await expect(service.listSourceProjectEnabled(project.id)).resolves.toEqual([
-      { sourceName: 'anthropic', enabled: false },
-      { sourceName: 'openai', enabled: true },
+      { sourceName: 'community-later', enabled: false },
     ]);
   });
 
-  it('seeds community sources as enabled when creating a new project', async () => {
+  it('seeds an optioned local source disabled for existing projects', async () => {
+    const project = await createProject('Project Local First', '/tmp/source-project-enabled-local');
+
+    await service.createLocalSkillSource(
+      {
+        name: 'local-later',
+        folderPath: '/tmp/local-later',
+      },
+      { seedExistingProjectsDisabled: true },
+    );
+
+    await expect(service.listSourceProjectEnabled(project.id)).resolves.toEqual([
+      { sourceName: 'local-later', enabled: false },
+    ]);
+  });
+
+  it('omitting the create option does not seed existing-project mappings', async () => {
+    const project = await createProject('Project Raw Source', '/tmp/source-project-enabled-raw');
+
+    await createCommunitySource('raw-community');
+
+    await expect(service.listSourceProjectEnabled(project.id)).resolves.toEqual([]);
+  });
+
+  it('seeds managed sources as enabled when creating a new project', async () => {
     await createCommunitySource('community-one');
     await createCommunitySource('community-two');
+    await service.createLocalSkillSource({
+      name: 'local-one',
+      folderPath: '/tmp/local-one',
+    });
 
     const project = await createProject('Project Seeded', '/tmp/source-project-enabled-seeded');
 
     await expect(service.listSourceProjectEnabled(project.id)).resolves.toEqual([
       { sourceName: 'community-one', enabled: true },
       { sourceName: 'community-two', enabled: true },
+      { sourceName: 'local-one', enabled: true },
     ]);
   });
 
@@ -171,22 +206,6 @@ describe('LocalStorageService - source_project_enabled integration', () => {
       .prepare('SELECT COUNT(*) as count FROM projects WHERE id = ?')
       .get(deterministicProjectId) as { count: number };
     expect(row.count).toBe(1);
-  });
-
-  it('deletes rows by source name across projects', async () => {
-    const projectA = await createProject('Project C', '/tmp/source-project-enabled-c');
-    const projectB = await createProject('Project D', '/tmp/source-project-enabled-d');
-
-    await service.setSourceProjectEnabled(projectA.id, 'openai', false);
-    await service.setSourceProjectEnabled(projectA.id, 'anthropic', true);
-    await service.setSourceProjectEnabled(projectB.id, 'openai', true);
-
-    await service.deleteSourceProjectEnabledBySource(' OPENAI ');
-
-    await expect(service.listSourceProjectEnabled(projectA.id)).resolves.toEqual([
-      { sourceName: 'anthropic', enabled: true },
-    ]);
-    await expect(service.listSourceProjectEnabled(projectB.id)).resolves.toEqual([]);
   });
 
   it('enforces project foreign key cascade on project deletion', async () => {

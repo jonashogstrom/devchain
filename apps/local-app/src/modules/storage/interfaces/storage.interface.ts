@@ -3,6 +3,8 @@ import {
   Project,
   CreateProject,
   UpdateProject,
+  ProjectWorkspace,
+  DeleteProjectWorkspaceResult,
   Status,
   CreateStatus,
   UpdateStatus,
@@ -83,6 +85,10 @@ export interface ListOptions {
   offset?: number;
   orderBy?: string;
   orderDirection?: 'asc' | 'desc';
+}
+
+export interface ProjectListOptions extends ListOptions {
+  workspaceId?: string;
 }
 
 export interface ListResult<T> {
@@ -227,6 +233,10 @@ export interface CreateProjectWithTemplateOptions {
   projectId?: string;
 }
 
+export interface CreateSkillSourceOptions {
+  seedExistingProjectsDisabled?: boolean;
+}
+
 export interface ProjectStorage {
   createProject(data: CreateProject): Promise<Project>;
   /**
@@ -237,10 +247,9 @@ export interface ProjectStorage {
    */
   runInTransaction<T>(fn: () => Promise<T>): Promise<T>;
   /**
-   * Insert a project row and seed enabled skill sources, WITHOUT default statuses and WITHOUT
-   * opening its own transaction (must be called inside `runInTransaction`). The template
-   * supplies statuses via the statuses codec, so — unlike `createProject` — no defaults are
-   * seeded. Replaces the project-row + sourceProjectEnabled seeding the create-core delegate did.
+   * Insert a project row and seed enabled skill sources without default statuses. The method
+   * joins the exact outer `runInTransaction` owner when present, otherwise it opens its own
+   * queued transaction. The template supplies statuses via the statuses codec.
    */
   createProjectShell(
     data: CreateProject,
@@ -248,7 +257,7 @@ export interface ProjectStorage {
   ): Promise<Project>;
   getProject(id: string): Promise<Project>;
   findProjectByPath(path: string): Promise<Project | null>;
-  listProjects(options?: ListOptions): Promise<ListResult<Project>>;
+  listProjects(options?: ProjectListOptions): Promise<ListResult<Project>>;
   /**
    * Return every project whose stored ID starts with `prefix`, matching the
    * address case-insensitively. A full UUID can be supplied and is therefore
@@ -261,6 +270,15 @@ export interface ProjectStorage {
   getProjectByRootPath(rootPath: string): Promise<Project | null>;
   findProjectContainingPath(absolutePath: string): Promise<Project | null>;
   getFeatureFlags(): FeatureFlagConfig;
+}
+
+export interface ProjectWorkspaceStorage {
+  listProjectWorkspaces(): Promise<ProjectWorkspace[]>;
+  getProjectWorkspace(id: string): Promise<ProjectWorkspace>;
+  createProjectWorkspace(name: string): Promise<ProjectWorkspace>;
+  renameProjectWorkspace(id: string, name: string): Promise<ProjectWorkspace>;
+  reorderProjectWorkspaces(workspaceIds: string[]): Promise<ProjectWorkspace[]>;
+  deleteProjectWorkspace(id: string, replacementId: string): Promise<DeleteProjectWorkspaceResult>;
 }
 
 export interface StatusStorage {
@@ -396,19 +414,24 @@ export interface SkillSourceStorage {
   listCommunitySkillSources(): Promise<CommunitySkillSource[]>;
   getCommunitySkillSource(id: string): Promise<CommunitySkillSource>;
   getCommunitySkillSourceByName(name: string): Promise<CommunitySkillSource | null>;
-  createCommunitySkillSource(data: CreateCommunitySkillSource): Promise<CommunitySkillSource>;
+  createCommunitySkillSource(
+    data: CreateCommunitySkillSource,
+    options?: CreateSkillSourceOptions,
+  ): Promise<CommunitySkillSource>;
   deleteCommunitySkillSource(id: string): Promise<void>;
   listLocalSkillSources(): Promise<LocalSkillSource[]>;
   getLocalSkillSource(id: string): Promise<LocalSkillSource | null>;
-  createLocalSkillSource(data: CreateLocalSkillSource): Promise<LocalSkillSource>;
+  getLocalSkillSourceByName(name: string): Promise<LocalSkillSource | null>;
+  createLocalSkillSource(
+    data: CreateLocalSkillSource,
+    options?: CreateSkillSourceOptions,
+  ): Promise<LocalSkillSource>;
   deleteLocalSkillSource(id: string): Promise<void>;
   getSourceProjectEnabled(projectId: string, sourceName: string): Promise<boolean | null>;
   setSourceProjectEnabled(projectId: string, sourceName: string, enabled: boolean): Promise<void>;
   listSourceProjectEnabled(
     projectId: string,
   ): Promise<Array<{ sourceName: string; enabled: boolean }>>;
-  seedSourceProjectDisabled(projectId: string, sourceNames: string[]): Promise<void>;
-  deleteSourceProjectEnabledBySource(sourceName: string): Promise<void>;
 }
 
 export interface AgentProfileStorage {
@@ -469,6 +492,11 @@ export interface ProfileProviderConfigStorage {
   reorderProfileProviderConfigs(profileId: string, configIds: string[]): Promise<void>;
 }
 
+export interface DeleteAgentOptions {
+  protectProjectOwner?: boolean;
+  protectTeamLead?: boolean;
+}
+
 export interface AgentStorage {
   createAgent(data: CreateAgent): Promise<Agent>;
   getAgent(id: string): Promise<Agent>;
@@ -477,7 +505,7 @@ export interface AgentStorage {
   listProjectOwners(projectIds: string[]): Promise<Agent[]>;
   getAgentByName(projectId: string, name: string): Promise<Agent & { profile?: AgentProfile }>;
   updateAgent(id: string, data: UpdateAgent): Promise<Agent>;
-  deleteAgent(id: string): Promise<void>;
+  deleteAgent(id: string, options?: DeleteAgentOptions): Promise<void>;
 }
 
 export interface RecordStorage {
@@ -539,6 +567,12 @@ export interface ClaimRunResult {
   run: ScheduledEpicRun;
 }
 
+export interface UpdateScheduledEpicOptions {
+  derivedRuntimeState?: {
+    nextRunAt: string | null;
+  };
+}
+
 export interface ScheduledEpicStorage {
   createScheduledEpic(data: CreateScheduledEpic): Promise<ScheduledEpic>;
   getScheduledEpic(id: string): Promise<ScheduledEpic>;
@@ -550,6 +584,7 @@ export interface ScheduledEpicStorage {
     id: string,
     data: UpdateScheduledEpic,
     expectedVersion: number,
+    options?: UpdateScheduledEpicOptions,
   ): Promise<ScheduledEpic>;
   deleteScheduledEpic(id: string): Promise<void>;
   updateScheduledEpicRuntimeState(
@@ -600,6 +635,7 @@ export interface SessionStorage {
 
 export interface StorageService
   extends ProjectStorage,
+    ProjectWorkspaceStorage,
     StatusStorage,
     EpicStorage,
     PromptStorage,

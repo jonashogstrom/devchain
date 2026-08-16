@@ -3,12 +3,29 @@
 
 export interface Project {
   id: string;
+  workspaceId: string;
   name: string;
   description: string | null;
   rootPath: string;
   isTemplate: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProjectWorkspace {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  position: number;
+  projectCount: number;
+  deviceGrantCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeleteProjectWorkspaceResult {
+  movedProjectCount: number;
+  remappedDeviceGrantCount: number;
 }
 
 export interface Status {
@@ -257,7 +274,9 @@ export interface EpicComment {
 }
 
 // Create/Update DTOs (omit auto-generated fields)
-export type CreateProject = Omit<Project, 'id' | 'createdAt' | 'updatedAt'>;
+export type CreateProject = Omit<Project, 'id' | 'workspaceId' | 'createdAt' | 'updatedAt'> & {
+  workspaceId?: string;
+};
 export type UpdateProject = Partial<Omit<Project, 'id' | 'createdAt' | 'updatedAt'>>;
 
 export type CreateStatus = Omit<Status, 'id' | 'mcpHidden' | 'createdAt' | 'updatedAt'> & {

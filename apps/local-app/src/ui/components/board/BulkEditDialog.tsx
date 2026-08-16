@@ -17,47 +17,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/ui/components/ui/select';
-import type { Agent, Epic, Status } from './types';
-
-export interface BulkEditRow {
-  epic: Epic;
-  statusId: string;
-  agentId: string | null;
-}
+import type { BoardBulkEditController } from '@/ui/types/board-bulk-edit';
+import type { Agent, Status } from './types';
 
 export interface BulkEditDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  bulkError: string | null;
-  bulkLoading: boolean;
-  rows: BulkEditRow[];
+  controller: BoardBulkEditController;
   statuses: Status[];
   agents: Agent[];
-  onRowChange: (epicId: string, field: 'statusId' | 'agentId', value: string | null) => void;
-  onClose: () => void;
-  onSubmit: () => void;
-  isSubmitting: boolean;
-  canSubmit: boolean;
   isLightColor: (hex: string) => boolean;
 }
 
 export function BulkEditDialog({
-  open,
-  onOpenChange,
-  bulkError,
-  bulkLoading,
-  rows,
+  controller,
   statuses,
   agents,
-  onRowChange,
-  onClose,
-  onSubmit,
-  isSubmitting,
-  canSubmit,
   isLightColor,
 }: BulkEditDialogProps) {
+  const { isOpen, error, isLoading, rows, isSubmitting, canSubmit } = controller;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={isOpen} onOpenChange={(open) => !open && controller.close()}>
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
         <DialogHeader className="shrink-0">
           <DialogTitle>Bulk edit parent & sub-epics</DialogTitle>
@@ -67,26 +46,26 @@ export function BulkEditDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {bulkError && (
+        {error && (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 text-destructive text-sm p-3">
-            {bulkError}
+            {error}
           </div>
         )}
 
-        {bulkLoading && (
+        {isLoading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading parent and sub-epics…
           </div>
         )}
 
-        {!bulkLoading && rows.length === 0 && (
+        {!isLoading && rows.length === 0 && (
           <p className="text-sm text-muted-foreground">
             Select a parent epic to bulk edit its sub-epics.
           </p>
         )}
 
-        {!bulkLoading && rows.length > 0 && (
+        {!isLoading && rows.length > 0 && (
           <div className="rounded-md border divide-y overflow-y-auto flex-1 min-h-0">
             {rows.map((row) => {
               const statusSelectId = `bulk-status-${row.epic.id}`;
@@ -130,7 +109,9 @@ export function BulkEditDialog({
                     <Label htmlFor={statusSelectId}>Status</Label>
                     <Select
                       value={row.statusId}
-                      onValueChange={(value) => onRowChange(row.epic.id, 'statusId', value)}
+                      onValueChange={(value) =>
+                        controller.changeRow(row.epic.id, 'statusId', value)
+                      }
                     >
                       <SelectTrigger id={statusSelectId}>
                         <SelectValue placeholder="Select status" />
@@ -150,7 +131,11 @@ export function BulkEditDialog({
                     <Select
                       value={row.agentId ?? 'none'}
                       onValueChange={(value) =>
-                        onRowChange(row.epic.id, 'agentId', value === 'none' ? null : value)
+                        controller.changeRow(
+                          row.epic.id,
+                          'agentId',
+                          value === 'none' ? null : value,
+                        )
                       }
                     >
                       <SelectTrigger id={agentSelectId}>
@@ -173,10 +158,10 @@ export function BulkEditDialog({
         )}
 
         <DialogFooter className="shrink-0">
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={controller.close}>
             Cancel
           </Button>
-          <Button onClick={onSubmit} disabled={!canSubmit}>
+          <Button onClick={controller.submit} disabled={!canSubmit}>
             {isSubmitting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

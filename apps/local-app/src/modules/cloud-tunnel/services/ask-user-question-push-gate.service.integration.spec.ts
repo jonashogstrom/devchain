@@ -15,6 +15,7 @@ import { ProjectEgressConfigService } from '../../cloud/services/project-egress-
 import { TunnelClientService } from './tunnel-client.service';
 import type { ClaudeHooksAskUserQuestionPendingEventPayload } from '../../events/catalog/claude.hooks.ask_user_question.pending';
 import { GUEST_SANDBOX_ROOT_PATH } from '../../guests/constants';
+import type { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const MIGRATIONS_FOLDER = join(__dirname, '../../../../drizzle');
 const ENABLED_PROJECTS_KEY = 'cloud.egress.enabledProjects';
@@ -53,6 +54,7 @@ describe('AskUserQuestionPushGateService', () => {
   let egressQueue: { enqueue: jest.Mock };
   let projectConfig: ProjectEgressConfigService;
   let tunnelClient: { querySseLiveness: jest.Mock; getInstanceId: jest.Mock };
+  let workspaceMode: { getSnapshot: jest.Mock };
   const eventMapper = new EventMapperService();
 
   beforeEach(() => {
@@ -72,6 +74,11 @@ describe('AskUserQuestionPushGateService', () => {
       querySseLiveness: jest.fn().mockResolvedValue({ live: false, lastSeenAt: null }),
       getInstanceId: jest.fn().mockReturnValue('inst-1'),
     };
+    workspaceMode = {
+      getSnapshot: jest
+        .fn()
+        .mockResolvedValue({ multiWorkspaceMode: false, failClosedPending: false }),
+    };
 
     gate = new AskUserQuestionPushGateService(
       cloudSession as unknown as CloudSessionManagerService,
@@ -79,6 +86,7 @@ describe('AskUserQuestionPushGateService', () => {
       eventMapper,
       projectConfig,
       tunnelClient as unknown as TunnelClientService,
+      workspaceMode as unknown as WorkspaceModeCoordinatorService,
     );
   });
 
@@ -111,10 +119,8 @@ describe('AskUserQuestionPushGateService', () => {
   async function fireAndSettle(payload = makePayload()) {
     await gate.onPending(payload);
     jest.advanceTimersByTime(AUQ_NATIVE_PUSH_GRACE_MS);
-    // Flush the async decide() chain (querySseLiveness + branch).
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // Flush mode check → liveness → final mode check → enqueue.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
   }
 
   it('SUPPRESSES the native push when SSE is live (foreground)', async () => {
@@ -143,6 +149,38 @@ describe('AskUserQuestionPushGateService', () => {
       instanceId: 'inst-1',
     });
     expect(payload.payload.questions).toBeUndefined();
+  });
+
+  it('emits only a content-free account notice in multi-workspace mode', async () => {
+    workspaceMode.getSnapshot.mockResolvedValue({
+      multiWorkspaceMode: true,
+      failClosedPending: false,
+    });
+
+    await fireAndSettle();
+
+    expect(tunnelClient.querySseLiveness).not.toHaveBeenCalled();
+    expect(egressQueue.enqueue).toHaveBeenCalledTimes(1);
+    const ingest = egressQueue.enqueue.mock.calls[0][0];
+    expect(ingest).toMatchObject({
+      sourceEventId: 'auq.pending:tool-use-1',
+      projectId: null,
+      payload: { accountLevel: true },
+    });
+    expect(JSON.stringify(ingest.payload)).not.toMatch(
+      /project|workspace|agent|session|tool|thread|question|deep.?link/i,
+    );
+  });
+
+  it('switches to the generic notice when mode changes during the liveness query', async () => {
+    workspaceMode.getSnapshot
+      .mockResolvedValueOnce({ multiWorkspaceMode: false, failClosedPending: false })
+      .mockResolvedValue({ multiWorkspaceMode: true, failClosedPending: false });
+
+    await fireAndSettle();
+
+    expect(tunnelClient.querySseLiveness).toHaveBeenCalledTimes(1);
+    expect(egressQueue.enqueue.mock.calls[0][0].payload).toEqual({ accountLevel: true });
   });
 
   it('does not query or enqueue before the grace window elapses', async () => {

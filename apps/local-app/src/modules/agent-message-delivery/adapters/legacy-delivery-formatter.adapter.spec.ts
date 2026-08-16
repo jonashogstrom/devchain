@@ -83,6 +83,33 @@ describe('LegacyDeliveryFormatterAdapter', () => {
       expect(out).toBe(body);
     });
 
+    describe("framing:'sender-footer'", () => {
+      it('appends a JSON-quoted sanitized sender on one line with no trailing newline', () => {
+        const out = formatter.format(
+          msg({
+            kind: 'mcp.direct',
+            senderName: '  Desk\n\u0000 "Phone"  ',
+            senderType: 'user',
+            body: 'line one\nline two',
+            framing: 'sender-footer',
+          }),
+        );
+
+        expect(out).toBe('line one\nline two\n[SentBy:"Desk \\"Phone\\""]');
+        expect(out).not.toMatch(/\n$/u);
+        expect(out).not.toContain('\u0000');
+      });
+
+      it('returns the raw body when the sender name is empty after one-line sanitization', () => {
+        const body = 'unchanged body';
+        const out = formatter.format(
+          msg({ senderName: '\n\t\u0000', body, framing: 'sender-footer' }),
+        );
+
+        expect(out).toBe(body);
+      });
+    });
+
     it("returns the agent-banner when framing:'agent-banner' is explicit", () => {
       const out = formatter.format(
         msg({

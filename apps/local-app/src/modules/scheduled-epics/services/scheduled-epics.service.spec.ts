@@ -162,6 +162,7 @@ describe('ScheduledEpicsService', () => {
   describe('toggle', () => {
     it('notifies the runner after toggling', async () => {
       const schedule = makeSchedule({ enabled: true });
+      storage.getScheduledEpic.mockResolvedValue(schedule);
       storage.updateScheduledEpic.mockResolvedValue({
         ...schedule,
         enabled: false,
@@ -170,18 +171,20 @@ describe('ScheduledEpicsService', () => {
 
       await service.toggle('sched-1', false, 1);
 
+      expect(storage.updateScheduledEpic).toHaveBeenCalledWith(
+        'sched-1',
+        { enabled: false },
+        1,
+        undefined,
+      );
+      expect(storage.updateScheduledEpicRuntimeState).not.toHaveBeenCalled();
       expect(runnerRefresh.refreshScheduleWindow).toHaveBeenCalledTimes(1);
     });
 
     it('recomputes nextRunAt when re-enabling without one', async () => {
       const schedule = makeSchedule({ enabled: false, nextRunAt: null });
+      storage.getScheduledEpic.mockResolvedValue(schedule);
       storage.updateScheduledEpic.mockResolvedValue({
-        ...schedule,
-        enabled: true,
-        configVersion: 2,
-        nextRunAt: null,
-      });
-      storage.updateScheduledEpicRuntimeState.mockResolvedValue({
         ...schedule,
         enabled: true,
         configVersion: 2,
@@ -190,10 +193,13 @@ describe('ScheduledEpicsService', () => {
 
       const result = await service.toggle('sched-1', true, 1);
 
-      expect(storage.updateScheduledEpicRuntimeState).toHaveBeenCalledWith(
-        'sched-1',
-        expect.objectContaining({ nextRunAt: expect.any(String) }),
-      );
+      expect(storage.updateScheduledEpic).toHaveBeenCalledWith('sched-1', { enabled: true }, 1, {
+        derivedRuntimeState: {
+          nextRunAt: expect.any(String),
+        },
+      });
+      expect(storage.updateScheduledEpicRuntimeState).not.toHaveBeenCalled();
+      expect(storage.updateScheduledEpic).toHaveBeenCalledTimes(1);
       expect(result.nextRunAt).toBe('2026-06-01T09:00:00.000Z');
     });
   });
@@ -206,23 +212,26 @@ describe('ScheduledEpicsService', () => {
         ...schedule,
         cronExpression: '0 10 * * *',
         configVersion: 2,
-      });
-      storage.updateScheduledEpicRuntimeState.mockResolvedValue({
-        ...schedule,
-        cronExpression: '0 10 * * *',
-        configVersion: 2,
         nextRunAt: '2026-06-01T10:00:00.000Z',
       });
 
       await service.update('sched-1', { cronExpression: '0 10 * * *' }, 1);
 
-      expect(storage.updateScheduledEpicRuntimeState).toHaveBeenCalledWith(
+      expect(storage.updateScheduledEpic).toHaveBeenCalledWith(
         'sched-1',
-        expect.objectContaining({ nextRunAt: expect.any(String) }),
+        { cronExpression: '0 10 * * *' },
+        1,
+        {
+          derivedRuntimeState: {
+            nextRunAt: expect.any(String),
+          },
+        },
       );
+      expect(storage.updateScheduledEpicRuntimeState).not.toHaveBeenCalled();
+      expect(storage.updateScheduledEpic).toHaveBeenCalledTimes(1);
     });
 
-    it('does not recompute nextRunAt when only name changes', async () => {
+    it('updates a name without derived state and notifies the runner', async () => {
       const schedule = makeSchedule();
       storage.getScheduledEpic.mockResolvedValue(schedule);
       storage.updateScheduledEpic.mockResolvedValue({
@@ -233,16 +242,13 @@ describe('ScheduledEpicsService', () => {
 
       await service.update('sched-1', { name: 'New Name' }, 1);
 
+      expect(storage.updateScheduledEpic).toHaveBeenCalledWith(
+        'sched-1',
+        { name: 'New Name' },
+        1,
+        undefined,
+      );
       expect(storage.updateScheduledEpicRuntimeState).not.toHaveBeenCalled();
-    });
-
-    it('notifies the runner after update', async () => {
-      const schedule = makeSchedule();
-      storage.getScheduledEpic.mockResolvedValue(schedule);
-      storage.updateScheduledEpic.mockResolvedValue({ ...schedule, name: 'New', configVersion: 2 });
-
-      await service.update('sched-1', { name: 'New' }, 1);
-
       expect(runnerRefresh.refreshScheduleWindow).toHaveBeenCalledTimes(1);
     });
   });

@@ -10,6 +10,29 @@
 /** Schema version of the capability descriptor — lets peers evolve it without crashing. */
 export const E2EE_NEGOTIATION_VERSION = 1;
 
+/** Highest workspace-RPC capability version understood by this release. */
+export const WORKSPACE_SUPPORT_VERSION = 1;
+
+/** Optional attest capability. Absence means a legacy implicit-Default installation. */
+export interface WorkspaceSupportCapability {
+  readonly v: number;
+}
+
+export function isWorkspaceSupportCapability(value: unknown): value is WorkspaceSupportCapability {
+  if (typeof value !== 'object' || value === null) return false;
+  const version = (value as Record<string, unknown>).v;
+  return (
+    typeof version === 'number' &&
+    Number.isInteger(version) &&
+    version >= 1 &&
+    version <= WORKSPACE_SUPPORT_VERSION
+  );
+}
+
+export function buildWorkspaceSupportCapability(): WorkspaceSupportCapability {
+  return { v: WORKSPACE_SUPPORT_VERSION };
+}
+
 // Inlined (NOT imported from ./envelope) so this module carries no runtime cross-file
 // `.js` specifier — that keeps it resolvable under the local-app jest shim, which does
 // not rewrite ESM `.js` imports (same constraint key-exchange.ts follows). MUST equal

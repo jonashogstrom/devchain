@@ -29,7 +29,7 @@ The schema source is `src/modules/storage/db/schema.ts`; committed migrations an
 | Script | Role |
 |---|---|
 | `check-cycles.ts` | Dependency-cycle validation used by `madge:check` |
-| `fetch-pricing-data.ts` | Build-time provider pricing data refresh |
+| `fetch-pricing-data.ts` | Manual provider pricing refresh via `pnpm --filter local-app pricing:update` |
 | `test-health-report.ts` | Render test-health evidence from generated Jest output |
 | `terminal-window-heap-evidence.mjs` | Focused terminal heap evidence |
 | `xterm6-browser-smoke.mjs` | Browser smoke contract for xterm compatibility |

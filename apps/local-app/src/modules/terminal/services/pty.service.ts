@@ -1,11 +1,9 @@
-import { Injectable, OnModuleDestroy, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import * as pty from 'node-pty';
 import { createLogger } from '../../../common/logging/logger';
-import { TerminalGateway } from '../gateways/terminal.gateway';
 import { TerminalActivityService } from './terminal-activity.service';
-import { TerminalIOService } from './terminal-io/terminal-io.service';
 import { SettingsService } from '../../settings/services/settings.service';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import { stripAlternateScreenSequences } from '../utils/ansi-sanitizer';
 import { normalizeLineEndings } from '../utils/normalize-line-endings';
 import { MetricsService } from '../../metrics/services/metrics.service';
@@ -15,6 +13,8 @@ const logger = createLogger('PtyService');
 
 /** Activity suppression window after startStreaming/resize to ignore spurious output (ms) */
 const ACTIVITY_SUPPRESSION_MS = 750;
+
+type PtyOutputHandler = (sessionId: string, data: string) => void;
 
 interface PtySession {
   sessionId: string;
@@ -34,16 +34,12 @@ interface PtySession {
 @Injectable()
 export class PtyService implements OnModuleDestroy, OnModuleInit {
   private activeSessions: Map<string, PtySession> = new Map();
+  private outputHandler?: PtyOutputHandler;
 
   constructor(
-    @Inject(forwardRef(() => TerminalGateway))
-    private readonly terminalGateway: TerminalGateway,
     private readonly terminalActivity: TerminalActivityService,
-    @Inject(forwardRef(() => TerminalIOService))
-    private readonly terminalIO: TerminalIOService,
     private readonly settingsService: SettingsService,
-    @Inject(forwardRef(() => SessionsService))
-    private readonly sessionsService: SessionsService,
+    private readonly sessionTerminalRuntime: SessionTerminalRuntimeService,
     private readonly metricsService: MetricsService,
   ) {
     let engine = 'xterm';
@@ -62,6 +58,13 @@ export class PtyService implements OnModuleDestroy, OnModuleInit {
     return { activeSessions: this.activeSessions.size };
   }
 
+  setOutputHandler(handler: PtyOutputHandler): void {
+    if (this.outputHandler) {
+      throw new Error('PTY output handler is already registered');
+    }
+    this.outputHandler = handler;
+  }
+
   onModuleDestroy() {
     // Clean up all PTY processes
     for (const session of this.activeSessions.values()) {
@@ -78,6 +81,11 @@ export class PtyService implements OnModuleDestroy, OnModuleInit {
     tmuxSessionName: string,
     options?: { cols?: number; rows?: number },
   ): Promise<void> {
+    const outputHandler = this.outputHandler;
+    if (!outputHandler) {
+      throw new Error('PTY output handler is not registered');
+    }
+
     if (this.activeSessions.has(sessionId)) {
       logger.warn({ sessionId }, 'PTY session already active');
       return;
@@ -105,13 +113,13 @@ export class PtyService implements OnModuleDestroy, OnModuleInit {
       // Store the session. Both per-provider terminal policies are resolved ONCE here
       // (never per-frame in the onData hot path): LF normalization, and whether this
       // provider is a full-screen TUI that keeps the alternate screen.
-      const usesAlternateScreen = this.sessionsService.usesAlternateScreenFor(sessionId);
+      const runtimeDescriptor = this.sessionTerminalRuntime.getDescriptor(sessionId);
       this.activeSessions.set(sessionId, {
         sessionId,
         tmuxSessionName,
         ptyProcess,
-        needsLfNormalize: this.sessionsService.shouldNormalizeLfFor(sessionId),
-        usesAlternateScreen,
+        needsLfNormalize: runtimeDescriptor.normalizeLf,
+        usesAlternateScreen: runtimeDescriptor.usesAlternateScreen,
         loggedPath: false,
       });
 
@@ -152,7 +160,7 @@ export class PtyService implements OnModuleDestroy, OnModuleInit {
           processed = normalizeLineEndings(processed);
         }
         // Broadcast so client xterm also preserves scrollback
-        this.terminalGateway.broadcastTerminalData(sessionId, processed);
+        outputHandler(sessionId, processed);
       });
 
       // Handle PTY exit

@@ -31,6 +31,7 @@ interface CreateProjectInput {
   projectName: string;
   projectDescription?: string;
   rootPath: string;
+  workspaceId?: string;
 }
 
 interface CreateProjectResult {
@@ -38,6 +39,7 @@ interface CreateProjectResult {
     id: string;
     name: string;
     rootPath: string;
+    workspaceId: string;
   };
   fromRegistry: boolean;
   templateSlug: string;

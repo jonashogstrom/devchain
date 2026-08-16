@@ -5,6 +5,8 @@ import { E2eePairingService } from './services/e2ee-pairing.service';
 import { E2eeTrustService } from './services/e2ee-trust.service';
 import { E2eePairingController } from './controllers/e2ee-pairing.controller';
 import { E2eeTrustController } from './controllers/e2ee-trust.controller';
+import { EventsInfraModule } from '../events/events-infra.module';
+import { PairedDeviceWorkspaceAccessService } from './services/paired-device-workspace-access.service';
 
 /**
  * Dedicated X25519 E2EE crypto foundation (Phase 1, Task:3 + Task:4).
@@ -16,8 +18,21 @@ import { E2eeTrustController } from './controllers/e2ee-trust.controller';
  * consumes these services. `DB_CONNECTION` is provided globally by `DbModule`.
  */
 @Module({
+  imports: [EventsInfraModule],
   controllers: [E2eePairingController, E2eeTrustController],
-  providers: [E2eeKeypairService, E2eeDeviceStoreService, E2eePairingService, E2eeTrustService],
-  exports: [E2eeKeypairService, E2eeDeviceStoreService, E2eePairingService, E2eeTrustService],
+  providers: [
+    E2eeKeypairService,
+    E2eeDeviceStoreService,
+    E2eePairingService,
+    E2eeTrustService,
+    PairedDeviceWorkspaceAccessService,
+  ],
+  exports: [
+    E2eeKeypairService,
+    E2eeDeviceStoreService,
+    E2eePairingService,
+    E2eeTrustService,
+    PairedDeviceWorkspaceAccessService,
+  ],
 })
 export class E2eeModule {}

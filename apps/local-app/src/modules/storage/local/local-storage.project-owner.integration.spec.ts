@@ -4,7 +4,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { NotFoundError } from '../../../common/errors/error-types';
+import { ConflictError, NotFoundError } from '../../../common/errors/error-types';
 import type { Agent, Project } from '../models/domain.models';
 import { LocalStorageService } from './local-storage.service';
 
@@ -224,6 +224,39 @@ describe('LocalStorageService - project owner', () => {
     await service.deleteAgent(owner.id);
 
     expect(ownerIds(project.id)).toEqual([]);
+  });
+
+  it('rejects an agent that becomes Project Owner before a protected delete transaction', async () => {
+    const project = await createProject('Protected Owner');
+    const target = await createAgent(project.id, 'Protected-Owner');
+    const completedSessionId = randomUUID();
+    const now = new Date().toISOString();
+    sqlite
+      .prepare(
+        `INSERT INTO sessions (
+           id, agent_id, tmux_session_id, status, started_at, ended_at, created_at, updated_at
+         ) VALUES (?, ?, ?, 'stopped', ?, ?, ?, ?)`,
+      )
+      .run(completedSessionId, target.id, `tmux-${target.id}`, now, now, now, now);
+
+    expect((await service.getAgent(target.id)).isProjectOwner).toBe(false);
+    await service.updateAgent(target.id, { isProjectOwner: true });
+
+    await expect(
+      service.deleteAgent(target.id, { protectProjectOwner: true }),
+    ).rejects.toMatchObject<Partial<ConflictError>>({
+      details: {
+        code: 'AGENT_IS_PROJECT_OWNER',
+        agentId: target.id,
+        projectId: project.id,
+      },
+    });
+
+    expect(ownerIds(project.id)).toEqual([target.id]);
+    await expect(service.getAgent(target.id)).resolves.toMatchObject({ id: target.id });
+    expect(
+      sqlite.prepare('SELECT id FROM sessions WHERE id = ?').get(completedSessionId),
+    ).toBeDefined();
   });
 
   it('retains ownership when a running session prevents owner deletion', async () => {

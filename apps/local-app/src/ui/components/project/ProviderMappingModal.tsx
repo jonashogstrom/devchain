@@ -25,22 +25,9 @@ import {
   SelectValue,
 } from '@/ui/components/ui/select';
 import { AlertTriangle, XCircle } from 'lucide-react';
+import type { FamilyAlternative } from '@/ui/pages/projects/lib/project-contracts';
 
-/**
- * Represents a family of profiles and their provider alternatives.
- */
-export interface FamilyAlternative {
-  /** The family slug (e.g., 'coder', 'reviewer') */
-  familySlug: string;
-  /** The default provider name from the template */
-  defaultProvider: string;
-  /** Whether the default provider is available locally */
-  defaultProviderAvailable: boolean;
-  /** Provider names that have profiles for this family and are available locally */
-  availableProviders: string[];
-  /** Whether there are alternative providers available */
-  hasAlternatives: boolean;
-}
+export type { FamilyAlternative } from '@/ui/pages/projects/lib/project-contracts';
 
 interface ProviderMappingModalProps {
   open: boolean;

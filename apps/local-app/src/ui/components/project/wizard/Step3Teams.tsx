@@ -19,11 +19,9 @@ export interface Step3TeamsProps {
 }
 
 /**
- * Wizard Step 3 — Configure Teams. The presentational body extracted VERBATIM from the legacy
- * `ProjectTeamPreconfigDialog` (accordion of team panels, each a {@link ProviderGroupedConfigSelector}
- * over the team's profiles). Domain state (`teamStates`) is lifted to the controller so Back/Next
- * preserve it and the emission (`buildTeamOverrides`) runs once at submit; only the expanded-panel UI
- * bit stays local. Skipped entirely by the wizard when no team is configurable.
+ * Wizard Step 3 renders an accordion of team panels, each with a
+ * {@link ProviderGroupedConfigSelector}. Domain state is lifted to the controller so Back/Next
+ * preserves it and `buildTeamOverrides` runs once at submit; only the expanded panel stays local.
  */
 export function Step3Teams({
   visibleTeams,

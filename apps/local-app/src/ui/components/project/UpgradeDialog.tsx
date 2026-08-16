@@ -16,8 +16,8 @@ import { formatPromptTransferCounts } from '@/common/prompt-transfer';
 import {
   formatProjectPreMutationFailure,
   isProjectPreMutationFailure,
-  type UpgradeProjectResponse,
-} from '@/ui/pages/projects/lib/project-api';
+} from '@/ui/pages/projects/lib/project-failures';
+import type { UpgradeProjectResponse } from '@/ui/pages/projects/lib/project-contracts';
 
 interface UpgradeDialogProps {
   projectId: string;

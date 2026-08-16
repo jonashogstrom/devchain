@@ -1,5 +1,4 @@
-import { spawnSync } from 'child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import Database from 'better-sqlite3';
@@ -7,20 +6,28 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { ClaudeAdapter } from '../providers/adapters/claude.adapter';
 import { CodexAdapter } from '../providers/adapters/codex.adapter';
+import type { ProviderAdapter } from '../providers/adapters/provider-adapter.interface';
 import { ProviderPluginPolicyService } from '../providers/services/provider-plugin-policy.service';
-import { resolve as resolveLaunchConfig } from '../sessions/services/provider-launch-config';
+import { ProviderRuntimePreparationService } from '../sessions/services/provider-runtime-preparation';
+import type {
+  NewProviderRuntimePlanInput,
+  RestoreProviderRuntimePlanInput,
+} from '../sessions/services/provider-runtime-preparation';
 import { LocalStorageService } from '../storage/local/local-storage.service';
+import type { Provider } from '../storage/models/domain.models';
 import { ClaudeLaunchSettingsMaterializerService } from './claude-launch-settings-materializer.service';
 import { CodexPluginProfileMaterializerService } from './codex-plugin-profile-materializer.service';
+import { RuntimeContextCaptureService } from './runtime-context-capture.service';
 
 const PROJECT_ID = '11111111-1111-4111-8111-111111111111';
-const SESSION_ID = 'session-plugin-policy-workflow';
-const ATTEMPT_NONCE = 'attempt_nonce_workflow_1234567890';
+const RESTORE_PROVIDER_SESSION_ID = 'provider-session-plugin-policy-workflow';
+const MODES = ['new', 'restore'] as const;
 
-describe('provider plugin policy launch workflow integration', () => {
+describe('provider plugin policy preparation workflow integration', () => {
   let sqlite: Database.Database;
   let storage: LocalStorageService;
   let policyService: ProviderPluginPolicyService;
+  let preparationService: ProviderRuntimePreparationService;
   let temporaryRoot: string;
 
   beforeEach(async () => {
@@ -31,6 +38,13 @@ describe('provider plugin policy launch workflow integration', () => {
     migrate(db, { migrationsFolder: join(__dirname, '../../../drizzle') });
     storage = new LocalStorageService(db);
     policyService = new ProviderPluginPolicyService(storage);
+    preparationService = new ProviderRuntimePreparationService(
+      storage,
+      policyService,
+      new RuntimeContextCaptureService(db),
+      new ClaudeLaunchSettingsMaterializerService(join(temporaryRoot, 'claude-private')),
+      new CodexPluginProfileMaterializerService(join(temporaryRoot, 'codex-private')),
+    );
 
     sqlite
       .prepare(
@@ -46,67 +60,26 @@ describe('provider plugin policy launch workflow integration', () => {
     await rm(temporaryRoot, { recursive: true, force: true });
   });
 
-  it('carries resolved precedence through Claude settings and exact Codex restore exec', async () => {
-    const claudeProvider = await storage.createProvider({ name: 'claude' });
-    const codexProvider = await storage.createProvider({ name: 'codex' });
-    for (const providerId of [claudeProvider.id, codexProvider.id]) {
-      await policyService.setDefault(providerId, 'managed-alpha@market', true);
-      await policyService.setDefault(providerId, 'managed-beta@market', false);
-      await policyService.setProjectOverride(PROJECT_ID, providerId, 'managed-alpha@market', false);
-      await policyService.setProjectOverride(PROJECT_ID, providerId, 'project-only@market', true);
-    }
-
-    const claudePolicy = await policyService.resolveAll(PROJECT_ID, claudeProvider.id);
-    const codexPolicy = await policyService.resolveAll(PROJECT_ID, codexProvider.id);
-    const expectedEffectivePolicy = [
-      expect.objectContaining({
-        pluginId: 'managed-alpha@market',
-        enabled: false,
-        source: 'project',
+  it.each(MODES)('applies resolved Claude policy through staged %s preparation', async (mode) => {
+    const provider = await storage.createProvider({
+      name: 'claude',
+      claudeLaunchSettingsJson: JSON.stringify({
+        theme: 'dark',
+        enabledPlugins: {
+          'native-only@market': true,
+          'managed-alpha@market': true,
+        },
       }),
-      expect.objectContaining({
-        pluginId: 'managed-beta@market',
-        enabled: false,
-        source: 'default',
-      }),
-      expect.objectContaining({
-        pluginId: 'project-only@market',
-        enabled: true,
-        source: 'project',
-      }),
-    ];
-    expect(claudePolicy).toEqual(expectedEffectivePolicy);
-    expect(codexPolicy).toEqual(expectedEffectivePolicy);
-
-    const claudeMaterializer = new ClaudeLaunchSettingsMaterializerService(
-      join(temporaryRoot, 'claude-private'),
-    );
-    const claudeBaseSettingsPath = join(temporaryRoot, 'claude-base-settings.json');
-    const claudeBaseSettings = JSON.stringify({
-      theme: 'dark',
-      enabledPlugins: {
-        'native-only@market': true,
-        'managed-alpha@market': true,
-      },
     });
-    await writeFile(claudeBaseSettingsPath, claudeBaseSettings);
-    const claudeBaseSettingsBytes = await readFile(claudeBaseSettingsPath);
-    const preparedClaude = await claudeMaterializer.prepare({
-      providerName: 'claude',
-      settingsJson: claudeBaseSettings,
-      profileOptionArgs: [],
-      providerEnv: null,
-      configEnv: null,
-      sessionId: SESSION_ID,
-      epoch: 'epoch-1',
-      projectRootPath: temporaryRoot,
-      pluginPolicy: claudePolicy,
-      policyRequired: true,
+    await seedEffectivePolicy(provider.id);
+
+    const prepared = await prepare(mode, provider, new ClaudeAdapter(), {
+      profileOptions: '--model claude-sonnet-4 --verbose',
     });
-    const materializedClaudeSettings = JSON.parse(
-      await readFile(preparedClaude.optionArgs[1], 'utf8'),
-    );
-    expect(materializedClaudeSettings).toEqual({
+    const settingsIndex = prepared.config.argv.indexOf('--settings');
+
+    expect(settingsIndex).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(await readFile(prepared.config.argv[settingsIndex + 1], 'utf8'))).toEqual({
       theme: 'dark',
       enabledPlugins: {
         'native-only@market': true,
@@ -115,165 +88,143 @@ describe('provider plugin policy launch workflow integration', () => {
         'project-only@market': true,
       },
     });
-    expect(await readFile(claudeBaseSettingsPath)).toEqual(claudeBaseSettingsBytes);
+    expect(prepared.config.argv).toEqual(
+      mode === 'new'
+        ? [
+            '--settings',
+            prepared.config.argv[settingsIndex + 1],
+            '--model',
+            'claude-sonnet-4',
+            '--verbose',
+          ]
+        : [
+            '--resume',
+            RESTORE_PROVIDER_SESSION_ID,
+            '--settings',
+            prepared.config.argv[settingsIndex + 1],
+            '--model',
+            'claude-sonnet-4',
+            '--verbose',
+          ],
+    );
 
-    const claudeNew = resolveLaunchConfig({
-      mode: 'new',
-      adapter: new ClaudeAdapter(),
-      profileOptions: '--model claude-sonnet-4 --verbose',
-      modelOverride: null,
-      providerBinPath: '/usr/bin/claude',
-      providerEnv: null,
-      configEnv: null,
-      provider: {},
-      providerOptionArgs: preparedClaude.optionArgs,
-    });
-    const claudeRestore = resolveLaunchConfig({
-      mode: 'restore',
-      providerSessionId: 'claude-provider-session',
-      adapter: new ClaudeAdapter(),
-      profileOptions: '--model claude-sonnet-4 --verbose',
-      modelOverride: null,
-      providerBinPath: '/usr/bin/claude',
-      providerEnv: null,
-      configEnv: null,
-      provider: {},
-      providerOptionArgs: preparedClaude.optionArgs,
-    });
-    expect(claudeNew.argv).toEqual([
-      ...preparedClaude.optionArgs,
-      '--model',
-      'claude-sonnet-4',
-      '--verbose',
-    ]);
-    expect(claudeRestore.argv).toEqual([
-      '--resume',
-      'claude-provider-session',
-      ...preparedClaude.optionArgs,
-      '--model',
-      'claude-sonnet-4',
-      '--verbose',
-    ]);
+    await expect(prepared.afterCommand()).resolves.toBeUndefined();
+    await prepared.rollback();
+  });
 
-    const codexHome = join(temporaryRoot, 'codex-home');
-    const codexPrivate = join(temporaryRoot, 'codex-private');
-    await mkdir(codexHome, { recursive: true });
-    const baseConfigPath = join(codexHome, 'config.toml');
-    await writeFile(baseConfigPath, 'model = "base-model"\n');
-    const baseConfigBytes = await readFile(baseConfigPath);
-    const codexMaterializer = new CodexPluginProfileMaterializerService(codexPrivate);
-    const preparedCodex = await codexMaterializer.prepare({
+  it.each(MODES)('applies resolved Codex policy through staged %s preparation', async (mode) => {
+    const provider = await storage.createProvider({ name: 'codex' });
+    await seedEffectivePolicy(provider.id);
+
+    const prepared = await prepare(mode, provider, new CodexAdapter(), {
+      profileOptions: '--model "gpt model with spaces" --search',
+    });
+    const profileIndex = prepared.config.argv.indexOf('--profile');
+    const profileName = prepared.config.argv[profileIndex + 1];
+
+    expect(profileIndex).toBeGreaterThanOrEqual(0);
+    expect(profileName).toMatch(/^devchain-[a-f0-9]{16}-[a-f0-9]{16}$/);
+    expect(prepared.config.argv).toEqual(
+      mode === 'new'
+        ? [
+            '-c',
+            'check_for_update_on_startup=false',
+            '--profile',
+            profileName,
+            '--model',
+            'gpt model with spaces',
+            '--search',
+          ]
+        : [
+            '-c',
+            'check_for_update_on_startup=false',
+            'resume',
+            '--profile',
+            profileName,
+            '--model',
+            'gpt model with spaces',
+            '--search',
+            RESTORE_PROVIDER_SESSION_ID,
+          ],
+    );
+    expect(prepared.config.commandArgs).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/\/devchain-codex-profile-helper-[a-f0-9]{64}$/),
+      ]),
+    );
+
+    await prepared.rollback();
+  });
+
+  it.each(MODES)(
+    'preserves the base command for staged %s preparation without policy',
+    async (mode) => {
+      const provider = await storage.createProvider({ name: 'codex' });
+
+      const prepared = await prepare(mode, provider, new CodexAdapter(), {
+        profileOptions: '--model gpt-5',
+      });
+      const expectedArgv =
+        mode === 'new'
+          ? ['-c', 'check_for_update_on_startup=false', '--model', 'gpt-5']
+          : [
+              '-c',
+              'check_for_update_on_startup=false',
+              'resume',
+              '--model',
+              'gpt-5',
+              RESTORE_PROVIDER_SESSION_ID,
+            ];
+
+      expect(prepared.config.argv).toEqual(expectedArgv);
+      expect(prepared.config.commandArgs).toEqual([
+        'env',
+        '-u',
+        'DEVCHAIN_CONTEXT_WINDOW_TOKENS',
+        '/usr/bin/codex',
+        ...expectedArgv,
+      ]);
+      await expect(prepared.afterCommand()).resolves.toBeUndefined();
+      await prepared.rollback();
+    },
+  );
+
+  async function seedEffectivePolicy(providerId: string): Promise<void> {
+    await policyService.setDefault(providerId, 'managed-alpha@market', true);
+    await policyService.setDefault(providerId, 'managed-beta@market', false);
+    await policyService.setProjectOverride(PROJECT_ID, providerId, 'managed-alpha@market', false);
+    await policyService.setProjectOverride(PROJECT_ID, providerId, 'project-only@market', true);
+  }
+
+  async function prepare(
+    mode: (typeof MODES)[number],
+    provider: Provider,
+    adapter: ProviderAdapter,
+    overrides: Pick<NewProviderRuntimePlanInput, 'profileOptions'>,
+  ) {
+    const sessionId = `session-plugin-policy-${provider.name}-${mode}`;
+    const shared = {
+      adapter,
+      provider,
+      providerBinPath: `/usr/bin/${provider.name}`,
       projectId: PROJECT_ID,
       projectName: 'Plugin Policy Project',
-      sessionId: SESSION_ID,
-      pluginPolicy: codexPolicy,
-      attemptNonce: ATTEMPT_NONCE,
-    });
-    if (!preparedCodex) throw new Error('Expected a managed Codex profile');
-
-    const codexRestore = resolveLaunchConfig({
-      mode: 'restore',
-      providerSessionId: 'codex-provider-session',
-      adapter: new CodexAdapter(),
-      profileOptions: '--model "gpt model with spaces" --search',
-      modelOverride: null,
-      providerBinPath: '/usr/bin/codex',
-      providerEnv: null,
-      configEnv: null,
-      provider: {},
-      providerOptionArgs: preparedCodex.providerOptionArgs,
-    });
-    expect(codexRestore.argv).toEqual([
-      '-c',
-      'check_for_update_on_startup=false',
-      'resume',
-      '--profile',
-      preparedCodex.profileName,
-      '--model',
-      'gpt model with spaces',
-      '--search',
-      'codex-provider-session',
-    ]);
-
-    const fakeCodex = join(temporaryRoot, 'fake-codex');
-    await writeFile(
-      fakeCodex,
-      '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n',
-      { mode: 0o700 },
-    );
-    await chmod(fakeCodex, 0o700);
-    const helperArgv = codexMaterializer.buildHelperArgv(
-      preparedCodex,
-      fakeCodex,
-      codexRestore.argv,
-      { projectId: PROJECT_ID, attemptNonce: ATTEMPT_NONCE },
-    );
-    const helperResult = spawnSync(helperArgv[0], helperArgv.slice(1), {
-      cwd: temporaryRoot,
-      env: { ...process.env, CODEX_HOME: codexHome },
-      encoding: 'utf8',
-    });
-
-    expect(helperResult.status).toBe(0);
-    expect(JSON.parse(helperResult.stdout)).toEqual(codexRestore.argv);
-    await expect(
-      codexMaterializer.awaitAcknowledgement(preparedCodex, {
-        projectId: PROJECT_ID,
-        attemptNonce: ATTEMPT_NONCE,
-      }),
-    ).resolves.toBe(join(codexHome, `${preparedCodex.profileName}.config.toml`));
-    expect(await readFile(baseConfigPath)).toEqual(baseConfigBytes);
-    await codexMaterializer.cleanupPrepared(preparedCodex);
-  });
-
-  it('leaves launch composition unchanged when storage has no explicit policy', async () => {
-    const claudeProvider = await storage.createProvider({ name: 'claude' });
-    const codexProvider = await storage.createProvider({ name: 'codex' });
-    const claudePolicy = await policyService.resolveAll(PROJECT_ID, claudeProvider.id);
-    const codexPolicy = await policyService.resolveAll(PROJECT_ID, codexProvider.id);
-
-    expect(claudePolicy).toEqual([]);
-    expect(codexPolicy).toEqual([]);
-    await expect(
-      new CodexPluginProfileMaterializerService(join(temporaryRoot, 'codex-private')).prepare({
-        projectId: PROJECT_ID,
-        projectName: 'Plugin Policy Project',
-        sessionId: SESSION_ID,
-        pluginPolicy: codexPolicy,
-        attemptNonce: ATTEMPT_NONCE,
-      }),
-    ).resolves.toBeNull();
-
-    const preparedClaude = await new ClaudeLaunchSettingsMaterializerService(
-      join(temporaryRoot, 'claude-private'),
-    ).prepare({
-      providerName: 'claude',
-      settingsJson: null,
-      profileOptionArgs: [],
-      providerEnv: null,
-      configEnv: null,
-      sessionId: SESSION_ID,
-      epoch: 'epoch-1',
       projectRootPath: temporaryRoot,
-      pluginPolicy: claudePolicy,
-    });
-    expect(preparedClaude.optionArgs).toEqual([]);
-
-    const unmanagedCodex = resolveLaunchConfig({
-      mode: 'new',
-      adapter: new CodexAdapter(),
-      profileOptions: '--model gpt-5',
-      modelOverride: null,
-      providerBinPath: '/usr/bin/codex',
-      providerEnv: null,
+      agentId: 'agent-plugin-policy-workflow',
+      agentModelOverride: null,
+      agentEffortOverride: null,
+      configModel: null,
+      configEffort: null,
       configEnv: null,
-      provider: {},
-    });
-    expect(unmanagedCodex.argv).toEqual([
-      '-c',
-      'check_for_update_on_startup=false',
-      '--model',
-      'gpt-5',
-    ]);
-  });
+      sessionId,
+      tmuxSessionName: `tmux-${provider.name}-${mode}`,
+      ...overrides,
+    };
+    const input: NewProviderRuntimePlanInput | RestoreProviderRuntimePlanInput =
+      mode === 'new'
+        ? { ...shared, mode }
+        : { ...shared, mode, providerSessionId: RESTORE_PROVIDER_SESSION_ID };
+
+    return preparationService.materialize(await preparationService.createPlan(input));
+  }
 });

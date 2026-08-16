@@ -1,5 +1,4 @@
 import { Injectable, Inject } from '@nestjs/common';
-import { z } from 'zod';
 import { STORAGE_SERVICE } from '../../storage/interfaces/storage.interface';
 import { createLogger } from '../../../common/logging/logger';
 import { MobileChatRpcService } from './mobile-chat-rpc.service';
@@ -8,10 +7,25 @@ import { ViewportStreamerService } from './viewport-streamer.service';
 import { E2eeTrustService } from '../../e2ee/services/e2ee-trust.service';
 import { ActiveSessionLookup } from '../../sessions/services/active-session-lookup.service';
 import { TerminalKeyInputFacade } from '../../terminal/services/terminal-key-input/terminal-key-input.facade';
+import { DEFAULT_PROJECT_WORKSPACE_ID } from '../../storage/db/schema';
 import { ValidationError, NotFoundError, ForbiddenError } from '../../../common/errors/error-types';
 import { type RpcCryptoContext } from './tunnel-rpc-crypto.service';
 import { toJsonRpcError } from './jsonrpc-error.util';
 import { toEpicDto, toStatusDto, toStatusMap } from './epic-dto.util';
+import {
+  getMobileRpcParamsSchema,
+  getMobileRpcResultSchema,
+  isMobileRpcMethod,
+  type MobileRpcMethod,
+} from './mobile-rpc-contract.generated';
+import {
+  serializeRpcTranscriptChunks,
+  serializeRpcTranscriptTail,
+} from '../../session-reader/services/transcript-serialization';
+import {
+  MobileRpcWorkspaceAccessService,
+  type MobileRpcWorkspaceAuthorization,
+} from './mobile-rpc-workspace-access.service';
 
 const logger = createLogger('TunnelHandler');
 
@@ -31,270 +45,25 @@ interface JsonRpcResponse {
 
 type EpicListType = 'active' | 'archived' | 'all';
 
-const METHOD_SCHEMAS: Record<string, z.ZodTypeAny> = {
-  'board.listProjects': z.object({}).passthrough(),
-  'board.listStatuses': z.object({ projectId: z.string().uuid() }).passthrough(),
-  'board.listParentEpics': z
-    .object({
-      projectId: z.string().uuid(),
-      type: z.enum(['active', 'archived', 'all']).optional(),
-      limit: z.number().int().positive().optional(),
-      offset: z.number().int().nonnegative().optional(),
-      limitPerParent: z.number().int().positive().optional(),
-    })
-    .passthrough(),
-  'board.listParentChildren': z
-    .object({
-      parentId: z.string().uuid(),
-      statusId: z.string().uuid().optional(),
-      limit: z.number().int().positive().optional(),
-      offset: z.number().int().nonnegative().optional(),
-    })
-    .passthrough(),
-  'board.listEpicsByStatus': z
-    .object({
-      statusId: z.string().uuid(),
-      projectId: z.string().uuid().optional(),
-      limit: z.number().int().positive().optional(),
-      offset: z.number().int().nonnegative().optional(),
-    })
-    .passthrough(),
-  'board.listParentEpicsByStatus': z
-    .object({
-      projectId: z.string().uuid(),
-      statusId: z.string().uuid(),
-      type: z.enum(['active', 'archived', 'all']).optional(),
-      limit: z.number().int().positive().optional(),
-      offset: z.number().int().nonnegative().optional(),
-    })
-    .passthrough(),
-  'board.getEpicDetail': z.object({ epicId: z.string().uuid() }).passthrough(),
-  // Board mutations + comments (tunnel schemas are STRICTER than REST):
-  'board.updateEpicAssignment': z
-    .object({
-      projectId: z.string().uuid(),
-      epicId: z.string().uuid(),
-      agentId: z.string().uuid().nullable(),
-      version: z.number().int().nonnegative(),
-    })
-    .passthrough(),
-  'board.listEpicComments': z
-    .object({
-      projectId: z.string().uuid(),
-      epicId: z.string().uuid(),
-      limit: z.number().int().min(1).max(100).optional(),
-      offset: z.number().int().min(0).optional(),
-    })
-    .passthrough(),
-  'board.addEpicComment': z
-    .object({
-      projectId: z.string().uuid(),
-      epicId: z.string().uuid(),
-      authorName: z.string().trim().min(1),
-      content: z.string().trim().min(1),
-    })
-    .passthrough(),
-  'board.deleteEpicComment': z
-    .object({
-      projectId: z.string().uuid(),
-      epicId: z.string().uuid(),
-      commentId: z.string().uuid(),
-    })
-    .passthrough(),
-  'chat.listAgents': z.object({ projectId: z.string().uuid() }).passthrough(),
-  'chat.listTeams': z.object({ projectId: z.string().uuid() }).passthrough(),
-  // teamId omitted/null → the "standalone" (unlinked) profile set; a uuid → that team's
-  // linked profiles (the handler asserts the team belongs to the project).
-  'chat.listProfiles': z
-    .object({ projectId: z.string().uuid(), teamId: z.string().uuid().nullish() })
-    .passthrough(),
-  'chat.listProfileConfigs': z
-    .object({ projectId: z.string().uuid(), profileId: z.string().uuid() })
-    .passthrough(),
-  'chat.createTeamAgent': z
-    .object({
-      projectId: z.string().uuid(),
-      teamId: z.string().uuid(),
-      name: z.string().trim().min(1),
-      providerConfigId: z.string().uuid(),
-      description: z.string().optional(),
-    })
-    .passthrough(),
-  'chat.createIndependentAgent': z
-    .object({
-      projectId: z.string().uuid(),
-      name: z.string().trim().min(1),
-      profileId: z.string().uuid(),
-      providerConfigId: z.string().uuid(),
-      description: z.string().optional(),
-    })
-    .passthrough(),
-  'chat.deleteAgent': z
-    .object({ projectId: z.string().uuid(), agentId: z.string().uuid() })
-    .passthrough(),
-  'chat.getTranscriptSummary': z
-    .object({ sessionId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.getTranscriptChunks': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      cursor: z.string().min(1).optional(),
-      limit: z.number().int().min(1).max(100).optional(),
-      direction: z.enum(['forward', 'backward']).optional(),
-    })
-    .passthrough(),
-  'chat.getTranscriptTail': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      since: z.string().min(1),
-    })
-    .passthrough(),
-  'chat.listCustomPrompts': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-    })
-    .strict(),
-  'chat.getCustomPrompt': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      promptId: z.string().uuid(),
-    })
-    .strict(),
-  'chat.sendMessage': z
-    .object({
-      agentId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      text: z.string().trim().min(1),
-      // Additive-optional idempotency key (mobile). UUID-shaped so it matches the
-      // ids chat.getPendingMessages validates; absent for older desktop callers.
-      clientMessageId: z.string().uuid().optional(),
-    })
-    .passthrough(),
-  // STRICT (no passthrough): a read that names ids to look up — reject any unknown/extra
-  // field at the schema layer (-32602) before dispatch. Bounded 1..50 UUIDs.
-  'chat.getPendingMessages': z
-    .object({
-      agentId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      clientMessageIds: z.array(z.string().uuid()).min(1).max(50),
-    })
-    .strict(),
-  'chat.launchAgent': z
-    .object({ agentId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.restartAgent': z
-    .object({ agentId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.restoreSession': z
-    .object({ sessionId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.terminateSession': z
-    .object({ sessionId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.getOperationStatus': z
-    .object({ operationId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.getAgentStatus': z
-    .object({ agentId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.listPendingAskQuestions': z
-    .object({ sessionId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.listSessions': z
-    .object({
-      agentId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      cursor: z.string().min(1).optional(),
-      limit: z.number().int().min(1).max(100).optional(),
-    })
-    .passthrough(),
-  'chat.deleteSessionRecord': z
-    .object({ sessionId: z.string().uuid(), projectId: z.string().uuid() })
-    .passthrough(),
-  'chat.renameSession': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      // nullable (NOT optional): null/empty clears the name; max enforced here too.
-      name: z.string().trim().max(120).nullable(),
-    })
-    .passthrough(),
-  // Live viewport lease control. `cols`/`rows` are advisory (forward-compat); v1 has no
-  // mobile resize (single shared pane). The screen frames ride the separate `viewport`
-  // tunnel lane, not this RPC channel.
-  'terminal.viewport.subscribe': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      cols: z.number().int().positive().optional(),
-      rows: z.number().int().positive().optional(),
-    })
-    .passthrough(),
-  'terminal.viewport.unsubscribe': z.object({ subscriptionId: z.string().min(1) }).passthrough(),
-  // Discrete mobile key input: one navigation/confirm key or one digit to answer a blocked
-  // interactive prompt (permission dialog, AskUserQuestion). STRICT (no passthrough) on
-  // purpose — unlike every other method above, this is an INPUT method, so defense-in-depth
-  // rejects any unknown/extra field at the schema layer (-32602) before dispatch. The
-  // whitelist enum is mirrored as a second, independent check inside the facade.
-  'terminal.sendKey': z
-    .object({
-      sessionId: z.string().uuid(),
-      projectId: z.string().uuid(),
-      key: z.enum([
-        'Up',
-        'Down',
-        'Left',
-        'Right',
-        'Enter',
-        'Escape',
-        'Tab',
-        '0',
-        '1',
-        '2',
-        '3',
-        '4',
-        '5',
-        '6',
-        '7',
-        '8',
-        '9',
-      ]),
-    })
-    .strict(),
-  // E2EE bootstrap (RE2E1): the mobile delivers its X25519 public key + kid. The service
-  // derives-and-verifies the kid + validates the key length, so the schema only asserts
-  // both fields are present non-empty strings.
-  'e2ee.adoptDeviceKey': z
-    .object({
-      kid: z.string().min(1),
-      publicKeyB64: z.string().min(1),
-      // Optional stable per-install id (M2 dedup). Opaque/bounded here; the device store is
-      // the single validator (canonical-UUID before store/evict). A non-canonical value does
-      // NOT reject the adopt — it just isn't stored (old-client append behavior).
-      installId: z.string().max(100).optional(),
-    })
-    .passthrough(),
-  // E2EE logout revoke (M3): the target device is taken from the VERIFIED sealed-sender
-  // context, NEVER from params — so params are accepted-but-ignored (permissive passthrough).
-  'e2ee.revokeDeviceKey': z.object({}).passthrough(),
+type MobileRpcHandler = (
+  params: Record<string, unknown>,
+  cryptoCtx?: RpcCryptoContext,
+  workspaceAuthorization?: MobileRpcWorkspaceAuthorization,
+) => Promise<unknown>;
+
+type MobileRpcHandlerMap = {
+  [M in MobileRpcMethod]: MobileRpcHandler;
 };
 
 @Injectable()
 export class TunnelHandlerService {
-  private readonly handlers: Record<
-    string,
-    (params: Record<string, unknown>, cryptoCtx?: RpcCryptoContext) => Promise<unknown>
-  >;
+  private readonly handlers: MobileRpcHandlerMap;
 
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     @Inject(STORAGE_SERVICE) private readonly storage: any,
     // Composition point for mobile chat.* RPCs. board.* reads stay on storage;
-    // chat.* methods (Tasks 2–5) and board.* mutations delegate to their seam
+    // chat.* methods and board.* mutations delegate to their seam
     // services (mobileChat.<method>(p) / mobileBoard.<method>(p)).
     private readonly mobileChat: MobileChatRpcService,
     // Board mutations + comments go through EpicsService (events/invariants),
@@ -303,9 +72,9 @@ export class TunnelHandlerService {
     // Live viewport lease control (terminal.viewport.subscribe/unsubscribe). The streamer
     // owns subscription lifecycle + source-side auth and emits `type:'viewport'` frames.
     private readonly viewportStreamer: ViewportStreamerService,
-    // E2EE bootstrap (RE2E1): TOFU-adopt the mobile device's relayed public key so the PC
-    // can decrypt that device's RPC. Delivered plaintext (public key only); the adopt
-    // derives-and-verifies the kid before storing (no unverified ingestion).
+    // E2EE bootstrap: TOFU-adopt the mobile device's relayed public key so the PC can decrypt
+    // its RPC. The plaintext lane may also carry non-secret display/grouping metadata; none
+    // of those fields are a trust signal. The adopt derives and verifies the kid before store.
     private readonly e2eeTrust: E2eeTrustService,
     // Discrete mobile key input (terminal.sendKey). INLINE handler below (no per-domain
     // RpcService for a single method): source-side project scoping via ActiveSessionLookup,
@@ -313,9 +82,11 @@ export class TunnelHandlerService {
     // is NEVER injected here — the facade is the only terminal surface CloudTunnel touches.
     private readonly terminalKeyInput: TerminalKeyInputFacade,
     private readonly activeSessions: ActiveSessionLookup,
+    private readonly workspaceAccess?: MobileRpcWorkspaceAccessService,
   ) {
     this.handlers = {
-      'board.listProjects': (p) => this.listProjects(p),
+      'board.listWorkspaces': (_p, _cryptoCtx, authorization) => this.listWorkspaces(authorization),
+      'board.listProjects': (p, _cryptoCtx, authorization) => this.listProjects(p, authorization),
       'board.listStatuses': (p) => this.listStatuses(p),
       'board.listParentEpics': (p) => this.listParentEpics(p),
       'board.listParentChildren': (p) => this.listParentChildren(p),
@@ -336,11 +107,13 @@ export class TunnelHandlerService {
       'chat.createIndependentAgent': (p) => this.mobileChat.createIndependentAgent(p),
       'chat.deleteAgent': (p) => this.mobileChat.deleteAgent(p),
       'chat.getTranscriptSummary': (p) => this.mobileChat.getTranscriptSummary(p),
-      'chat.getTranscriptChunks': (p) => this.mobileChat.getTranscriptChunks(p),
-      'chat.getTranscriptTail': (p) => this.mobileChat.getTranscriptTail(p),
+      'chat.getTranscriptChunks': async (p) =>
+        serializeRpcTranscriptChunks(await this.mobileChat.getTranscriptChunks(p)),
+      'chat.getTranscriptTail': async (p) =>
+        serializeRpcTranscriptTail(await this.mobileChat.getTranscriptTail(p)),
       'chat.listCustomPrompts': (p) => this.mobileChat.listCustomPrompts(p),
       'chat.getCustomPrompt': (p) => this.mobileChat.getCustomPrompt(p),
-      'chat.sendMessage': (p) => this.mobileChat.sendMessage(p),
+      'chat.sendMessage': (p, cryptoCtx) => this.mobileChat.sendMessage(p, cryptoCtx),
       'chat.getPendingMessages': (p) => this.mobileChat.getPendingMessages(p),
       'chat.launchAgent': (p) => this.mobileChat.launchAgent(p),
       'chat.restartAgent': (p) => this.mobileChat.restartAgent(p),
@@ -353,58 +126,81 @@ export class TunnelHandlerService {
       'chat.deleteSessionRecord': (p) => this.mobileChat.deleteSessionRecord(p),
       'chat.renameSession': (p) => this.mobileChat.renameSession(p),
       // Live viewport lease control:
-      'terminal.viewport.subscribe': (p) => this.viewportStreamer.subscribe(p),
-      'terminal.viewport.unsubscribe': (p) => Promise.resolve(this.viewportStreamer.unsubscribe(p)),
+      'terminal.viewport.subscribe': (p, cryptoCtx) =>
+        this.viewportStreamer.subscribe(p, cryptoCtx),
+      'terminal.viewport.unsubscribe': (p, cryptoCtx) =>
+        Promise.resolve(this.viewportStreamer.unsubscribe(p, cryptoCtx)),
       // Discrete mobile key input. INLINE handler (no per-domain RpcService for a single
       // method — mirrors the revokeDeviceKey inline pattern): project-scope the session,
       // then delegate the tmux send to the narrow facade.
       'terminal.sendKey': (p) => this.sendTerminalKey(p),
       // E2EE bootstrap (RE2E1): adopt the mobile device's public key (email-login half of
-      // the bidirectional exchange). Plaintext by design — see RPC_BOOTSTRAP_METHODS.
+      // the bidirectional exchange). Plaintext by design; the generated contract owns
+      // that crypto-mode decision.
       'e2ee.adoptDeviceKey': (p) =>
         Promise.resolve(
           this.e2eeTrust.adoptPeerKeyTofu(
             {
               kid: p['kid'] as string,
               publicKeyB64: p['publicKeyB64'] as string,
+              ...(p['label'] !== undefined ? { label: p['label'] as string } : {}),
             },
             // installId supersede metadata — carried beside the trust record, never a trust
             // signal; the trust/store layer validates + applies it (TOFU: evictVerified=false).
             p['installId'] as string | undefined,
           ),
         ),
-      // E2EE logout revoke (M3): sealed-only. Identity comes from the trusted crypto context
-      // (verified envelope kid), NOT params — the crypto seam rejects a plaintext attempt.
+      // Dormant paired-device revoke: sealed-only. Identity comes from the trusted crypto
+      // context (verified envelope kid), not params; ordinary logout never dispatches it.
       'e2ee.revokeDeviceKey': (_p, cryptoCtx) => Promise.resolve(this.revokeDeviceKey(cryptoCtx)),
-    };
+    } satisfies MobileRpcHandlerMap;
   }
 
   async handle(req: JsonRpcRequest, cryptoCtx?: RpcCryptoContext): Promise<JsonRpcResponse> {
-    const handler = this.handlers[req.method];
-    if (!handler) {
+    if (!isMobileRpcMethod(req.method)) {
       logger.warn({ method: req.method, id: req.id }, 'Unknown RPC method');
       return { jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'Method not found' } };
     }
 
-    const schema = METHOD_SCHEMAS[req.method];
-    if (schema) {
-      const parseResult = schema.safeParse(req.params ?? {});
-      if (!parseResult.success) {
-        logger.warn(
-          { method: req.method, id: req.id, errors: parseResult.error.format() },
-          'Invalid params',
+    const method = req.method;
+    const params = req.params ?? {};
+    const paramsResult = getMobileRpcParamsSchema(method).safeParse(params);
+    if (!paramsResult.success) {
+      logger.warn({ method, id: req.id, errors: paramsResult.error.format() }, 'Invalid params');
+      return {
+        jsonrpc: '2.0',
+        id: req.id,
+        error: { code: -32602, message: 'Invalid params', data: paramsResult.error.format() },
+      };
+    }
+
+    try {
+      const validatedParams = paramsResult.data as Record<string, unknown>;
+      if (!this.workspaceAccess && process.env.NODE_ENV !== 'test') {
+        throw new Error('Mobile RPC workspace authorization is unavailable');
+      }
+      const workspaceAuthorization = this.workspaceAccess
+        ? await this.workspaceAccess.authorize(method, validatedParams, cryptoCtx)
+        : { allowedWorkspaceIds: null };
+      const wireResult = await this.handlers[method](params, cryptoCtx, workspaceAuthorization);
+      const resultValidation = getMobileRpcResultSchema(method).safeParse(wireResult);
+      if (!resultValidation.success) {
+        logger.error(
+          {
+            method,
+            schemaPaths: resultValidation.error.issues.map((issue) =>
+              issue.path.length === 0 ? '<root>' : issue.path.join('.'),
+            ),
+          },
+          'RPC handler returned an invalid result',
         );
         return {
           jsonrpc: '2.0',
           id: req.id,
-          error: { code: -32602, message: 'Invalid params', data: parseResult.error.format() },
+          error: { code: -32603, message: 'Internal error' },
         };
       }
-    }
-
-    try {
-      const result = await handler(req.params ?? {}, cryptoCtx);
-      return { jsonrpc: '2.0', id: req.id, result };
+      return { jsonrpc: '2.0', id: req.id, result: wireResult };
     } catch (err) {
       logger.error({ err, method: req.method, id: req.id }, 'RPC handler error');
       return { jsonrpc: '2.0', id: req.id, error: toJsonRpcError(err) };
@@ -412,7 +208,7 @@ export class TunnelHandlerService {
   }
 
   /**
-   * E2EE logout revoke (M3 `paired-device-dedup`): remove EXACTLY the sender's own device key.
+   * Sealed paired-device revoke: remove exactly the sender's own device key.
    * The target is `cryptoCtx.senderKid` — the VERIFIED envelope kid set by the crypto layer
    * (decryption proved the sender holds that key). ALL client params are ignored so a sealed
    * client can never name a DIFFERENT device (force-unpair). An absent `cryptoCtx` (only
@@ -421,9 +217,9 @@ export class TunnelHandlerService {
    *
    * Delegates to `E2eeTrustService.revokeDevice` → `E2eeDeviceStoreService.revoke()`.
    *
-   * Replay convergence: a replayed revoke targets a kid that died at the phone's logout →
-   * `revoke()` returns `false` → clean no-op. The kid cannot be re-adopted (its private key
-   * was destroyed on the phone). Formal replay protection remains backlog `17c7d7bb`.
+   * Ordinary logout never invokes this handler and preserves the kid. A replay is a no-op while
+   * the row is absent, but could remove the same persistent kid after re-adoption; formal replay
+   * protection remains backlog `17c7d7bb`.
    */
   private revokeDeviceKey(cryptoCtx?: RpcCryptoContext): { kid: string; removed: boolean } {
     if (!cryptoCtx?.senderKid) {
@@ -467,8 +263,33 @@ export class TunnelHandlerService {
     }
   }
 
-  private async listProjects(params: Record<string, unknown>): Promise<unknown[]> {
-    const result = await this.storage.listProjects(params);
+  private async listWorkspaces(
+    authorization?: MobileRpcWorkspaceAuthorization,
+  ): Promise<unknown[]> {
+    const workspaces = (await this.storage.listProjectWorkspaces()) as Array<
+      Record<string, unknown>
+    >;
+    const allowed = authorization?.allowedWorkspaceIds;
+    return workspaces
+      .filter((workspace) => !allowed || allowed.has(workspace.id as string))
+      .map((workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        isDefault: workspace.isDefault,
+        position: workspace.position,
+        projectCount: workspace.projectCount,
+      }));
+  }
+
+  private async listProjects(
+    params: Record<string, unknown>,
+    authorization?: MobileRpcWorkspaceAuthorization,
+  ): Promise<unknown[]> {
+    const workspaceId =
+      authorization?.projectListWorkspaceId ??
+      (params['workspaceId'] as string | undefined) ??
+      DEFAULT_PROJECT_WORKSPACE_ID;
+    const result = await this.storage.listProjects({ ...params, workspaceId });
     return this.itemsOf(result).map((project) => ({
       id: project.id,
       name: project.name,

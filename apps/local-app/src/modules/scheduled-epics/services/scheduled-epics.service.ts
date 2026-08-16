@@ -91,18 +91,22 @@ export class ScheduledEpicsService {
     const current = await this.storage.getScheduledEpic(id);
 
     const configUpdate: UpdateScheduledEpic = { ...parsed };
-    let schedule = await this.storage.updateScheduledEpic(id, configUpdate, configVersion);
-
     const cronOrTzChanged = parsed.cronExpression !== undefined || parsed.timezone !== undefined;
-
-    if (cronOrTzChanged) {
-      const cronExpression = parsed.cronExpression ?? current.cronExpression;
-      const timezone = parsed.timezone ?? current.timezone;
-      const nextRunAt = this.computeNextRunAt(cronExpression, timezone);
-      schedule = await this.storage.updateScheduledEpicRuntimeState(id, {
-        nextRunAt: nextRunAt?.toISOString() ?? null,
-      });
-    }
+    const derivedRuntimeState = cronOrTzChanged
+      ? {
+          nextRunAt:
+            this.computeNextRunAt(
+              parsed.cronExpression ?? current.cronExpression,
+              parsed.timezone ?? current.timezone,
+            )?.toISOString() ?? null,
+        }
+      : undefined;
+    const schedule = await this.storage.updateScheduledEpic(
+      id,
+      configUpdate,
+      configVersion,
+      derivedRuntimeState ? { derivedRuntimeState } : undefined,
+    );
 
     logger.info({ scheduleId: id }, 'Scheduled epic updated');
     this.notifyRunner();
@@ -118,14 +122,21 @@ export class ScheduledEpicsService {
   }
 
   async toggle(id: string, enabled: boolean, configVersion: number): Promise<ScheduledEpic> {
-    let schedule = await this.storage.updateScheduledEpic(id, { enabled }, configVersion);
-
-    if (enabled && !schedule.nextRunAt) {
-      const nextRunAt = this.computeNextRunAt(schedule.cronExpression, schedule.timezone);
-      schedule = await this.storage.updateScheduledEpicRuntimeState(id, {
-        nextRunAt: nextRunAt?.toISOString() ?? null,
-      });
-    }
+    const current = await this.storage.getScheduledEpic(id);
+    const derivedRuntimeState =
+      enabled && !current.nextRunAt
+        ? {
+            nextRunAt:
+              this.computeNextRunAt(current.cronExpression, current.timezone)?.toISOString() ??
+              null,
+          }
+        : undefined;
+    const schedule = await this.storage.updateScheduledEpic(
+      id,
+      { enabled },
+      configVersion,
+      derivedRuntimeState ? { derivedRuntimeState } : undefined,
+    );
 
     logger.info({ scheduleId: id, enabled }, 'Scheduled epic toggled');
     this.notifyRunner();

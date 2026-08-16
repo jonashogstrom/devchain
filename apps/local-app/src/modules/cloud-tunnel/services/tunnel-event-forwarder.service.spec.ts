@@ -11,6 +11,7 @@ import type {
   PushChannelMode,
   TunnelPushCryptoService,
 } from './tunnel-push-crypto.service';
+import type { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -29,6 +30,7 @@ describe('TunnelEventForwarderService', () => {
   let activeSessions: { getSessionProjectScope: jest.Mock };
   let tunnelClient: { canPush: jest.Mock; sendPush: jest.Mock; getInstanceId: jest.Mock };
   let pushCrypto: { resolvePushChannel: jest.Mock };
+  let workspaceMode: { getSnapshot: jest.Mock };
   let channelMode: PushChannelMode;
   let sealMock: jest.Mock;
   let service: TunnelEventForwarderService;
@@ -62,12 +64,18 @@ describe('TunnelEventForwarderService', () => {
               },
       ),
     };
+    workspaceMode = {
+      getSnapshot: jest
+        .fn()
+        .mockResolvedValue({ multiWorkspaceMode: false, failClosedPending: false }),
+    };
 
     service = new TunnelEventForwarderService(
       emitter,
       activeSessions as unknown as ActiveSessionLookup,
       tunnelClient as unknown as TunnelClientService,
       pushCrypto as unknown as TunnelPushCryptoService,
+      workspaceMode as unknown as WorkspaceModeCoordinatorService,
     );
     service.onModuleInit();
   });
@@ -87,6 +95,45 @@ describe('TunnelEventForwarderService', () => {
     for (const event of TUNNEL_FORWARDED_EVENTS) {
       expect(emitter.listeners(event)).toHaveLength(1);
     }
+  });
+
+  it.each([
+    { multiWorkspaceMode: true, failClosedPending: false },
+    { multiWorkspaceMode: false, failClosedPending: true },
+  ])(
+    'withholds every project-bearing tunnel event while workspace delivery is restricted',
+    async (mode) => {
+      workspaceMode.getSnapshot.mockResolvedValue(mode);
+      channelMode = 'encrypted';
+
+      emitter.emit('session.transcript.updated', { sessionId: 's1' });
+      emitter.emit('agent.created', { projectId: 'p1' });
+      await flush();
+
+      expect(activeSessions.getSessionProjectScope).not.toHaveBeenCalled();
+      expect(pushCrypto.resolvePushChannel).not.toHaveBeenCalled();
+      expect(tunnelClient.sendPush).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails closed when live workspace mode cannot be resolved', async () => {
+    workspaceMode.getSnapshot.mockRejectedValue(new Error('storage unavailable'));
+    emitter.emit('session.presence.changed', { agentId: 'a1' });
+    await flush();
+    expect(tunnelClient.sendPush).not.toHaveBeenCalled();
+  });
+
+  it('rechecks mode after async projection work so a concurrent 1→2 transition cannot leak', async () => {
+    workspaceMode.getSnapshot
+      .mockResolvedValueOnce({ multiWorkspaceMode: false, failClosedPending: false })
+      .mockResolvedValue({ multiWorkspaceMode: false, failClosedPending: true });
+    channelMode = 'encrypted';
+
+    emitter.emit('session.transcript.updated', { sessionId: 's1' });
+    await flush();
+
+    expect(sealMock).toHaveBeenCalledTimes(1);
+    expect(tunnelClient.sendPush).not.toHaveBeenCalled();
   });
 
   it('forwards session.transcript.updated as a {type:push,v:2} frame SEALED using the registry projection', async () => {

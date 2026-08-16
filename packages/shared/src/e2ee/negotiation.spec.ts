@@ -5,6 +5,9 @@ import {
   isCapable,
   negotiateE2ee,
   buildE2eeCapability,
+  buildWorkspaceSupportCapability,
+  isWorkspaceSupportCapability,
+  WORKSPACE_SUPPORT_VERSION,
   type E2eeCapability,
 } from './negotiation';
 import { E2EE_ENVELOPE_VERSION } from './envelope';
@@ -25,6 +28,21 @@ const incapable = (over: Partial<E2eeCapability> = {}): E2eeCapability => ({
   e2eeSupported: false,
   e2eeRequired: false,
   ...over,
+});
+
+describe('workspace support capability', () => {
+  it('builds and accepts the current version', () => {
+    expect(buildWorkspaceSupportCapability()).toEqual({ v: WORKSPACE_SUPPORT_VERSION });
+    expect(isWorkspaceSupportCapability({ v: WORKSPACE_SUPPORT_VERSION })).toBe(true);
+  });
+
+  it('treats absence, malformed values, and unknown versions as unsupported', () => {
+    expect(isWorkspaceSupportCapability(undefined)).toBe(false);
+    expect(isWorkspaceSupportCapability({})).toBe(false);
+    expect(isWorkspaceSupportCapability({ v: 0 })).toBe(false);
+    expect(isWorkspaceSupportCapability({ v: WORKSPACE_SUPPORT_VERSION + 1 })).toBe(false);
+    expect(isWorkspaceSupportCapability({ v: 1.5 })).toBe(false);
+  });
 });
 
 describe('buildE2eeCapability', () => {

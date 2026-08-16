@@ -7,7 +7,7 @@ import {
   useWizardConfigHandlers,
   type WizardConfigState,
 } from './useWizardConfig';
-import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-contracts';
 
 function makePreview(over: Partial<SetupPreviewResponse> = {}): SetupPreviewResponse {
   return {

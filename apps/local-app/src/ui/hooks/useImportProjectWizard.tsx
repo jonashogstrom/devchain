@@ -1,21 +1,23 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import {
-  fetchSetupPreview,
-  fetchUpgradeSetupPreview,
   formatProjectPreMutationFailure,
   isProjectPreMutationFailure,
-  type ImportDryRunResponse,
-  type ImportDryRunSuccess,
-  type ImportProjectResponse,
-  type ImportProjectSuccess,
-  type ProjectPreMutationFailure,
-  type SetupPreviewRequest,
-  type SetupPreviewResponse,
-  type UpgradeProjectFailure,
-  type UpgradeProjectResponse,
-  type UpgradeProjectSuccess,
-} from '@/ui/pages/projects/lib/project-api';
+} from '@/ui/pages/projects/lib/project-failures';
+import type {
+  ImportDryRunResponse,
+  ImportDryRunSuccess,
+  ImportProjectSuccess,
+  ProjectPreMutationFailure,
+  SetupPreviewRequest,
+  SetupPreviewResponse,
+  UpgradeProjectFailure,
+  UpgradeProjectResponse,
+  UpgradeProjectSuccess,
+} from '@/ui/pages/projects/lib/project-contracts';
+import type { ProjectsPageApi } from '@/ui/pages/projects/lib/projects-page-api';
+import { projectsHttpApi } from '@/ui/pages/projects/lib/projects-http-api';
+import { projectsQueryKeys } from '@/ui/pages/projects/lib/project-query-keys';
 import {
   useProjectSetupWizard,
   type ProjectSetupWizardController,
@@ -101,6 +103,7 @@ interface UseConfiguredReplaceWizardArgs<
   onCompleted: (result: TSuccess | UpgradeProjectFailure) => void;
   onClosed?: () => void;
   toast: ToastFn;
+  api: ProjectsPageApi;
 }
 
 function toReview(dry: ImportDryRunResult | null): ImportDryRunReview | null {
@@ -114,24 +117,24 @@ function toReview(dry: ImportDryRunResult | null): ImportDryRunReview | null {
   };
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(error.message || error.error || `Request failed with status ${res.status}`);
-  }
-  return res.json();
-}
-
 function withStatusMappings(
   body: Record<string, unknown>,
   statusMappings: Record<string, string>,
 ): Record<string, unknown> {
   return Object.keys(statusMappings).length > 0 ? { ...body, statusMappings } : body;
+}
+
+function buildConfiguredReplaceBody(
+  preview: SetupPreviewResponse,
+  state: ReplaceWizardState,
+): Record<string, unknown> {
+  return withStatusMappings(
+    {
+      ...(preview.payload as Record<string, unknown>),
+      ...buildConfigEmission(preview, state),
+    },
+    state.statusMappings,
+  );
 }
 
 function formatPromptSummary(promptTransfer?: PromptTransferCounts): string {
@@ -146,6 +149,7 @@ function useConfiguredReplaceWizard<
   onCompleted,
   onClosed,
   toast,
+  api,
 }: UseConfiguredReplaceWizardArgs<TTarget, TSuccess>): ConfiguredReplaceWizardResult<TTarget> {
   const queryClient = useQueryClient();
   const [isOpen, setIsOpen] = useState(false);
@@ -214,13 +218,7 @@ function useConfiguredReplaceWizard<
 
   const dryRunBody = useCallback(() => {
     if (!preview || !state) return null;
-    return withStatusMappings(
-      {
-        ...(preview.payload as Record<string, unknown>),
-        ...buildConfigEmission(preview, state),
-      },
-      state.statusMappings,
-    );
+    return buildConfiguredReplaceBody(preview, state);
   }, [preview, state]);
 
   const runDryRun = useCallback(async () => {
@@ -229,10 +227,7 @@ function useConfiguredReplaceWizard<
     setIsDryRunPending(true);
     setPreflightFailure(null);
     try {
-      const result = await postJson<ImportDryRunResponse>(
-        `/api/projects/${encodeURIComponent(target.id)}/import?dryRun=true`,
-        body,
-      );
+      const result: ImportDryRunResponse = await api.runImportDryRun(target.id, body);
       if (result.dryRun !== true || !result.counts) {
         throw new Error('Precheck returned an invalid result');
       }
@@ -260,7 +255,7 @@ function useConfiguredReplaceWizard<
     } finally {
       setIsDryRunPending(false);
     }
-  }, [adapter.name, dryRunBody, target, toast]);
+  }, [adapter.name, api, dryRunBody, target, toast]);
 
   const submit = useCallback(async () => {
     if (!target || !preview || !state) return;
@@ -410,37 +405,34 @@ function useConfiguredReplaceWizard<
   };
 }
 
-const importAdapter: ReplaceFlowAdapter<ImportWizardTarget, ImportProjectSuccess> = {
-  name: 'Import',
-  previewQueryKey: (_target, request) => ['setup-preview', request],
-  canLoadPreview: (request) => request !== null,
-  loadPreview: (_target, request) => fetchSetupPreview(request!),
-  buildCommitBody: (_target, preview, state) =>
-    withStatusMappings(
-      {
-        ...(preview.payload as Record<string, unknown>),
-        ...buildConfigEmission(preview, state),
-      },
-      state.statusMappings,
-    ),
-  commit: (target, body) =>
-    postJson<ImportProjectResponse>(`/api/projects/${encodeURIComponent(target.id)}/import`, body),
-  isTerminalFailure: () => false,
-  successDescription: (_target, result) => {
-    return `${result.message || 'Project replaced.'}${formatPromptSummary(result.promptTransfer)}`;
-  },
-  invalidateOnClose: [],
-  invalidateOnSuccess: [['projects']],
-};
+function importAdapter(
+  api: ProjectsPageApi,
+): ReplaceFlowAdapter<ImportWizardTarget, ImportProjectSuccess> {
+  return {
+    name: 'Import',
+    previewQueryKey: (_target, request) => projectsQueryKeys.setupPreview(request),
+    canLoadPreview: (request) => request !== null,
+    loadPreview: (_target, request) => api.loadSetupPreview(request!),
+    buildCommitBody: (_target, preview, state) => buildConfiguredReplaceBody(preview, state),
+    commit: (target, body) => api.commitImport(target.id, body),
+    isTerminalFailure: () => false,
+    successDescription: (_target, result) => {
+      return `${result.message || 'Project replaced.'}${formatPromptSummary(result.promptTransfer)}`;
+    },
+    invalidateOnClose: [],
+    invalidateOnSuccess: [projectsQueryKeys.all()],
+  };
+}
 
 function upgradeAdapter(
   actionName: 'Upgrade' | 'Update',
+  api: ProjectsPageApi,
 ): ReplaceFlowAdapter<UpgradeWizardTarget, UpgradeProjectSuccess> {
   return {
     name: actionName,
-    previewQueryKey: (target) => ['upgrade-template-preview', target.id, target.targetVersion],
+    previewQueryKey: (target) => projectsQueryKeys.upgradePreview(target.id, target.targetVersion),
     canLoadPreview: () => true,
-    loadPreview: (target) => fetchUpgradeSetupPreview(target.id, target.targetVersion),
+    loadPreview: (target) => api.loadUpgradePreview(target.id, target.targetVersion),
     buildCommitBody: (target, preview, state) =>
       withStatusMappings(
         {
@@ -449,23 +441,20 @@ function upgradeAdapter(
         },
         state.statusMappings,
       ),
-    commit: (target, body) =>
-      postJson<UpgradeProjectResponse>(
-        `/api/projects/${encodeURIComponent(target.id)}/upgrade-template`,
-        body,
-      ),
+    commit: (target, body) => api.commitUpgrade(target.id, body),
     isTerminalFailure: (failure) => failure.mutationStarted !== false,
     successDescription: (target, result) => {
       return `${target.name} ${actionName === 'Upgrade' ? 'upgraded' : 'updated'} to v${result.newVersion}.${formatPromptSummary(result.promptTransfer)}`;
     },
-    invalidateOnClose: [['projects'], ['templates-for-upgrade']],
-    invalidateOnSuccess: [['projects'], ['templates-for-upgrade']],
+    invalidateOnClose: [projectsQueryKeys.all(), projectsQueryKeys.templatesForUpgrade()],
+    invalidateOnSuccess: [projectsQueryKeys.all(), projectsQueryKeys.templatesForUpgrade()],
   };
 }
 
 interface UseImportProjectWizardArgs {
   onImported: (result: ImportResult) => void;
   toast: ToastFn;
+  api?: ProjectsPageApi;
 }
 
 export interface ImportProjectWizardResult
@@ -477,13 +466,16 @@ export interface ImportProjectWizardResult
 export function useImportProjectWizard({
   onImported,
   toast,
+  api = projectsHttpApi,
 }: UseImportProjectWizardArgs): ImportProjectWizardResult {
+  const adapter = useMemo(() => importAdapter(api), [api]);
   const wizard = useConfiguredReplaceWizard({
-    adapter: importAdapter,
+    adapter,
     onCompleted: (result) => {
       if (result.success) onImported(result);
     },
     toast,
+    api,
   });
   return {
     ...wizard,
@@ -497,6 +489,7 @@ interface UseUpgradeProjectWizardArgs {
   onFinished: (result: UpgradeProjectResponse) => void;
   onClosed: () => void;
   toast: ToastFn;
+  api?: ProjectsPageApi;
 }
 
 export interface UpgradeProjectWizardResult
@@ -510,9 +503,16 @@ export function useUpgradeProjectWizard({
   onFinished,
   onClosed,
   toast,
+  api = projectsHttpApi,
 }: UseUpgradeProjectWizardArgs): UpgradeProjectWizardResult {
-  const adapter = useMemo(() => upgradeAdapter(actionName), [actionName]);
-  const wizard = useConfiguredReplaceWizard({ adapter, onCompleted: onFinished, onClosed, toast });
+  const adapter = useMemo(() => upgradeAdapter(actionName, api), [actionName, api]);
+  const wizard = useConfiguredReplaceWizard({
+    adapter,
+    onCompleted: onFinished,
+    onClosed,
+    toast,
+    api,
+  });
   return {
     ...wizard,
     openUpgradeWizard: wizard.openWizard,

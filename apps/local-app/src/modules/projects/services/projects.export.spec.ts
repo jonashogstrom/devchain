@@ -646,6 +646,8 @@ describe('ProjectsService', () => {
       expect(result._manifest.slug).toBe('my-test-project'); // slugified from name
       expect(result._manifest.version).toBe('1.0.0'); // default when no template metadata
       expect(result._manifest.publishedAt).toBeDefined();
+      expect(result).not.toHaveProperty('workspaceId');
+      expect(result._manifest).not.toHaveProperty('workspaceId');
     });
 
     it('should use template metadata when available in _manifest', async () => {

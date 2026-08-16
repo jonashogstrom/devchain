@@ -604,10 +604,6 @@ export class SkillsService {
     });
   }
 
-  getReservedSourceNames(): string[] {
-    return this.skillSourceRegistry.getBuiltInSourceNames();
-  }
-
   async setSourceEnabled(
     sourceName: string,
     enabled: boolean,

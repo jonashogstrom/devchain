@@ -6,15 +6,21 @@ import type {
   Tag,
   UpdateEpicRecord,
 } from '../../models/domain.models';
-import { NotFoundError, OptimisticLockError } from '../../../../common/errors/error-types';
+import { and as andSync, eq as eqSync, isNull as isNullSync, or as orSync } from 'drizzle-orm';
+import { NotFoundError } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
+import {
+  epics as epicsTable,
+  recordTags as recordTagsTable,
+  records as recordsTable,
+  tags as tagsTable,
+} from '../../db/schema';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('RecordStorageDelegate');
 
 export interface RecordStorageDelegateDependencies {
-  createTag: (data: CreateTag) => Promise<Tag>;
-  getRecord: (id: string) => Promise<EpicRecord>;
+  createTag: (data: CreateTag) => Tag;
 }
 
 export class RecordStorageDelegate extends BaseStorageDelegate {
@@ -89,23 +95,30 @@ export class RecordStorageDelegate extends BaseStorageDelegate {
   }
 
   async getRecord(id: string): Promise<EpicRecord> {
-    const { records, recordTags, tags } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    return this.getRecordSync(id);
+  }
 
-    const result = await this.db.select().from(records).where(eq(records.id, id)).limit(1);
-    if (!result[0]) {
+  private getRecordSync(id: string): EpicRecord {
+    const row = this.db
+      .select()
+      .from(recordsTable)
+      .where(eqSync(recordsTable.id, id))
+      .limit(1)
+      .get();
+    if (!row) {
       throw new NotFoundError('Record', id);
     }
 
-    const recordTagsResult = await this.db
-      .select({ tag: tags })
-      .from(recordTags)
-      .innerJoin(tags, eq(recordTags.tagId, tags.id))
-      .where(eq(recordTags.recordId, id));
+    const recordTagsResult = this.db
+      .select({ tag: tagsTable })
+      .from(recordTagsTable)
+      .innerJoin(tagsTable, eqSync(recordTagsTable.tagId, tagsTable.id))
+      .where(eqSync(recordTagsTable.recordId, id))
+      .all();
 
     return {
-      ...result[0],
-      data: result[0].data as Record<string, unknown>,
+      ...row,
+      data: row.data as Record<string, unknown>,
       tags: recordTagsResult.map((rt) => rt.tag.name),
     } as EpicRecord;
   }
@@ -123,9 +136,7 @@ export class RecordStorageDelegate extends BaseStorageDelegate {
       .limit(limit)
       .offset(offset);
 
-    const itemsWithTags = await Promise.all(
-      items.map((item) => this.dependencies.getRecord(item.id)),
-    );
+    const itemsWithTags = items.map((item) => this.getRecordSync(item.id));
 
     return {
       items: itemsWithTags,
@@ -140,76 +151,82 @@ export class RecordStorageDelegate extends BaseStorageDelegate {
     data: UpdateEpicRecord,
     expectedVersion: number,
   ): Promise<EpicRecord> {
-    const { records, recordTags, tags } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
-
-    const current = await this.dependencies.getRecord(id);
-    if (current.version !== expectedVersion) {
-      throw new OptimisticLockError('Record', id, {
-        expectedVersion,
-        actualVersion: current.version,
-      });
-    }
-
-    const updateData: Record<string, unknown> = {};
-    if (data.data !== undefined) {
-      updateData.data = JSON.stringify(data.data);
-    }
-    if (data.type !== undefined) {
-      updateData.type = data.type;
-    }
-
-    await this.db
-      .update(records)
-      .set({ ...updateData, version: expectedVersion + 1, updatedAt: now })
-      .where(eq(records.id, id));
-
-    // Update tags if provided
-    if (data.tags !== undefined) {
-      // Delete existing tags
-      await this.db.delete(recordTags).where(eq(recordTags.recordId, id));
-
-      // Add new tags
-      if (data.tags.length > 0) {
-        // Get the epic to find its projectId
-        const { epics } = await import('../../db/schema');
-        const epic = await this.db
-          .select()
-          .from(epics)
-          .where(eq(epics.id, current.epicId))
-          .limit(1);
-        const projectId = epic[0]?.projectId || null;
-
-        for (const tagName of data.tags) {
-          const { and, or, isNull } = await import('drizzle-orm');
-          let tag = await this.db
-            .select()
-            .from(tags)
-            .where(
-              and(
-                eq(tags.name, tagName),
-                or(eq(tags.projectId, projectId || ''), isNull(tags.projectId)),
-              ),
-            )
-            .limit(1);
-
-          if (!tag[0]) {
-            const newTag = await this.dependencies.createTag({ projectId, name: tagName });
-            tag = [newTag];
-          }
-
-          await this.db.insert(recordTags).values({
-            recordId: id,
-            tagId: tag[0].id,
-            createdAt: now,
-          });
+    const result = await this.versionedMutationExecutor.execute({
+      resource: 'Record',
+      id,
+      expectedVersion,
+      loadCurrent: () => this.getRecordSync(id),
+      versionOf: (current) => current.version,
+      prepare: () => {
+        const updateData: Record<string, unknown> = {};
+        if (data.data !== undefined) updateData.data = JSON.stringify(data.data);
+        if (data.type !== undefined) updateData.type = data.type;
+        return {
+          kind: 'write',
+          state: { updateData, requestedTags: data.tags, now: new Date().toISOString() },
+        };
+      },
+      write: (context, state) =>
+        this.db
+          .update(recordsTable)
+          .set({
+            ...state.updateData,
+            version: context.nextVersion,
+            updatedAt: state.now,
+          })
+          .where(
+            andSync(
+              eqSync(recordsTable.id, id),
+              eqSync(recordsTable.version, context.actualVersion),
+            ),
+          )
+          .run().changes,
+      afterWrite: ({ current }, state) => {
+        if (state.requestedTags !== undefined) {
+          this.setRecordTagsSync(id, state.requestedTags, current.epicId, state.now);
         }
-      }
-    }
+      },
+      loadResult: () => this.getRecordSync(id),
+    });
 
     logger.info({ recordId: id }, 'Updated record');
-    return this.dependencies.getRecord(id);
+    return result;
+  }
+
+  private setRecordTagsSync(
+    recordId: string,
+    tagNames: string[],
+    epicId: string,
+    now: string,
+  ): void {
+    this.db.delete(recordTagsTable).where(eqSync(recordTagsTable.recordId, recordId)).run();
+
+    if (tagNames.length === 0) return;
+
+    const epic = this.db
+      .select({ projectId: epicsTable.projectId })
+      .from(epicsTable)
+      .where(eqSync(epicsTable.id, epicId))
+      .limit(1)
+      .get();
+    const projectId = epic?.projectId || null;
+
+    for (const tagName of tagNames) {
+      const existing = this.db
+        .select()
+        .from(tagsTable)
+        .where(
+          andSync(
+            eqSync(tagsTable.name, tagName),
+            orSync(eqSync(tagsTable.projectId, projectId || ''), isNullSync(tagsTable.projectId)),
+          ),
+        )
+        .limit(1)
+        .get();
+      const tag = existing ?? this.dependencies.createTag({ projectId, name: tagName });
+
+      this.db.insert(recordTagsTable).values({ recordId, tagId: tag.id, createdAt: now }).run();
+    }
   }
 
   async deleteRecord(id: string): Promise<void> {

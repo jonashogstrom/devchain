@@ -37,6 +37,10 @@ import {
 } from '@/ui/lib/subscribers';
 import { fetchWatchers, type Watcher } from '@/ui/lib/watchers';
 import { fetchActions, type ActionMetadata } from '@/ui/lib/actions';
+import {
+  deliveryModeFromLegacyImmediate,
+  isMessageDeliveryMode,
+} from '@/modules/sessions/services/message-pool.types';
 import { ActionInputsForm } from './ActionInputsForm';
 
 type FilterOperator = EventFilterCondition['operator'];
@@ -132,17 +136,57 @@ function serializeEventFilter(
   };
 }
 
+function normalizeSendMessageActionInputs(
+  inputs: Record<string, SubscriberActionInput>,
+  normalizeMissingDeliveryMode = false,
+): Record<string, SubscriberActionInput> {
+  let normalizedInputs = inputs;
+  const explicit = inputs.deliveryMode;
+  const explicitValue = explicit?.customValue;
+  const hasLegacyInput = 'immediate' in inputs;
+
+  if (!explicit && (hasLegacyInput || normalizeMissingDeliveryMode)) {
+    normalizedInputs = {
+      ...inputs,
+      deliveryMode: {
+        source: 'custom',
+        customValue: deliveryModeFromLegacyImmediate(inputs.immediate?.customValue),
+      },
+    };
+  }
+
+  if (hasLegacyInput) {
+    if (normalizedInputs === inputs) normalizedInputs = { ...inputs };
+    delete normalizedInputs.immediate;
+  }
+
+  if (explicit && isMessageDeliveryMode(explicitValue) && explicit.source !== 'custom') {
+    normalizedInputs = {
+      ...normalizedInputs,
+      deliveryMode: { source: 'custom', customValue: explicitValue },
+    };
+  }
+
+  return normalizedInputs;
+}
+
 function sanitizeActionInputs(
   actionType: string,
   action: ActionMetadata | null,
   inputs: Record<string, SubscriberActionInput>,
+  normalizeMissingDeliveryMode = false,
 ): Record<string, SubscriberActionInput> {
+  const normalizedInputs =
+    actionType === 'send_agent_message'
+      ? normalizeSendMessageActionInputs(inputs, normalizeMissingDeliveryMode)
+      : inputs;
+
   const allowedNames = action ? new Set(action.inputs.map((i) => i.name)) : null;
 
-  let changed = false;
+  let changed = normalizedInputs !== inputs;
   const next: Record<string, SubscriberActionInput> = {};
 
-  for (const [name, value] of Object.entries(inputs)) {
+  for (const [name, value] of Object.entries(normalizedInputs)) {
     if (allowedNames && !allowedNames.has(name)) {
       changed = true;
       continue;
@@ -155,6 +199,21 @@ function sanitizeActionInputs(
   }
 
   return changed ? next : inputs;
+}
+
+function materializeActionInputDefaults(
+  action: ActionMetadata | null,
+  inputs: Record<string, SubscriberActionInput>,
+): Record<string, SubscriberActionInput> {
+  if (!action) return inputs;
+
+  let next = inputs;
+  for (const input of action.inputs) {
+    if (input.defaultValue === undefined || input.name in inputs) continue;
+    if (next === inputs) next = { ...inputs };
+    next[input.name] = { source: 'custom', customValue: String(input.defaultValue) };
+  }
+  return next;
 }
 
 interface SubscriberFormData {
@@ -234,6 +293,11 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
   // Get selected action metadata
   const selectedAction = actions?.find((a) => a.type === formData.actionType) || null;
 
+  // Deletion must never persist an enabled retry. The action-type check covers the window
+  // before metadata hydrates; supportsRetry=false covers any non-retryable action.
+  const retryDisabled =
+    formData.actionType === 'delete_agent' || selectedAction?.supportsRetry === false;
+
   // Reset form when dialog opens/closes or subscriber changes
   useEffect(() => {
     if (open) {
@@ -251,6 +315,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
             subscriber.actionType,
             null,
             (subscriber.actionInputs || {}) as Record<string, SubscriberActionInput>,
+            true,
           ),
           delayMs: subscriber.delayMs,
           cooldownMs: subscriber.cooldownMs,
@@ -291,6 +356,13 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
       });
     }
   }, [open, formData.actionType, selectedAction]);
+
+  // Metadata loads async; clear a stored enabled retry once the selected action is
+  // known to be non-retryable so it can never be saved back.
+  useEffect(() => {
+    if (!open || !retryDisabled || !formData.retryOnError) return;
+    updateField('retryOnError', false);
+  }, [open, retryDisabled, formData.retryOnError]);
 
   // Clear invalid eventField selections when event changes
   useEffect(() => {
@@ -408,8 +480,8 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
     // Validate required action inputs
     if (selectedAction) {
       for (const input of selectedAction.inputs) {
+        const inputValue = formData.actionInputs[input.name];
         if (input.required) {
-          const inputValue = formData.actionInputs[input.name];
           if (!inputValue) {
             newInputErrors[input.name] = `${input.label} is required`;
           } else if (inputValue.source === 'custom' && !inputValue.customValue?.trim()) {
@@ -417,6 +489,21 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
           } else if (inputValue.source === 'event_field' && !inputValue.eventField?.trim()) {
             newInputErrors[input.name] = `Please select an event field for ${input.label}`;
           }
+        }
+
+        if (
+          inputValue &&
+          input.allowedSources &&
+          !input.allowedSources.includes(inputValue.source)
+        ) {
+          newInputErrors[input.name] = `${input.label} must use a custom value`;
+        } else if (
+          inputValue?.source === 'custom' &&
+          input.type === 'select' &&
+          input.options &&
+          !input.options.some((option) => option.value === inputValue.customValue)
+        ) {
+          newInputErrors[input.name] = `Unsupported value for ${input.label}`;
         }
       }
     }
@@ -453,12 +540,13 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
     }
 
     const eventFilter = serializeEventFilter(formData.filterRows, formData.filterCombinator);
+    const retryOnError = retryDisabled ? false : formData.retryOnError;
 
     if (isEditMode && subscriber) {
       const sanitizedActionInputs = sanitizeActionInputs(
         formData.actionType,
         selectedAction,
-        formData.actionInputs,
+        materializeActionInputDefaults(selectedAction, formData.actionInputs),
       );
       const updateData: UpdateSubscriberData = {
         name: formData.name,
@@ -470,7 +558,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
         actionInputs: sanitizedActionInputs,
         delayMs: formData.delayMs,
         cooldownMs: formData.cooldownMs,
-        retryOnError: formData.retryOnError,
+        retryOnError,
         // Grouping & ordering
         groupName: formData.groupName || null,
         priority: formData.priority,
@@ -481,7 +569,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
       const sanitizedActionInputs = sanitizeActionInputs(
         formData.actionType,
         selectedAction,
-        formData.actionInputs,
+        materializeActionInputDefaults(selectedAction, formData.actionInputs),
       );
       const createData: CreateSubscriberData = {
         projectId: selectedProjectId,
@@ -494,7 +582,7 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
         actionInputs: sanitizedActionInputs,
         delayMs: formData.delayMs,
         cooldownMs: formData.cooldownMs,
-        retryOnError: formData.retryOnError,
+        retryOnError,
         // Grouping & ordering
         groupName: formData.groupName || null,
         priority: formData.priority,
@@ -915,13 +1003,19 @@ export function SubscriberDialog({ open, onOpenChange, subscriber }: SubscriberD
             <div className="flex items-center space-x-2">
               <Checkbox
                 id="retryOnError"
-                checked={formData.retryOnError}
+                checked={!retryDisabled && formData.retryOnError}
                 onCheckedChange={(checked) => updateField('retryOnError', checked === true)}
+                disabled={retryDisabled}
               />
               <Label htmlFor="retryOnError" className="cursor-pointer">
                 Retry on error
               </Label>
             </div>
+            {retryDisabled && (
+              <p className="text-xs text-muted-foreground">
+                Automatic retry is disabled for this action.
+              </p>
+            )}
           </div>
 
           {/* Scheduling & Ordering */}

@@ -1,16 +1,16 @@
-import type { ProjectsPageController } from '@/ui/hooks/useProjectsPageController';
 import { ProjectsTable } from './ProjectsTable';
 import { ProjectsDialogs } from './ProjectsDialogs';
+import type { ProjectsPagePresentation } from './projects-page-presentation';
 
 interface ProjectsPageViewProps {
-  controller: ProjectsPageController;
+  presentation: ProjectsPagePresentation;
 }
 
-export function ProjectsPageView({ controller }: ProjectsPageViewProps) {
+export function ProjectsPageView({ presentation }: ProjectsPageViewProps) {
   return (
     <div>
-      <ProjectsTable controller={controller} />
-      <ProjectsDialogs controller={controller} />
+      <ProjectsTable model={presentation.table} />
+      <ProjectsDialogs model={presentation.dialogs} />
     </div>
   );
 }

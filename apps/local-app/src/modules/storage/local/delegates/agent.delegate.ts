@@ -1,4 +1,8 @@
-import type { ListOptions, ListResult } from '../../interfaces/storage.interface';
+import type {
+  DeleteAgentOptions,
+  ListOptions,
+  ListResult,
+} from '../../interfaces/storage.interface';
 import type {
   Agent,
   AgentProfile,
@@ -11,7 +15,9 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../../../common/errors/error-types';
+import { eq as eqSync } from 'drizzle-orm';
 import { createLogger } from '../../../../common/logging/logger';
+import { agents as agentsTable } from '../../db/schema';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('AgentStorageDelegate');
@@ -86,13 +92,15 @@ export class AgentStorageDelegate extends BaseStorageDelegate {
   }
 
   async getAgent(id: string): Promise<Agent> {
-    const { agents } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const result = await this.db.select().from(agents).where(eq(agents.id, id)).limit(1);
-    if (!result[0]) {
+    return this.getAgentSync(id);
+  }
+
+  getAgentSync(id: string): Agent {
+    const row = this.db.select().from(agentsTable).where(eqSync(agentsTable.id, id)).limit(1).get();
+    if (!row) {
       throw new NotFoundError('Agent', id);
     }
-    return this.mapAgentRow(result[0]);
+    return this.mapAgentRow(row);
   }
 
   async listAgents(projectId: string, options: ListOptions = {}): Promise<ListResult<Agent>> {
@@ -238,11 +246,54 @@ export class AgentStorageDelegate extends BaseStorageDelegate {
     return this.dependencies.getAgent(id);
   }
 
-  async deleteAgent(id: string): Promise<void> {
+  async deleteAgent(id: string, options: DeleteAgentOptions = {}): Promise<void> {
     const { agents, sessions, teamMembers, teams } = await import('../../db/schema');
     const { eq, inArray, sql } = await import('drizzle-orm');
 
     this.txRunner.runImmediate(() => {
+      if (options.protectProjectOwner || options.protectTeamLead) {
+        const target = this.db
+          .select({
+            projectId: agents.projectId,
+            isProjectOwner: agents.isProjectOwner,
+            name: agents.name,
+          })
+          .from(agents)
+          .where(eq(agents.id, id))
+          .limit(1)
+          .get();
+
+        if (options.protectProjectOwner && target?.isProjectOwner) {
+          throw new ConflictError(`Cannot delete "${target.name}" — they are the Project Owner`, {
+            code: 'AGENT_IS_PROJECT_OWNER',
+            agentId: id,
+            projectId: target.projectId,
+          });
+        }
+
+        if (options.protectTeamLead) {
+          const ledTeam = this.db
+            .select({ id: teams.id, name: teams.name, projectId: teams.projectId })
+            .from(teams)
+            .where(eq(teams.teamLeadAgentId, id))
+            .limit(1)
+            .get();
+
+          if (ledTeam) {
+            throw new ConflictError(
+              `Cannot delete "${target?.name ?? id}" — they are the lead of team "${ledTeam.name}"`,
+              {
+                code: 'AGENT_IS_TEAM_LEAD',
+                agentId: id,
+                projectId: ledTeam.projectId,
+                teamId: ledTeam.id,
+                teamName: ledTeam.name,
+              },
+            );
+          }
+        }
+      }
+
       const relatedSessions = this.db.select().from(sessions).where(eq(sessions.agentId, id)).all();
       const runningSessions = relatedSessions.filter((s) => s.status === 'running');
 

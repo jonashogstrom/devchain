@@ -7,10 +7,8 @@ import { TerminalKeyInputFacade } from './services/terminal-key-input/terminal-k
  * exports `TerminalSessionRegistry` and re-exports `TerminalDeliveryModule` (→
  * `TerminalIOService`) — and exports ONLY {@link TerminalKeyInputFacade}.
  *
- * `CloudTunnelModule` imports THIS module, not `TerminalModule` wholesale, so it stays a
- * leaf/transitive consumer of the Sessions↔Terminal SCC with no back-edge (no Sessions or
- * Terminal module imports CloudTunnel or this module). See
- * apps/local-app/scripts/cycle-allowlist.json.
+ * `CloudTunnelModule` imports THIS module, not `TerminalModule` wholesale, to keep its
+ * terminal dependency limited to the key-input capability.
  *
  * Unlike `TerminalViewportModule`, `ProcessExecutorModule` is NOT imported here:
  * `TerminalIOService` wraps the executor internally (it owns its own sendControl/liveness

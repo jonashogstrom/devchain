@@ -1,6 +1,8 @@
 import type { ListOptions, ListResult } from '../../interfaces/storage.interface';
 import type { CreateTag, Tag, UpdateTag } from '../../models/domain.models';
+import { randomUUID } from 'crypto';
 import { NotFoundError } from '../../../../common/errors/error-types';
+import { tags as tagsTable } from '../../db/schema';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 export class TagStorageDelegate extends BaseStorageDelegate {
@@ -9,9 +11,11 @@ export class TagStorageDelegate extends BaseStorageDelegate {
   }
 
   async createTag(data: CreateTag): Promise<Tag> {
-    const { randomUUID } = await import('crypto');
+    return this.createTagSync(data);
+  }
+
+  createTagSync(data: CreateTag): Tag {
     const now = new Date().toISOString();
-    const { tags } = await import('../../db/schema');
 
     const tag: Tag = {
       id: randomUUID(),
@@ -20,13 +24,16 @@ export class TagStorageDelegate extends BaseStorageDelegate {
       updatedAt: now,
     };
 
-    await this.db.insert(tags).values({
-      id: tag.id,
-      projectId: tag.projectId,
-      name: tag.name,
-      createdAt: tag.createdAt,
-      updatedAt: tag.updatedAt,
-    });
+    this.db
+      .insert(tagsTable)
+      .values({
+        id: tag.id,
+        projectId: tag.projectId,
+        name: tag.name,
+        createdAt: tag.createdAt,
+        updatedAt: tag.updatedAt,
+      })
+      .run();
 
     return tag;
   }

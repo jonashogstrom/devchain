@@ -6,6 +6,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
 } from 'class-validator';
 import type { TemplatePresetAgentConfigDto } from '../../settings/dtos/settings.dto';
@@ -130,6 +131,13 @@ export class CreateProjectFromRegistryDto {
   @IsString()
   @IsNotEmpty({ message: 'rootPath is required' })
   rootPath!: string;
+
+  @ApiPropertyOptional({
+    description: 'Destination workspace ID; omitted uses the Default workspace',
+  })
+  @IsOptional()
+  @IsUUID()
+  workspaceId?: string;
 }
 
 export interface TemplateBackupResponse {

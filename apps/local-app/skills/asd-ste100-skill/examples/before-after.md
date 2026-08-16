@@ -4,6 +4,9 @@ Worked rewrites for this skill's use case: AI agent output that another agent, a
 translation layer, or a non-native reader must parse without ambiguity. The rules
 themselves are in `SKILL.md`. These are illustrations, not quotes from any real system.
 
+The "Violations flagged" sections below show the working method (step 2 in `SKILL.md`).
+They are not part of the output. Output only the "After" text.
+
 ## Example A — Tool description
 
 **Before:**

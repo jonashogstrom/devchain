@@ -147,6 +147,8 @@ import {
   isTunnelControlFrame,
   isTunnelLivenessQueryFrame,
   isTunnelLivenessResultFrame,
+  isTunnelWorkspaceModeCommandFrame,
+  isTunnelWorkspaceModeResultFrame,
 } from './tunnel-protocol';
 
 describe('tunnel control frame', () => {
@@ -198,6 +200,53 @@ describe('tunnel control frame', () => {
     expect(isTunnelControlFrame(null)).toBe(false);
     expect(isTunnelControlFrame('ctrl')).toBe(false);
     expect(isTunnelControlFrame(7)).toBe(false);
+  });
+
+  it('accepts workspace-mode commands and acknowledgements as distinct control frames', () => {
+    const command = {
+      type: TUNNEL_CONTROL_FRAME_TYPE,
+      v: TUNNEL_CONTROL_FRAME_VERSION,
+      ctrl: 'workspace_mode_command',
+      id: 'workspace-1',
+      operation: 'prepare',
+      multiWorkspaceMode: true,
+    };
+    const acknowledgement = {
+      type: TUNNEL_CONTROL_FRAME_TYPE,
+      v: TUNNEL_CONTROL_FRAME_VERSION,
+      ctrl: 'workspace_mode_result',
+      id: 'workspace-1',
+      operation: 'prepare',
+      ok: true,
+    };
+
+    expect(isTunnelControlFrame(command)).toBe(true);
+    expect(isTunnelWorkspaceModeCommandFrame(command)).toBe(true);
+    expect(isTunnelWorkspaceModeResultFrame(command)).toBe(false);
+    expect(isTunnelControlFrame(acknowledgement)).toBe(true);
+    expect(isTunnelWorkspaceModeResultFrame(acknowledgement)).toBe(true);
+  });
+
+  it('rejects malformed workspace-mode controls', () => {
+    const command = {
+      type: TUNNEL_CONTROL_FRAME_TYPE,
+      v: TUNNEL_CONTROL_FRAME_VERSION,
+      ctrl: 'workspace_mode_command',
+      id: 'workspace-1',
+      operation: 'commit',
+      multiWorkspaceMode: false,
+    };
+    expect(isTunnelWorkspaceModeCommandFrame({ ...command, operation: 'start' })).toBe(false);
+    expect(isTunnelWorkspaceModeCommandFrame({ ...command, multiWorkspaceMode: 'false' })).toBe(
+      false,
+    );
+    expect(
+      isTunnelWorkspaceModeResultFrame({
+        ...command,
+        ctrl: 'workspace_mode_result',
+        ok: 'yes',
+      }),
+    ).toBe(false);
   });
 });
 
@@ -382,16 +431,48 @@ describe('mobile viewport SSE contract', () => {
   });
 
   it('accepts a well-formed SSE event (full and diff)', () => {
-    expect(isMobileViewportSseEvent({ sessionId: 's-1', seq: 0, body: fullBody })).toBe(true);
-    expect(isMobileViewportSseEvent({ sessionId: 's-1', seq: 3, body: diffBody })).toBe(true);
+    expect(
+      isMobileViewportSseEvent({
+        subscriptionId: 'sub-1',
+        sessionId: 's-1',
+        seq: 0,
+        body: fullBody,
+      }),
+    ).toBe(true);
+    expect(
+      isMobileViewportSseEvent({
+        subscriptionId: 'sub-1',
+        sessionId: 's-1',
+        seq: 3,
+        body: diffBody,
+      }),
+    ).toBe(true);
   });
 
   it('rejects malformed SSE events', () => {
-    expect(isMobileViewportSseEvent({ sessionId: '', seq: 0, body: fullBody })).toBe(false);
-    expect(isMobileViewportSseEvent({ sessionId: 's-1', seq: -1, body: fullBody })).toBe(false);
-    expect(isMobileViewportSseEvent({ sessionId: 's-1', seq: 0, body: { kind: 'bogus' } })).toBe(
-      false,
-    );
+    expect(
+      isMobileViewportSseEvent({ subscriptionId: 'sub-1', sessionId: '', seq: 0, body: fullBody }),
+    ).toBe(false);
+    expect(isMobileViewportSseEvent({ sessionId: 's-1', seq: 0, body: fullBody })).toBe(false);
+    expect(
+      isMobileViewportSseEvent({ subscriptionId: '', sessionId: 's-1', seq: 0, body: fullBody }),
+    ).toBe(false);
+    expect(
+      isMobileViewportSseEvent({
+        subscriptionId: 'sub-1',
+        sessionId: 's-1',
+        seq: -1,
+        body: fullBody,
+      }),
+    ).toBe(false);
+    expect(
+      isMobileViewportSseEvent({
+        subscriptionId: 'sub-1',
+        sessionId: 's-1',
+        seq: 0,
+        body: { kind: 'bogus' },
+      }),
+    ).toBe(false);
     expect(isMobileViewportSseEvent(null)).toBe(false);
   });
 });

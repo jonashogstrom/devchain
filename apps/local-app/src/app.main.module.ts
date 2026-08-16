@@ -13,6 +13,7 @@ import { UiModule } from './modules/ui/ui.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { SkillsModule } from './modules/skills/skills.module';
 import { ProjectsModule } from './modules/projects/projects.module';
+import { WorkspacesModule } from './modules/workspaces/workspaces.module';
 import { PromptsModule } from './modules/prompts/prompts.module';
 import { ProfilesModule } from './modules/profiles/profiles.module';
 import { ProvidersModule } from './modules/providers/providers.module';
@@ -64,6 +65,7 @@ import { MetricsModule } from './modules/metrics/metrics.module';
     SettingsModule,
     SkillsModule,
     ProjectsModule,
+    WorkspacesModule,
     PromptsModule,
     ProfilesModule,
     ProvidersModule,

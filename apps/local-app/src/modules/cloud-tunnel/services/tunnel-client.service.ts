@@ -14,11 +14,15 @@ import {
   TUNNEL_CONTROL_FRAME_TYPE,
   TUNNEL_CONTROL_FRAME_VERSION,
   isTunnelLivenessResultFrame,
+  isTunnelWorkspaceModeResultFrame,
   buildE2eeCapability,
+  buildWorkspaceSupportCapability,
   type TunnelPushEnvelope,
   type TunnelLivenessQueryFrame,
   type TunnelViewportFrame,
   type E2eeCapability,
+  type TunnelWorkspaceModeCommandFrame,
+  type TunnelWorkspaceModeOperation,
 } from '@devchain/shared';
 import { CloudSessionManagerService } from '../../cloud/services/cloud-session-manager.service';
 import { RefreshGateService } from '../../cloud/services/refresh-gate.service';
@@ -28,6 +32,8 @@ import { TunnelHandlerService } from './tunnel-handler.service';
 import { TunnelRpcCryptoService, E2EE_REQUIRED_POLICY } from './tunnel-rpc-crypto.service';
 import { ViewportFrameSink } from './viewport-frame-sink';
 import { createLogger } from '../../../common/logging/logger';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
+import { WORKSPACE_MODE_CHANGED_EVENT } from '../../workspaces/services/workspace-mode-control';
 
 const logger = createLogger('TunnelClient');
 
@@ -36,6 +42,8 @@ const MAX_RECONNECT_DELAY = 60_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_PONG_TIMEOUT_MS = 10_000;
 const READY_TIMEOUT_MS = 30_000;
+const WORKSPACE_MODE_RECONCILE_CLOSE_CODE = 1012;
+const WORKSPACE_MODE_RECONCILE_CLOSE_REASON = 'workspace_mode_reconcile_failed';
 // How long to wait for the bridge's liveness reply before failing the query. Kept
 // short: the AUQ gate treats an unanswered query as "not live" and delivers native.
 const CONTROL_QUERY_TIMEOUT_MS = 5_000;
@@ -72,6 +80,19 @@ export class TunnelClientService
     string,
     { resolve: (r: SseLivenessResult) => void; timer: ReturnType<typeof setTimeout> }
   >();
+  private readonly pendingWorkspaceModeControl = new Map<
+    string,
+    {
+      operation: TunnelWorkspaceModeOperation;
+      resolve: () => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  // Events only mark the authoritative snapshot stale. One in-flight flush rereads
+  // the coordinator until clean; reconnect attestation is the recovery path after failure.
+  private workspaceModeDirty = false;
+  private workspaceModeFlushPromise: Promise<void> | null = null;
   private controlSeq = 0;
   // Listeners notified each time the tunnel (re)reaches `ready`. The viewport streamer
   // uses this to re-anchor with a fresh full-screen after a reconnect (the latest-only
@@ -85,6 +106,7 @@ export class TunnelClientService
     private readonly handler: TunnelHandlerService,
     private readonly e2eeKeypair: E2eeKeypairService,
     private readonly rpcCrypto: TunnelRpcCryptoService,
+    private readonly workspaceMode: WorkspaceModeCoordinatorService,
     // PC-side E2EE-required policy (Phase 2, Task:2): advertised in the attest capability
     // descriptor so the mobile negotiates consistently, AND enforced by TunnelRpcCryptoService.
     @Optional() @Inject(E2EE_REQUIRED_POLICY) private readonly e2eeRequired: boolean = false,
@@ -115,6 +137,13 @@ export class TunnelClientService
   @OnEvent('session.cloud_disconnected')
   handleCloudDisconnected() {
     this.disconnect();
+  }
+
+  @OnEvent(WORKSPACE_MODE_CHANGED_EVENT)
+  handleWorkspaceModeChanged(): void {
+    if (this.destroyed || !this.cloudSession.getStatus().connected) return;
+    this.workspaceModeDirty = true;
+    this.startWorkspaceModeFlush();
   }
 
   private async connect(): Promise<void> {
@@ -176,6 +205,7 @@ export class TunnelClientService
       this.tunnelReady = true;
       logger.info({ instanceId }, 'Tunnel ready');
       this.notifyReadyListeners();
+      this.startWorkspaceModeFlush();
       return;
     }
 
@@ -183,6 +213,11 @@ export class TunnelClientService
     // branch and never touched by RPC correlation.
     if (msg.type === TUNNEL_CONTROL_FRAME_TYPE && isTunnelLivenessResultFrame(msg)) {
       this.resolveControlQuery(msg.id, { live: msg.live, lastSeenAt: msg.lastSeenAt });
+      return;
+    }
+
+    if (msg.type === TUNNEL_CONTROL_FRAME_TYPE && isTunnelWorkspaceModeResultFrame(msg)) {
+      this.resolveWorkspaceModeControl(msg);
       return;
     }
 
@@ -316,6 +351,93 @@ export class TunnelClientService
     });
   }
 
+  sendWorkspaceModeCommand(
+    operation: TunnelWorkspaceModeOperation,
+    multiWorkspaceMode: boolean,
+  ): Promise<void> {
+    if (!this.canPush()) {
+      return Promise.reject(new Error('Bridge tunnel is not ready for workspace-mode control'));
+    }
+
+    const id = `workspace-mode-${++this.controlSeq}`;
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingWorkspaceModeControl.delete(id);
+        reject(new Error(`Bridge workspace-mode ${operation} timed out`));
+      }, CONTROL_QUERY_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      this.pendingWorkspaceModeControl.set(id, { operation, resolve, reject, timer });
+
+      const frame: TunnelWorkspaceModeCommandFrame = {
+        type: TUNNEL_CONTROL_FRAME_TYPE,
+        v: TUNNEL_CONTROL_FRAME_VERSION,
+        ctrl: 'workspace_mode_command',
+        id,
+        operation,
+        multiWorkspaceMode,
+      };
+      try {
+        this.ws!.send(JSON.stringify(frame));
+      } catch (error) {
+        this.rejectWorkspaceModeControl(
+          id,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    });
+  }
+
+  private startWorkspaceModeFlush(): void {
+    if (!this.workspaceModeDirty || this.workspaceModeFlushPromise || !this.canPush()) return;
+
+    const socket = this.ws!;
+    const flushPromise = this.flushWorkspaceMode(socket)
+      .catch((error: unknown) => {
+        this.handleWorkspaceModeReconciliationFailure(socket, error);
+      })
+      .finally(() => {
+        if (this.workspaceModeFlushPromise !== flushPromise) return;
+        this.workspaceModeFlushPromise = null;
+        if (this.workspaceModeDirty) this.startWorkspaceModeFlush();
+      });
+    this.workspaceModeFlushPromise = flushPromise;
+  }
+
+  private async flushWorkspaceMode(socket: WebSocket): Promise<void> {
+    while (this.workspaceModeDirty && this.ws === socket && this.canPush()) {
+      this.workspaceModeDirty = false;
+      const snapshot = await this.workspaceMode.getSnapshot();
+      if (this.ws !== socket || !this.canPush()) return;
+
+      if (snapshot.multiWorkspaceMode) {
+        await this.sendWorkspaceModeCommand('prepare', true);
+        await this.sendWorkspaceModeCommand('commit', true);
+      } else if (snapshot.failClosedPending) {
+        await this.sendWorkspaceModeCommand('prepare', true);
+      } else {
+        await this.sendWorkspaceModeCommand('commit', false);
+      }
+    }
+  }
+
+  private handleWorkspaceModeReconciliationFailure(socket: WebSocket, error: unknown): void {
+    this.workspaceModeDirty = false;
+    if (this.ws !== socket) return;
+
+    logger.warn({ error }, 'Workspace mode reconciliation failed; reconnecting tunnel');
+    this.tunnelReady = false;
+    try {
+      socket.close(WORKSPACE_MODE_RECONCILE_CLOSE_CODE, WORKSPACE_MODE_RECONCILE_CLOSE_REASON);
+    } catch {
+      socket.terminate();
+    }
+  }
+
+  private resetWorkspaceModeReconciliation(): void {
+    this.workspaceModeDirty = false;
+    this.workspaceModeFlushPromise = null;
+  }
+
   private resolveControlQuery(id: string, result: SseLivenessResult): void {
     const pending = this.pendingControl.get(id);
     if (!pending) return;
@@ -324,14 +446,40 @@ export class TunnelClientService
     pending.resolve(result);
   }
 
-  /** Fail any in-flight control queries (socket torn down) — resolve not-live. */
+  private resolveWorkspaceModeControl(result: {
+    id: string;
+    operation: TunnelWorkspaceModeOperation;
+    ok: boolean;
+    error?: string;
+  }): void {
+    const pending = this.pendingWorkspaceModeControl.get(result.id);
+    if (!pending || pending.operation !== result.operation) return;
+    clearTimeout(pending.timer);
+    this.pendingWorkspaceModeControl.delete(result.id);
+    if (result.ok) pending.resolve();
+    else pending.reject(new Error(result.error ?? `Bridge rejected ${result.operation}`));
+  }
+
+  private rejectWorkspaceModeControl(id: string, error: Error): void {
+    const pending = this.pendingWorkspaceModeControl.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingWorkspaceModeControl.delete(id);
+    pending.reject(error);
+  }
+
+  /** Settle every in-flight control operation when the socket is torn down. */
   private failPendingControlQueries(): void {
-    if (this.pendingControl.size === 0) return;
     for (const { resolve, timer } of this.pendingControl.values()) {
       clearTimeout(timer);
       resolve({ live: false, lastSeenAt: null });
     }
     this.pendingControl.clear();
+    for (const { reject, timer } of this.pendingWorkspaceModeControl.values()) {
+      clearTimeout(timer);
+      reject(new Error('Bridge tunnel closed during workspace-mode control'));
+    }
+    this.pendingWorkspaceModeControl.clear();
   }
 
   private async respondToChallenge(nonce: string, ts: string): Promise<void> {
@@ -340,6 +488,7 @@ export class TunnelClientService
       const signPayload = nonce + (kp.instanceId ?? '') + ts;
       const signature = await this.keypair.sign(signPayload, kp.privateKey);
       const e2ee = await this.buildE2eeCapability();
+      const workspaceMode = await this.workspaceMode.getSnapshot();
 
       this.ws?.send(
         JSON.stringify({
@@ -356,6 +505,9 @@ export class TunnelClientService
           // can adopt this PC key (TOFU). Best-effort: a failure falls back to advertising
           // no E2EE support rather than blocking the (Ed25519-authenticated) tunnel.
           ...(e2ee ? { e2ee } : {}),
+          workspaceSupport: buildWorkspaceSupportCapability(),
+          multiWorkspaceMode: workspaceMode.multiWorkspaceMode,
+          workspaceModePending: workspaceMode.failClosedPending,
         }),
       );
     } catch (err) {
@@ -388,6 +540,7 @@ export class TunnelClientService
     this.stopHeartbeat();
     this.ws = null;
     this.pendingChallenge = null;
+    this.resetWorkspaceModeReconciliation();
     this.failPendingControlQueries();
 
     if (this.destroyed) return;
@@ -429,6 +582,7 @@ export class TunnelClientService
     this.stopHeartbeat();
     this.ws = null;
     this.pendingChallenge = null;
+    this.resetWorkspaceModeReconciliation();
     this.failPendingControlQueries();
 
     try {
@@ -449,6 +603,7 @@ export class TunnelClientService
       this.stopHeartbeat();
       this.ws = null;
       this.pendingChallenge = null;
+      this.resetWorkspaceModeReconciliation();
       this.failPendingControlQueries();
 
       try {
@@ -538,6 +693,7 @@ export class TunnelClientService
     if (this.ws === socket) {
       this.ws = null;
       this.pendingChallenge = null;
+      this.resetWorkspaceModeReconciliation();
     }
     this.failPendingControlQueries();
 
@@ -562,6 +718,7 @@ export class TunnelClientService
       this.ws = null;
     }
     this.pendingChallenge = null;
+    this.resetWorkspaceModeReconciliation();
     this.failPendingControlQueries();
   }
 }

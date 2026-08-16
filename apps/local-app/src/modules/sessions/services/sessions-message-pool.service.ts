@@ -1,4 +1,5 @@
 import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 import { SessionsService } from './sessions.service';
 import { SessionCoordinatorService } from './session-coordinator.service';
@@ -12,6 +13,9 @@ import { TerminalIOService } from '../../terminal/services/terminal-io/terminal-
 import { ProviderAdapterFactory } from '../../providers/adapters/provider-adapter.factory';
 import {
   type MessagePoolConfig,
+  type MessageDeliveryMode,
+  deliveryModeFromLegacyImmediate,
+  isMessageDeliveryMode,
   type PooledMessage,
   type EnqueueOptions,
   type EnqueueResult,
@@ -21,6 +25,9 @@ import {
   type MessageLogEntry,
   type PoolDetails,
 } from './message-pool.types';
+import type { SessionActivityChangedEventPayload } from '../../events/catalog/session.activity.changed';
+import type { SessionStoppedEventPayload } from '../../events/catalog/session.stopped';
+import type { SessionCrashedEventPayload } from '../../events/catalog/session.crashed';
 import {
   classifyDeliveryFailure,
   getStrictestFailureDisclosure,
@@ -28,6 +35,7 @@ import {
 } from './delivery-failure-disclosure';
 export {
   FAILURE_NOTICE_SOURCE,
+  type MessageDeliveryMode,
   type MessagePoolConfig,
   type PooledMessage,
   type EnqueueOptions,
@@ -50,6 +58,15 @@ interface AgentPool {
   projectId: string;
 }
 
+interface AgentIdleLane {
+  readonly sessionId: string;
+  readonly agentId: string;
+  readonly projectId: string;
+  readonly messages: PooledMessage[];
+  readonly firstEnqueueTime: number;
+  separator: string;
+}
+
 const DEFAULT_CONFIG: MessagePoolConfig = {
   enabled: true,
   delayMs: 10000,
@@ -61,6 +78,7 @@ const DEFAULT_CONFIG: MessagePoolConfig = {
 @Injectable()
 export class SessionsMessagePoolService implements OnModuleDestroy {
   private pools = new Map<string, AgentPool>();
+  private idleLanes = new Map<string, AgentIdleLane>();
   private config: MessagePoolConfig;
 
   constructor(
@@ -136,6 +154,13 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
     );
   }
 
+  private resolveDeliveryMode(options: EnqueueOptions): MessageDeliveryMode {
+    if (isMessageDeliveryMode(options.deliveryMode)) {
+      return options.deliveryMode;
+    }
+    return deliveryModeFromLegacyImmediate(options.immediate);
+  }
+
   private resetPoolTimers(agentId: string, pool: AgentPool, newConfig: MessagePoolConfig): void {
     if (pool.timer) {
       clearTimeout(pool.timer);
@@ -196,19 +221,36 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
       preKeys,
       preDelayMs,
       senderAgentId,
-      immediate = false,
       clientMessageId,
       failureDisclosure = 'legacy',
     } = options;
 
     const { projectId, agentName } = await this.resolveProjectInfo(agentId, options);
-    const projectConfig = this.getConfigForProject(projectId, failureDisclosure);
-
     const logEntryId = randomUUID();
     const timestamp = Date.now();
+    const deliveryMode = this.resolveDeliveryMode(options);
 
-    if (immediate || !projectConfig.enabled) {
-      const reason = immediate ? 'immediate flag' : 'pooling disabled';
+    if (deliveryMode === 'on_idle') {
+      return this.enqueueOnIdle({
+        agentId,
+        text,
+        source,
+        submitKeys,
+        senderAgentId,
+        clientMessageId,
+        failureDisclosure,
+        projectId,
+        agentName,
+        logEntryId,
+        timestamp,
+      });
+    }
+
+    const projectConfig = this.getConfigForProject(projectId, failureDisclosure);
+    const immediateDelivery = deliveryMode === 'immediate';
+
+    if (immediateDelivery || !projectConfig.enabled) {
+      const reason = immediateDelivery ? 'delivery mode' : 'pooling disabled';
       logger.debug(
         { agentId, projectId, source, reason },
         'Bypassing pool, delivering immediately',
@@ -255,7 +297,7 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
           skipped,
           retryCount,
         } = await this.deliverMessage(agentId, text, submitKeys, {
-          skipConfirmation: immediate,
+          skipConfirmation: immediateDelivery,
           preKeys,
           preDelayMs,
         });
@@ -438,6 +480,135 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
     return { status: 'queued', poolSize: pool.messages.length, logEntryId };
   }
 
+  private async enqueueOnIdle(input: {
+    agentId: string;
+    text: string;
+    source: string;
+    submitKeys: string[];
+    senderAgentId?: string;
+    clientMessageId?: string;
+    failureDisclosure: FailureDisclosurePolicy;
+    projectId: string;
+    agentName: string;
+    logEntryId: string;
+    timestamp: number;
+  }): Promise<EnqueueResult> {
+    const activeSession = this.sessions.getActiveSessionForAgent(input.agentId);
+
+    if (input.clientMessageId) {
+      const existing = this.messageLog.findByClientMessageId(
+        input.clientMessageId,
+        input.agentId,
+        input.source,
+      );
+      if (existing) {
+        return { status: existing.status, logEntryId: existing.id };
+      }
+    }
+
+    let detachedLane: AgentIdleLane | undefined;
+    const currentLane = this.idleLanes.get(input.agentId);
+    if (currentLane && currentLane.sessionId !== activeSession?.id) {
+      this.idleLanes.delete(input.agentId);
+      detachedLane = currentLane;
+    }
+
+    if (!activeSession) {
+      const failure = classifyDeliveryFailure(
+        input.failureDisclosure,
+        'No active session',
+        'no_active_session',
+      );
+      if (detachedLane) {
+        await this.failIdleLane(detachedLane, 'Target session is no longer active');
+      }
+      return { status: 'failed', error: failure.error };
+    }
+
+    const projectConfig = this.getConfigForProject(input.projectId, input.failureDisclosure);
+    let lane = this.idleLanes.get(input.agentId);
+    if (lane) {
+      lane.separator = projectConfig.separator;
+    }
+    if ((lane?.messages.length ?? 0) >= projectConfig.maxMessages) {
+      const failure = classifyDeliveryFailure(
+        input.failureDisclosure,
+        'Message pool capacity reached',
+        'pool_capacity_exceeded',
+      );
+      return { status: 'failed', error: failure.error };
+    }
+
+    if (!lane) {
+      lane = {
+        sessionId: activeSession.id,
+        agentId: input.agentId,
+        projectId: input.projectId,
+        messages: [],
+        firstEnqueueTime: input.timestamp,
+        separator: projectConfig.separator,
+      };
+      this.idleLanes.set(input.agentId, lane);
+    }
+
+    const logEntry: MessageLogEntry = {
+      id: input.logEntryId,
+      timestamp: input.timestamp,
+      projectId: input.projectId,
+      agentId: input.agentId,
+      agentName: input.agentName,
+      text: input.text,
+      source: input.source,
+      senderAgentId: input.senderAgentId,
+      clientMessageId: input.clientMessageId,
+      status: 'queued',
+      immediate: false,
+    };
+    this.messageLog.addEntry(logEntry);
+    lane.messages.push({
+      text: input.text,
+      source: input.source,
+      timestamp: input.timestamp,
+      submitKeys: input.submitKeys,
+      senderAgentId: input.senderAgentId,
+      logEntryId: input.logEntryId,
+      clientMessageId: input.clientMessageId,
+      failureDisclosure: input.failureDisclosure,
+    });
+    this.activityStream.broadcastEnqueued(logEntry);
+    this.broadcastPoolsUpdate();
+    const exactSessionIsIdle = activeSession.activityState === 'idle';
+
+    const detachedFailure = detachedLane
+      ? this.failIdleLane(detachedLane, 'Target session was replaced before idle delivery')
+      : Promise.resolve();
+
+    if (exactSessionIsIdle) {
+      const [, flushResult] = await Promise.all([
+        detachedFailure,
+        this.flushIdleLane(input.agentId, activeSession.id),
+      ]);
+      if (!flushResult.success) {
+        return { status: 'failed', error: flushResult.reason, logEntryId: input.logEntryId };
+      }
+      if (flushResult.deliveredCount === 0) {
+        const logEntry = this.messageLog.getById(input.logEntryId);
+        return {
+          status: logEntry?.status ?? 'queued',
+          ...(logEntry?.error ? { error: logEntry.error } : {}),
+          logEntryId: input.logEntryId,
+        };
+      }
+      return {
+        status: flushResult.outcome === 'unconfirmed' ? 'unconfirmed' : 'delivered',
+        logEntryId: input.logEntryId,
+      };
+    }
+
+    await detachedFailure;
+    return { status: 'queued', poolSize: lane.messages.length, logEntryId: input.logEntryId };
+  }
+
   async flushNow(agentId: string): Promise<FlushResult> {
     const pool = this.pools.get(agentId);
     if (!pool || pool.messages.length === 0) {
@@ -491,11 +662,20 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
 
   getPoolStats(): { agentId: string; messageCount: number; waitingMs: number }[] {
     const now = Date.now();
-    return Array.from(this.pools.entries()).map(([agentId, pool]) => ({
-      agentId,
-      messageCount: pool.messages.length,
-      waitingMs: now - pool.firstEnqueueTime,
-    }));
+    const agentIds = new Set([...this.pools.keys(), ...this.idleLanes.keys()]);
+    return Array.from(agentIds).map((agentId) => {
+      const pool = this.pools.get(agentId);
+      const idleLane = this.idleLanes.get(agentId);
+      const oldestMessageTime = Math.min(
+        pool?.messages[0]?.timestamp ?? Number.POSITIVE_INFINITY,
+        idleLane?.firstEnqueueTime ?? Number.POSITIVE_INFINITY,
+      );
+      return {
+        agentId,
+        messageCount: (pool?.messages.length ?? 0) + (idleLane?.messages.length ?? 0),
+        waitingMs: now - oldestMessageTime,
+      };
+    });
   }
 
   getPoolDetails(projectId?: string): PoolDetails[] {
@@ -503,18 +683,25 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
     const PREVIEW_LENGTH = 100;
     const details: PoolDetails[] = [];
 
-    for (const [agentId, pool] of this.pools.entries()) {
-      if (pool.messages.length === 0) continue;
+    const agentIds = new Set([...this.pools.keys(), ...this.idleLanes.keys()]);
+    for (const agentId of agentIds) {
+      const pool = this.pools.get(agentId);
+      const idleLane = this.idleLanes.get(agentId);
+      const pooledMessages = [...(pool?.messages ?? []), ...(idleLane?.messages ?? [])].sort(
+        (a, b) => a.timestamp - b.timestamp,
+      );
+      if (pooledMessages.length === 0) continue;
 
-      const firstMessage = pool.messages[0];
+      const firstMessage = pooledMessages[0];
       const logEntry = this.messageLog.getById(firstMessage.logEntryId);
 
-      const poolProjectId = logEntry?.projectId ?? 'unknown';
+      const poolProjectId =
+        logEntry?.projectId ?? pool?.projectId ?? idleLane?.projectId ?? 'unknown';
       const agentName = logEntry?.agentName ?? 'unknown';
 
       if (projectId && poolProjectId !== projectId) continue;
 
-      const messages = pool.messages.map((msg) => {
+      const messages = pooledMessages.map((msg) => {
         const preview =
           msg.text.length > PREVIEW_LENGTH ? msg.text.slice(0, PREVIEW_LENGTH) + '...' : msg.text;
         return {
@@ -529,8 +716,8 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
         agentId,
         agentName,
         projectId: poolProjectId,
-        messageCount: pool.messages.length,
-        waitingMs: now - pool.firstEnqueueTime,
+        messageCount: pooledMessages.length,
+        waitingMs: now - firstMessage.timestamp,
         messages,
       });
     }
@@ -545,7 +732,7 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
 
     logger.info(
       { agentCount: poolStats.length, totalMessages },
-      'Shutting down message pool, flushing pending messages...',
+      'Shutting down message pool, flushing default lanes and clearing idle lanes...',
     );
 
     for (const [agentId, pool] of this.pools.entries()) {
@@ -558,6 +745,23 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
         pool.maxWaitTimer = null;
       }
       logger.debug({ agentId }, 'Cleared timers for agent pool');
+    }
+
+    const idleLanes = Array.from(this.idleLanes.values());
+    this.idleLanes.clear();
+    if (idleLanes.length > 0) {
+      logger.info(
+        {
+          agentCount: idleLanes.length,
+          totalMessages: idleLanes.reduce((sum, lane) => sum + lane.messages.length, 0),
+        },
+        'Clearing idle delivery lanes without terminal delivery',
+      );
+      await Promise.all(
+        idleLanes.map((lane) =>
+          this.failIdleLane(lane, 'Service stopped before idle delivery', false),
+        ),
+      );
     }
 
     const SHUTDOWN_TIMEOUT_MS = 5000;
@@ -603,7 +807,124 @@ export class SessionsMessagePoolService implements OnModuleDestroy {
     return this.messageLog.getMessageById(messageId);
   }
 
+  @OnEvent('session.activity.changed', { async: true })
+  async handleSessionActivityChanged(event: SessionActivityChangedEventPayload): Promise<void> {
+    const session = this.sessions.getSession(event.sessionId);
+    if (!session?.agentId || event.state !== 'idle') return;
+
+    await this.flushIdleLane(session.agentId, event.sessionId);
+  }
+
+  @OnEvent('session.stopped', { async: true })
+  async handleSessionStopped(event: SessionStoppedEventPayload): Promise<void> {
+    const session = this.sessions.getSession(event.sessionId);
+    if (!session?.agentId) return;
+
+    await this.failMatchingIdleLane(
+      session.agentId,
+      event.sessionId,
+      'Target session stopped before idle delivery',
+    );
+  }
+
+  @OnEvent('session.crashed', { async: true })
+  async handleSessionCrashed(event: SessionCrashedEventPayload): Promise<void> {
+    const session = this.sessions.getSession(event.sessionId);
+    if (!session?.agentId) return;
+
+    await this.failMatchingIdleLane(
+      session.agentId,
+      event.sessionId,
+      'Target session crashed before idle delivery',
+    );
+  }
+
   // ─── Private delivery methods ──────────────────────────────────────────
+
+  private async flushIdleLane(agentId: string, expectedSessionId: string): Promise<FlushResult> {
+    let result: FlushResult = { success: true, deliveredCount: 0 };
+    await this.coordinator.withAgentLock(agentId, async () => {
+      const expectedSession = this.sessions.getSession(expectedSessionId);
+      const activeSession = this.sessions.getActiveSessionForAgent(agentId);
+      const lane = this.idleLanes.get(agentId);
+
+      if (
+        !lane ||
+        lane.sessionId !== expectedSessionId ||
+        expectedSession?.status !== 'running' ||
+        expectedSession.activityState !== 'idle' ||
+        activeSession?.id !== expectedSessionId
+      ) {
+        return;
+      }
+
+      this.idleLanes.delete(agentId);
+      result = await this.deliverBatch(agentId, [...lane.messages], lane.separator);
+    });
+    return result;
+  }
+
+  private async failMatchingIdleLane(
+    agentId: string,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const lane = this.idleLanes.get(agentId);
+    if (!lane || lane.sessionId !== sessionId) return;
+
+    this.idleLanes.delete(agentId);
+    await this.failIdleLane(lane, reason);
+  }
+
+  private async failIdleLane(
+    lane: AgentIdleLane,
+    reason: string,
+    notifySenders = true,
+  ): Promise<void> {
+    const batchId = randomUUID();
+    const failureDisclosure = getStrictestFailureDisclosure(lane.messages);
+    const batchFailure = classifyDeliveryFailure(failureDisclosure, reason, 'no_active_session');
+
+    for (const message of lane.messages) {
+      const failure = classifyDeliveryFailure(
+        message.failureDisclosure,
+        reason,
+        'no_active_session',
+      );
+      this.messageLog.update(message.logEntryId, {
+        status: 'failed',
+        batchId,
+        error: failure.error,
+        failureCode: failure.failureCode,
+      });
+      const entry = this.messageLog.getById(message.logEntryId);
+      if (entry) this.activityStream.broadcastFailed(entry);
+    }
+    this.broadcastPoolsUpdate();
+
+    logger.warn(
+      {
+        agentId: lane.agentId,
+        sessionId: lane.sessionId,
+        messageCount: lane.messages.length,
+        error: batchFailure.error,
+      },
+      'Idle delivery lane discarded',
+    );
+
+    if (!notifySenders) return;
+    await this.failureNotifier
+      .notifySendersOfFailure(lane.messages, lane.agentId, batchFailure.error)
+      .catch((error: unknown) =>
+        logger.warn(
+          {
+            agentId: lane.agentId,
+            error: this.disclosedLogError(failureDisclosure, error),
+          },
+          'Failure notification error (best-effort)',
+        ),
+      );
+  }
 
   private async deliverBatch(
     agentId: string,

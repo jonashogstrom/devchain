@@ -1,10 +1,10 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TerminalStreamService } from './services/terminal-stream.service';
 import { PtyService } from './services/pty.service';
 import { TerminalGateway } from './gateways/terminal.gateway';
 import { EventsCoreModule } from '../events/events-core.module';
 import { SettingsModule } from '../settings/settings.module';
-import { SessionsModule } from '../sessions/sessions.module';
+import { SessionTerminalRuntimeModule } from '../session-terminal-runtime/session-terminal-runtime.module';
 import { TerminalSeedService } from './services/terminal-seed.service';
 import { TerminalSessionRegistry } from './services/terminal-session/terminal-session-registry';
 import { SettingsService } from '../settings/services/settings.service';
@@ -21,7 +21,7 @@ import { TerminalSendSchedulerService } from './services/terminal-send-scheduler
     TerminalDeliveryModule,
     EventsCoreModule,
     SettingsModule,
-    forwardRef(() => SessionsModule),
+    SessionTerminalRuntimeModule,
     RealtimeBroadcastModule,
     MetricsModule,
   ],

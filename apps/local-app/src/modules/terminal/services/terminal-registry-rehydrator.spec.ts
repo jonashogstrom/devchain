@@ -1,17 +1,16 @@
 import { TerminalRegistryRehydrator } from './terminal-registry-rehydrator.service';
 import { TerminalSessionRegistry } from './terminal-session/terminal-session-registry';
 import { TerminalIOService } from './terminal-io/terminal-io.service';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 
 function createRehydrator(options?: {
-  metas?: Array<{ sessionId: string; tmuxSessionName: string; providerName: string }>;
+  metas?: Array<{ sessionId: string; tmuxSessionName: string }>;
   sessionExistsResults?: Map<string, boolean>;
 }) {
-  const sessionsService: Partial<SessionsService> = {
-    listRunningSessionMetas: jest.fn().mockReturnValue(options?.metas ?? []),
-    markSessionFailed: jest.fn(),
-    shouldNormalizeLfFor: jest.fn().mockReturnValue(true),
-    reconcileCodexPluginProfiles: jest.fn().mockResolvedValue(undefined),
+  const sessionTerminalRuntime: Partial<SessionTerminalRuntimeService> = {
+    listStartupSessions: jest.fn().mockReturnValue(options?.metas ?? []),
+    retireConfirmedLoss: jest.fn(),
+    reconcileCodexStartup: jest.fn().mockResolvedValue(undefined),
   };
 
   const terminalIO: Partial<TerminalIOService> = {
@@ -24,20 +23,20 @@ function createRehydrator(options?: {
   const registry = new TerminalSessionRegistry();
 
   const rehydrator = new TerminalRegistryRehydrator(
-    sessionsService as SessionsService,
+    sessionTerminalRuntime as SessionTerminalRuntimeService,
     registry,
     terminalIO as TerminalIOService,
   );
 
-  return { rehydrator, sessionsService, registry, terminalIO };
+  return { rehydrator, sessionTerminalRuntime, registry, terminalIO };
 }
 
 describe('TerminalRegistryRehydrator', () => {
   it('populates registry from running sessions on bootstrap', async () => {
     const { rehydrator, registry } = createRehydrator({
       metas: [
-        { sessionId: 'session-1', tmuxSessionName: 'tmux_1', providerName: 'Claude' },
-        { sessionId: 'session-2', tmuxSessionName: 'tmux_2', providerName: 'codex' },
+        { sessionId: 'session-1', tmuxSessionName: 'tmux_1' },
+        { sessionId: 'session-2', tmuxSessionName: 'tmux_2' },
       ],
     });
 
@@ -52,8 +51,8 @@ describe('TerminalRegistryRehydrator', () => {
   it('skips sessions whose tmux process is dead', async () => {
     const { rehydrator, registry } = createRehydrator({
       metas: [
-        { sessionId: 'alive', tmuxSessionName: 'tmux_alive', providerName: 'claude' },
-        { sessionId: 'dead', tmuxSessionName: 'tmux_dead', providerName: 'claude' },
+        { sessionId: 'alive', tmuxSessionName: 'tmux_alive' },
+        { sessionId: 'dead', tmuxSessionName: 'tmux_dead' },
       ],
       sessionExistsResults: new Map([
         ['tmux_alive', true],
@@ -68,10 +67,10 @@ describe('TerminalRegistryRehydrator', () => {
   });
 
   it('marks dead-tmux sessions as failed at bootstrap, preserving alive sessions', async () => {
-    const { rehydrator, registry, sessionsService } = createRehydrator({
+    const { rehydrator, registry, sessionTerminalRuntime } = createRehydrator({
       metas: [
-        { sessionId: 'alive', tmuxSessionName: 'tmux_alive', providerName: 'claude' },
-        { sessionId: 'dead', tmuxSessionName: 'tmux_dead', providerName: 'claude' },
+        { sessionId: 'alive', tmuxSessionName: 'tmux_alive' },
+        { sessionId: 'dead', tmuxSessionName: 'tmux_dead' },
       ],
       sessionExistsResults: new Map([
         ['tmux_alive', true],
@@ -81,11 +80,14 @@ describe('TerminalRegistryRehydrator', () => {
 
     await rehydrator.onApplicationBootstrap();
 
-    expect(sessionsService.markSessionFailed).toHaveBeenCalledWith(
+    expect(sessionTerminalRuntime.retireConfirmedLoss).toHaveBeenCalledWith(
       'dead',
       expect.stringContaining('bootstrap'),
     );
-    expect(sessionsService.markSessionFailed).not.toHaveBeenCalledWith('alive', expect.anything());
+    expect(sessionTerminalRuntime.retireConfirmedLoss).not.toHaveBeenCalledWith(
+      'alive',
+      expect.anything(),
+    );
     expect(registry.get('alive')).toBeDefined();
     expect(registry.get('dead')).toBeUndefined();
   });
@@ -93,8 +95,8 @@ describe('TerminalRegistryRehydrator', () => {
   it('starts a health check for rehydrated sessions but not for dead ones', async () => {
     const { rehydrator, terminalIO } = createRehydrator({
       metas: [
-        { sessionId: 'alive', tmuxSessionName: 'tmux_alive', providerName: 'claude' },
-        { sessionId: 'dead', tmuxSessionName: 'tmux_dead', providerName: 'claude' },
+        { sessionId: 'alive', tmuxSessionName: 'tmux_alive' },
+        { sessionId: 'dead', tmuxSessionName: 'tmux_dead' },
       ],
       sessionExistsResults: new Map([
         ['tmux_alive', true],
@@ -110,7 +112,7 @@ describe('TerminalRegistryRehydrator', () => {
 
   it('verifies sessions already in registry without double-create', async () => {
     const { rehydrator, registry, terminalIO } = createRehydrator({
-      metas: [{ sessionId: 'existing', tmuxSessionName: 'tmux_existing', providerName: 'claude' }],
+      metas: [{ sessionId: 'existing', tmuxSessionName: 'tmux_existing' }],
     });
 
     registry.create('existing', 'tmux_existing');
@@ -134,7 +136,7 @@ describe('TerminalRegistryRehydrator', () => {
 
   it('survives concurrent rehydration race (registry.create throws already exists)', async () => {
     const { rehydrator, registry, terminalIO } = createRehydrator({
-      metas: [{ sessionId: 'race', tmuxSessionName: 'tmux_race', providerName: 'claude' }],
+      metas: [{ sessionId: 'race', tmuxSessionName: 'tmux_race' }],
     });
 
     (terminalIO.sessionExists as jest.Mock).mockImplementation(async () => {
@@ -151,7 +153,7 @@ describe('TerminalRegistryRehydrator', () => {
 
   it('normalizes full-history line endings through captured-output policy', async () => {
     const { rehydrator, registry, terminalIO } = createRehydrator({
-      metas: [{ sessionId: 'raw', tmuxSessionName: 'tmux_raw', providerName: 'claude' }],
+      metas: [{ sessionId: 'raw', tmuxSessionName: 'tmux_raw' }],
     });
     (terminalIO as Partial<TerminalIOService>).captureHistory = jest
       .fn()
@@ -170,5 +172,36 @@ describe('TerminalRegistryRehydrator', () => {
     const historyFrame = frames.find((f) => f.type === 'full_history');
     expect(historyFrame).toBeDefined();
     expect((historyFrame!.payload as { ansi: string }).ansi).toBe('one\r\ntwo');
+  });
+
+  it('reconciles last with exactly the set of sessions proved dead', async () => {
+    const { rehydrator, sessionTerminalRuntime, terminalIO } = createRehydrator({
+      metas: [
+        { sessionId: 'alive', tmuxSessionName: 'tmux_alive' },
+        { sessionId: 'dead-a', tmuxSessionName: 'tmux_dead_a' },
+        { sessionId: 'dead-b', tmuxSessionName: 'tmux_dead_b' },
+      ],
+      sessionExistsResults: new Map([
+        ['tmux_alive', true],
+        ['tmux_dead_a', false],
+        ['tmux_dead_b', false],
+      ]),
+    });
+
+    await rehydrator.onApplicationBootstrap();
+
+    expect(sessionTerminalRuntime.reconcileCodexStartup).toHaveBeenCalledWith(
+      new Set(['dead-a', 'dead-b']),
+    );
+    const reconcileOrder = (sessionTerminalRuntime.reconcileCodexStartup as jest.Mock).mock
+      .invocationCallOrder[0];
+    expect(reconcileOrder).toBeGreaterThan(
+      Math.max(...(terminalIO.sessionExists as jest.Mock).mock.invocationCallOrder),
+    );
+    expect(reconcileOrder).toBeGreaterThan(
+      Math.max(
+        ...(sessionTerminalRuntime.retireConfirmedLoss as jest.Mock).mock.invocationCallOrder,
+      ),
+    );
   });
 });

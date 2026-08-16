@@ -1,4 +1,5 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
 import {
   TUNNEL_VIEWPORT_FRAME_TYPE,
   TUNNEL_VIEWPORT_FRAME_VERSION,
@@ -10,8 +11,24 @@ import { ActiveSessionLookup } from '../../sessions/services/active-session-look
 import { TerminalViewportFacade } from '../../terminal/services/terminal-viewport/terminal-viewport.facade';
 import { AppError, ForbiddenError, NotFoundError } from '../../../common/errors/error-types';
 import { createLogger } from '../../../common/logging/logger';
+import { STORAGE_SERVICE, type StorageService } from '../../storage/interfaces/storage.interface';
+import { PairedDeviceWorkspaceAccessService } from '../../e2ee/services/paired-device-workspace-access.service';
+import {
+  PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT,
+  type PairedDeviceWorkspaceAccessRevokedEvent,
+} from '../../e2ee/events/paired-device-workspace-access.events';
+import {
+  PROJECT_WORKSPACE_CHANGED_EVENT,
+  type ProjectWorkspaceChangedEvent,
+} from '../../projects/events/project-workspace-changed.events';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 import { ViewportFrameSink } from './viewport-frame-sink';
-import { TunnelViewportCryptoService } from './tunnel-viewport-crypto.service';
+import {
+  TunnelViewportCryptoService,
+  type ViewportChannel,
+  type ViewportChannelMode,
+} from './tunnel-viewport-crypto.service';
+import type { RpcCryptoContext } from './tunnel-rpc-crypto.service';
 
 const logger = createLogger('ViewportStreamer');
 
@@ -24,6 +41,10 @@ const MIN_CAPTURE_INTERVAL_MS = 350;
 interface ViewportSubscription {
   readonly subscriptionId: string;
   readonly sessionId: string;
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly ownerKid: string | null;
+  readonly cryptoMode: Extract<ViewportChannelMode, 'plaintext' | 'encrypted'>;
   /** Per-subscription monotonic counter, assigned to each frame actually SENT. */
   seq: number;
   /** Last screen the bridge received (diff baseline); `null` ⇒ next send is a full. */
@@ -39,7 +60,7 @@ interface ViewportSubscription {
 }
 
 /**
- * Server half of the live viewport (MobileLiveViewport, Task 4). Owns the per-subscription
+ * Server half of the live mobile viewport. Owns the per-subscription
  * lifecycle for `terminal.viewport.subscribe`/`unsubscribe`:
  *
  * - Source-side ownership check (`{sessionId, projectId}` via `ActiveSessionLookup`) BEFORE
@@ -56,6 +77,7 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
   private readonly subscriptions = new Map<string, ViewportSubscription>();
   private subscriptionSeq = 0;
   private detachReadyListener: (() => void) | null = null;
+  private detachModeCleanup: (() => void) | null = null;
 
   constructor(
     private readonly activeSessions: ActiveSessionLookup,
@@ -65,14 +87,21 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     // binds this token to the tunnel client via a ModuleRef-lazy factory, so there is no
     // construction-time DI cycle either (see cloud-tunnel.module.ts).
     @Inject(ViewportFrameSink) private readonly sink: ViewportFrameSink,
-    // Viewport E2EE seam (Phase 4): decides plaintext/encrypted/blocked and seals the screen.
+    // Decides plaintext/encrypted/blocked and seals the screen for the lease owner.
     private readonly viewportCrypto: TunnelViewportCryptoService,
+    @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
+    private readonly deviceAccess: PairedDeviceWorkspaceAccessService,
+    private readonly workspaceMode: WorkspaceModeCoordinatorService,
   ) {}
 
   onModuleInit(): void {
     // On every (re)connect, re-anchor each live subscription with a fresh full screen so
     // the bridge's latest-only buffer is re-primed (full-on-reconnect, no replay).
     this.detachReadyListener = this.sink.onPushReady(() => this.reanchorAll());
+    this.detachModeCleanup = this.workspaceMode.registerCleanupHook(
+      'viewport-ownerless-leases',
+      () => this.teardownOwnerless(),
+    );
   }
 
   /**
@@ -81,12 +110,30 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
    * `rows` are accepted for forward-compat but ignored in v1 (single shared tmux pane, no
    * mobile resize). Emits the initial FULL screen before resolving.
    */
-  async subscribe(params: Record<string, unknown>): Promise<{ subscriptionId: string }> {
+  async subscribe(
+    params: Record<string, unknown>,
+    cryptoCtx?: RpcCryptoContext,
+  ): Promise<{ subscriptionId: string }> {
     const sessionId = params['sessionId'] as string;
     const projectId = params['projectId'] as string;
+    const ownerKid = cryptoCtx?.senderKid ?? null;
 
     // SOURCE-SIDE auth: the session must belong to the requested project BEFORE streaming.
     await this.assertSessionInProject(sessionId, projectId);
+    const project = await this.storage.getProject(projectId);
+    const mode = await this.workspaceMode.getSnapshot();
+    if ((mode.multiWorkspaceMode || mode.failClosedPending) && !ownerKid) {
+      throw new ForbiddenError('A paired device is required for multi-workspace viewport access', {
+        code: 'WORKSPACE_DEVICE_PAIRING_REQUIRED',
+      });
+    }
+    if (ownerKid) this.assertDeviceWorkspaceAccess(ownerKid, project.workspaceId);
+
+    const channel = await this.viewportCrypto.resolveViewportChannel(
+      this.sink.getInstanceId(),
+      ownerKid,
+    );
+    const cryptoMode = this.requireUsableChannel(channel, ownerKid);
 
     if (!this.terminalViewport.hasSession(sessionId)) {
       throw new AppError(
@@ -101,6 +148,10 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     const sub: ViewportSubscription = {
       subscriptionId,
       sessionId,
+      projectId,
+      workspaceId: project.workspaceId,
+      ownerKid,
+      cryptoMode,
       seq: 0,
       lastScreen: null,
       detachData: () => {},
@@ -117,25 +168,58 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     sub.detachData = this.terminalViewport.onData(sessionId, () => this.markDirty(sub));
 
     // Initial full screen (lastScreen === null ⇒ full).
-    await this.captureAndSend(sub);
+    try {
+      await this.captureAndSend(sub);
+    } catch (error) {
+      this.teardown(sub);
+      throw error;
+    }
 
     return { subscriptionId };
   }
 
   /** `terminal.viewport.unsubscribe({ subscriptionId })` — stop streaming; PTY survives. */
-  unsubscribe(params: Record<string, unknown>): { ok: boolean } {
+  unsubscribe(params: Record<string, unknown>, cryptoCtx?: RpcCryptoContext): { ok: boolean } {
     const subscriptionId = params['subscriptionId'] as string;
     const sub = this.subscriptions.get(subscriptionId);
     if (!sub) return { ok: false };
+    if (sub.ownerKid !== (cryptoCtx?.senderKid ?? null)) return { ok: false };
     this.teardown(sub);
     return { ok: true };
+  }
+
+  resolveSubscriptionProjectId(subscriptionId: string): string | null {
+    return this.subscriptions.get(subscriptionId)?.projectId ?? null;
   }
 
   onModuleDestroy(): void {
     this.detachReadyListener?.();
     this.detachReadyListener = null;
+    this.detachModeCleanup?.();
+    this.detachModeCleanup = null;
     for (const sub of [...this.subscriptions.values()]) {
       this.teardown(sub);
+    }
+  }
+
+  @OnEvent(PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT)
+  handleDeviceAccessRevoked(event: PairedDeviceWorkspaceAccessRevokedEvent): void {
+    const removed = event.workspaceIds ? new Set(event.workspaceIds) : null;
+    for (const sub of [...this.subscriptions.values()]) {
+      if (sub.ownerKid !== event.deviceKid) continue;
+      if (!removed || removed.has(sub.workspaceId)) this.teardown(sub);
+    }
+  }
+
+  @OnEvent(PROJECT_WORKSPACE_CHANGED_EVENT)
+  handleProjectWorkspaceChanged(event: ProjectWorkspaceChangedEvent): void {
+    for (const sub of [...this.subscriptions.values()]) {
+      if (
+        (event.projectId && sub.projectId === event.projectId) ||
+        (!event.projectId && sub.workspaceId === event.previousWorkspaceId)
+      ) {
+        this.teardown(sub);
+      }
     }
   }
 
@@ -165,6 +249,9 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     sub.dirty = false;
     try {
       await this.captureAndSend(sub);
+    } catch (error) {
+      logger.debug({ error, subscriptionId: sub.subscriptionId }, 'Viewport lease invalidated');
+      this.teardown(sub);
     } finally {
       sub.capturing = false;
     }
@@ -174,6 +261,8 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
 
   /** Capture the visible screen and send a full or diff frame (skips if nothing changed). */
   private async captureAndSend(sub: ViewportSubscription): Promise<void> {
+    if (sub.disposed) return;
+    await this.assertLeaseCurrent(sub);
     if (sub.disposed) return;
     sub.lastCaptureAt = Date.now();
 
@@ -200,14 +289,23 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     // Decide how this frame may travel to the paired mobile. The terminal screen can carry
     // secrets, so it is sealed when the lane is E2EE-capable; otherwise it rides plaintext
     // (back-compat), or is withheld entirely when E2EE is required but the peer is incapable.
-    const channel = await this.viewportCrypto.resolveViewportChannel(this.sink.getInstanceId());
+    await this.assertLeaseCurrent(sub);
     if (sub.disposed) return;
+    const channel = await this.viewportCrypto.resolveViewportChannel(
+      this.sink.getInstanceId(),
+      sub.ownerKid,
+    );
+    if (sub.disposed) return;
+    if (channel.mode !== sub.cryptoMode) {
+      throw new AppError(
+        'Viewport encryption state changed; reconnect the viewport.',
+        'VIEWPORT_RECONNECT_REQUIRED',
+        409,
+      );
+    }
 
     let body: ViewportBody | null;
-    if (channel.mode === 'blocked') {
-      // E2EE required + incapable peer → never stream plaintext terminal content.
-      return;
-    } else if (channel.mode === 'encrypted') {
+    if (channel.mode === 'encrypted') {
       // v1 encrypted viewport is FULL-FRAME-ONLY: emit a fresh sealed full whenever the screen
       // changed vs the baseline (reuse the diff change-detector purely as a "did it change?"
       // check; the diff body itself is discarded). The bridge buffers the latest opaque full.
@@ -230,6 +328,8 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
       body,
     };
 
+    await this.assertLeaseCurrent(sub);
+    if (sub.disposed) return;
     if (this.sink.sendViewport(frame)) {
       // Advance the baseline + monotonic seq only for frames the bridge actually received,
       // so seq stays gap-free across sent frames and a dropped tunnel re-anchors with a full.
@@ -256,6 +356,57 @@ export class ViewportStreamerService implements OnModuleInit, OnModuleDestroy {
     }
     sub.detachData();
     this.subscriptions.delete(sub.subscriptionId);
+  }
+
+  private teardownOwnerless(): void {
+    for (const sub of [...this.subscriptions.values()]) {
+      if (!sub.ownerKid) this.teardown(sub);
+    }
+  }
+
+  private requireUsableChannel(
+    channel: ViewportChannel,
+    ownerKid: string | null,
+  ): Extract<ViewportChannelMode, 'plaintext' | 'encrypted'> {
+    if (ownerKid && channel.mode === 'encrypted') return 'encrypted';
+    if (!ownerKid && channel.mode === 'plaintext') return 'plaintext';
+    throw new AppError(
+      'Secure viewport transport is unavailable. Reconnect or re-pair this device.',
+      'VIEWPORT_E2EE_UNAVAILABLE',
+      409,
+    );
+  }
+
+  private async assertLeaseCurrent(sub: ViewportSubscription): Promise<void> {
+    const mode = await this.workspaceMode.getSnapshot();
+    if ((mode.multiWorkspaceMode || mode.failClosedPending) && !sub.ownerKid) {
+      throw new ForbiddenError('The viewport lease is no longer authorized', {
+        code: 'WORKSPACE_DEVICE_PAIRING_REQUIRED',
+      });
+    }
+
+    const scope = await this.activeSessions.getSessionProjectScope(sub.sessionId);
+    if (!scope || scope.projectId !== sub.projectId) {
+      throw new ForbiddenError('The viewport lease is no longer authorized', {
+        code: 'SESSION_PROJECT_MISMATCH',
+      });
+    }
+    const project = await this.storage.getProject(sub.projectId);
+    if (project.workspaceId !== sub.workspaceId) {
+      throw new ForbiddenError('The viewport lease is no longer authorized', {
+        code: 'PROJECT_WORKSPACE_CHANGED',
+      });
+    }
+    if (sub.ownerKid) this.assertDeviceWorkspaceAccess(sub.ownerKid, sub.workspaceId);
+  }
+
+  private assertDeviceWorkspaceAccess(ownerKid: string, workspaceId: string): void {
+    const access = this.deviceAccess.getAccess(ownerKid);
+    if (!access.workspaceIds.includes(workspaceId)) {
+      throw new ForbiddenError('This paired device cannot access the project workspace', {
+        code: 'WORKSPACE_ACCESS_DENIED',
+      });
+    }
   }
 
   /**

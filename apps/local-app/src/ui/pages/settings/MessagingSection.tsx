@@ -53,7 +53,7 @@ export function MessagingSection() {
             <div className="space-y-0.5">
               <Label htmlFor="pool-enabled">Enable Message Pooling</Label>
               <p className="text-xs text-muted-foreground">
-                When disabled, all messages are delivered immediately
+                When disabled, default-lane messages bypass batching; Delivery on Idle still waits
               </p>
             </div>
             <Switch
@@ -69,8 +69,8 @@ export function MessagingSection() {
               <AlertTriangle className="h-4 w-4" />
               <AlertTitle>Pooling Disabled</AlertTitle>
               <AlertDescription>
-                Messages will be delivered immediately. This may cause context fragmentation when
-                multiple events occur rapidly.
+                Default-lane messages will be delivered immediately. Delivery on Idle remains queued
+                until the target session is idle.
               </AlertDescription>
             </Alert>
           )}
@@ -122,7 +122,7 @@ export function MessagingSection() {
             />
             <p className="text-xs text-muted-foreground">
               Forces flush after this time regardless of new messages. Prevents starvation.
-              {poolMaxWaitMs < poolDelayMs && (
+              {poolEnabled && poolMaxWaitMs < poolDelayMs && (
                 <span className="text-destructive ml-1">(Must be ≥ debounce delay)</span>
               )}
             </p>
@@ -150,10 +150,10 @@ export function MessagingSection() {
                   setPoolMaxMessages(n);
                 }
               }}
-              disabled={!poolEnabled || updateMessagePoolMutation.isPending}
+              disabled={updateMessagePoolMutation.isPending}
             />
             <p className="text-xs text-muted-foreground">
-              Forces flush when this many messages are queued. Range: 1 - 50
+              Default-lane flush threshold and idle-lane hard capacity. Range: 1 - 50
             </p>
           </div>
 
@@ -182,7 +182,7 @@ export function MessagingSection() {
             <Button
               disabled={
                 poolMaxMessages === '' ||
-                poolMaxWaitMs < poolDelayMs ||
+                (poolEnabled && poolMaxWaitMs < poolDelayMs) ||
                 updateMessagePoolMutation.isPending
               }
               onClick={() => {
@@ -196,7 +196,7 @@ export function MessagingSection() {
                   Math.min(poolDelayMs, MAX_POOL_DELAY_MS),
                 );
                 const coercedMaxWaitMs = Math.max(
-                  coercedDelayMs,
+                  poolEnabled ? coercedDelayMs : MIN_POOL_MAX_WAIT_MS,
                   Math.min(poolMaxWaitMs, MAX_POOL_MAX_WAIT_MS),
                 );
                 updateMessagePoolMutation.mutate({

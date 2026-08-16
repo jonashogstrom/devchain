@@ -10,9 +10,28 @@ import {
   primaryKey,
 } from 'drizzle-orm/sqlite-core';
 
+export const DEFAULT_PROJECT_WORKSPACE_ID = '0defa017-0000-4000-8000-000000000001';
+
+export const projectWorkspaces = sqliteTable(
+  'project_workspaces',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    isDefault: integer('is_default', { mode: 'boolean' }).notNull().default(false),
+    position: integer('position').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    nameUniqueCi: uniqueIndex('project_workspaces_name_ci_idx').on(sql`lower(${table.name})`),
+    positionIdx: index('project_workspaces_position_idx').on(table.position, table.id),
+  }),
+);
+
 // Projects
 export const projects = sqliteTable('projects', {
   id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').notNull().default(DEFAULT_PROJECT_WORKSPACE_ID),
   name: text('name').notNull(),
   description: text('description'),
   rootPath: text('root_path').notNull(),
@@ -22,6 +41,19 @@ export const projects = sqliteTable('projects', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+export const pairedDeviceWorkspaceGrants = sqliteTable(
+  'paired_device_workspace_grants',
+  {
+    deviceKid: text('device_kid').notNull(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => projectWorkspaces.id, { onDelete: 'cascade' }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.deviceKid, table.workspaceId] }),
+  }),
+);
 
 // Statuses (Kanban columns)
 export const statuses = sqliteTable(
@@ -1305,7 +1337,7 @@ export const automationSubscribers = sqliteTable(
     actionInputs: text('action_inputs', { mode: 'json' }).notNull(),
 
     // Execution options
-    delayMs: integer('delay_ms').notNull().default(0), // Delay before executing action (0-30000)
+    delayMs: integer('delay_ms').notNull().default(0), // Delay before executing action (0-120000 ms, inclusive)
     cooldownMs: integer('cooldown_ms').notNull().default(5000), // Subscriber-level cooldown (0-60000)
     retryOnError: integer('retry_on_error', { mode: 'boolean' }).notNull().default(false),
 

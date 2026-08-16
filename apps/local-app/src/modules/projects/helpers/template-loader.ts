@@ -37,6 +37,7 @@ export interface CreateFromTemplateInputLike {
   name: string;
   description?: string | null;
   rootPath: string;
+  workspaceId?: string;
   projectId?: string;
   slug?: string;
   version?: string | null;
@@ -309,6 +310,7 @@ export async function createFromTemplateWithHelper(
         description: input.description ?? null,
         rootPath: input.rootPath,
         isTemplate: false,
+        ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       },
       input.projectId ? { projectId: input.projectId } : undefined,
     );

@@ -1,77 +1,31 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import type { BulkEditRow } from '@/ui/components/board/BulkEditDialog';
+import { useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { EpicFormData } from '@/ui/components/board/EpicFormDialog';
 import { useToast } from '@/ui/hooks/use-toast';
 import { useOptionalWorktreeTab } from '@/ui/hooks/useWorktreeTab';
 import { useSelectedProject } from '@/ui/hooks/useProjectSelection';
-import { useBoardFilters } from '@/ui/hooks/useBoardFilters';
 import { useBoardData } from '@/ui/hooks/useBoardData';
 import { useBoardSync } from '@/ui/hooks/useBoardSync';
 import { useBoardMutations } from '@/ui/hooks/useBoardMutations';
 import { useBoardDragDrop } from '@/ui/hooks/useBoardDragDrop';
-import {
-  parseBoardFilters,
-  serializeBoardFilters,
-  type BoardFilterParams,
-} from '@/ui/lib/url-filters';
-import { getDefaultFilterId, getFilterById } from '@/ui/lib/saved-filters';
-import { fetchSubEpics } from '@/ui/pages/board/lib/board-api';
-import type { Epic, Status } from '@/ui/types';
-import { useFetchFactory } from '@/ui/hooks/useFetchFactory';
+import { useBoardBulkEdit } from '@/ui/hooks/board/useBoardBulkEdit';
+import { useBoardRouteState } from '@/ui/hooks/board/useBoardRouteState';
+import { useBoardViewPreferences } from '@/ui/hooks/board/useBoardViewPreferences';
+import type { Agent, Epic, Status } from '@/ui/types';
+import type {
+  BoardContentModel,
+  BoardKanbanColumnModel,
+  BoardPagePresentation,
+} from '@/ui/pages/board/board-page-presentation';
 
-interface BoardViewPreferences {
-  collapsedStatusIds: string[];
-  autoCollapseEmpty: boolean;
-  explicitlyExpandedStatusIds: string[];
-  viewMode: 'kanban' | 'list';
-  listPageSize: number;
-}
-
-const BOARD_PREFS_KEY_PREFIX = 'devchain:board:columns:';
-
-function getBoardPreferences(projectId: string): BoardViewPreferences {
-  const key = `${BOARD_PREFS_KEY_PREFIX}${projectId}`;
-  const stored = localStorage.getItem(key);
-  if (stored) {
-    try {
-      const parsed = JSON.parse(stored);
-      return {
-        collapsedStatusIds: parsed.collapsedStatusIds || [],
-        autoCollapseEmpty: parsed.autoCollapseEmpty ?? true,
-        explicitlyExpandedStatusIds: parsed.explicitlyExpandedStatusIds || [],
-        viewMode: parsed.viewMode === 'list' ? 'list' : 'kanban',
-        listPageSize: typeof parsed.listPageSize === 'number' ? parsed.listPageSize : 25,
-      };
-    } catch {
-      // Fall through to defaults
-    }
-  }
-  return {
-    collapsedStatusIds: [],
-    autoCollapseEmpty: true,
-    explicitlyExpandedStatusIds: [],
-    viewMode: 'kanban',
-    listPageSize: 25,
-  };
-}
-
-function saveBoardPreferences(projectId: string, prefs: BoardViewPreferences): void {
-  const key = `${BOARD_PREFS_KEY_PREFIX}${projectId}`;
-  localStorage.setItem(key, JSON.stringify(prefs));
-}
-
-export function useBoardPageController() {
+export function useBoardPageController(): BoardPagePresentation {
   const navigate = useNavigate();
-  const location = useLocation();
   const { toast } = useToast();
   const { selectedProjectId, selectedProject: activeProject } = useSelectedProject();
   const { activeWorktree, worktrees } = useOptionalWorktreeTab();
-  const apiFetch = useFetchFactory();
   const hasRunningWorktrees =
     activeWorktree === null && worktrees.some((wt) => wt.status === 'running');
   const [showDialog, setShowDialog] = useState(false);
-  const [editingEpic, setEditingEpic] = useState<Epic | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<Epic | null>(null);
   const [moveToWorktreeEpic, setMoveToWorktreeEpic] = useState<Epic | null>(null);
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null);
@@ -82,31 +36,12 @@ export function useBoardPageController() {
     tags: '',
     parentId: 'none',
   });
-  const [activeParentId, setActiveParentId] = useState<string | null>(null);
-  const [expandedEmptyColumns, setExpandedEmptyColumns] = useState<Set<string>>(new Set());
-  const [boardPrefs, setBoardPrefs] = useState<BoardViewPreferences>({
-    collapsedStatusIds: [],
-    autoCollapseEmpty: true,
-    explicitlyExpandedStatusIds: [],
-    viewMode: 'kanban',
-    listPageSize: 25,
-  });
   const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
-  const [bulkModalOpen, setBulkModalOpen] = useState(false);
-  const [bulkTarget, setBulkTarget] = useState<Epic | null>(null);
-  const [bulkRows, setBulkRows] = useState<BulkEditRow[]>([]);
-  const [bulkBaseline, setBulkBaseline] = useState<
-    Record<string, { statusId: string; agentId: string | null }>
-  >({});
-  const [bulkError, setBulkError] = useState<string | null>(null);
-  const [bulkLoading, setBulkLoading] = useState(false);
+  const bulkEdit = useBoardBulkEdit({ selectedProjectId });
 
-  const appliedDefaultsRef = useRef<Set<string>>(new Set());
-  const lastAutoAppliedRef = useRef<{ projectId: string; search: string } | null>(null);
-
-  // URL → UI hydration (read-only in this epic)
-  const { filters } = useBoardFilters();
+  const routeState = useBoardRouteState({ selectedProjectId });
+  const { filters } = routeState;
   const {
     epicsKey,
     statusesLoading,
@@ -124,124 +59,36 @@ export function useBoardPageController() {
     subEpicCountsMap,
   } = useBoardData({ selectedProjectId, filters });
 
-  useEffect(() => {
-    // Only update when URL-derived parent differs
-    const nextParent = filters.parent ?? null;
-    setActiveParentId((prev) => (prev === nextParent ? prev : nextParent));
-  }, [filters.parent]);
+  const viewPreferences = useBoardViewPreferences({
+    selectedProjectId,
+    parentFilter: filters.parent,
+    routeView: filters.view,
+    routePageSize: filters.pageSize,
+    onRouteViewChange: routeState.setView,
+    onRoutePageSizeChange: routeState.setPageSize,
+  });
+  const { preferences: boardPrefs, currentViewMode, currentPageSize } = viewPreferences;
 
-  useEffect(() => {
-    if (!selectedProjectId) return;
-    if (appliedDefaultsRef.current.has(selectedProjectId)) return;
-
-    const isCarryover =
-      lastAutoAppliedRef.current !== null &&
-      lastAutoAppliedRef.current.projectId !== selectedProjectId &&
-      lastAutoAppliedRef.current.search === location.search;
-
-    if (location.search !== '' && !isCarryover) {
-      appliedDefaultsRef.current.add(selectedProjectId);
-      return;
-    }
-
-    const defaultId = getDefaultFilterId(selectedProjectId);
-    const filter = defaultId ? getFilterById(selectedProjectId, defaultId) : null;
-    const normalized = filter
-      ? serializeBoardFilters(parseBoardFilters(new URLSearchParams(filter.qs)))
-      : '';
-
-    if (normalized) {
-      const newSearch = `?${normalized}`;
-      navigate({ pathname: location.pathname, search: newSearch }, { replace: true });
-      lastAutoAppliedRef.current = { projectId: selectedProjectId, search: newSearch };
-    } else if (isCarryover) {
-      navigate({ pathname: location.pathname, search: '' }, { replace: true });
-      lastAutoAppliedRef.current = null;
-    }
-
-    appliedDefaultsRef.current.add(selectedProjectId);
-  }, [selectedProjectId, location.search, location.pathname, navigate]);
-
-  // Track previous status filter to detect changes
-  const prevStatusFilterRef = useRef<string[] | undefined>(filters.status);
-
-  // Reset pagination to page 1 when status filter changes
-  useEffect(() => {
-    const prevStatus = prevStatusFilterRef.current;
-    const currStatus = filters.status;
-
-    // Compare arrays by serializing (both could be undefined or arrays)
-    const prevKey = prevStatus ? [...prevStatus].sort().join(',') : '';
-    const currKey = currStatus ? [...currStatus].sort().join(',') : '';
-
-    if (prevKey !== currKey && filters.page && filters.page > 1) {
-      // Status filter changed and we're not on page 1 - reset to page 1
-      const newFilters: BoardFilterParams = { ...filters };
-      delete newFilters.page;
-      const canonical = serializeBoardFilters(newFilters);
-      navigate(
-        { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-        { replace: true },
-      );
-    }
-    prevStatusFilterRef.current = currStatus;
-  }, [filters, location.pathname, navigate]);
-
-  // Initial canonicalization: replace long keys with short keys and normalize ordering
-  useEffect(() => {
-    const sp = new URLSearchParams(location.search);
-    const hasLongKeys = ['archived', 'status', 'parent', 'agent', 'tags', 'q', 'sub', 'sort'].some(
-      (k) => sp.has(k),
-    );
-    const subVal = sp.get('sub');
-    const hasBoolWords = subVal === 'true' || subVal === 'false';
-    if (hasLongKeys || hasBoolWords) {
-      const canonical = serializeBoardFilters(parseBoardFilters(location.search));
-      const current = location.search.startsWith('?') ? location.search.slice(1) : location.search;
-      if (canonical !== current) {
-        navigate(
-          { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-          { replace: true },
-        );
-      }
-    }
-  }, [location.key]);
+  const resetCreateDialog = useCallback(() => {
+    setShowDialog(false);
+    setFormData({ title: '', description: '', tags: '', parentId: 'none' });
+  }, []);
 
   const {
     createMutation,
-    updateMutation,
     deleteMutation,
-    bulkUpdateMutation,
     mutateDeleteEpic,
     deleteEpicsByIds,
     mutateUpdateEpicStatus,
     mutateUpdateEpicStatusAsync,
     mutateUpdateEpicAgentAsync,
-    mutateBulkUpdate,
   } = useBoardMutations({
     epicsKey,
     toast,
-    onCreateSuccess: () => {
-      setShowDialog(false);
-      setFormData({ title: '', description: '', tags: '', parentId: 'none' });
-    },
-    onUpdateSuccess: () => {
-      setShowDialog(false);
-      setEditingEpic(null);
-      setFormData({ title: '', description: '', tags: '', parentId: 'none' });
-    },
+    onCreateSuccess: resetCreateDialog,
     onDeleteSettled: () => {
       setDeleteConfirm(null);
     },
-    onBulkSuccess: () => {
-      setBulkModalOpen(false);
-      setBulkTarget(null);
-      setBulkRows([]);
-      setBulkBaseline({});
-      setBulkError(null);
-      setBulkLoading(false);
-    },
-    onBulkError: setBulkError,
   });
 
   // Client-side epic filtering by status (for List view and general use)
@@ -256,210 +103,19 @@ export function useBoardPageController() {
     [filters.status],
   );
 
-  // Display name for parent banner: prefer resolved epic title, fallback to id/slug from URL filters
-  const activeParentName = useMemo(() => {
-    if (activeParent?.title) return activeParent.title;
-    return filters.parent ?? null;
-  }, [activeParent?.title, filters.parent]);
-
-  useEffect(() => {
-    setExpandedEmptyColumns(new Set());
-    if (selectedProjectId) {
-      setBoardPrefs(getBoardPreferences(selectedProjectId));
-    }
-    // Preserve activeParentId when deep-linked via URL (filters.parent present)
-    if (!filters.parent) {
-      setActiveParentId(null);
-    }
-  }, [selectedProjectId, filters.parent]);
-
-  useEffect(() => {
-    if (
-      activeParentId &&
-      !(epicsData?.items ?? []).some((epic: Epic) => epic.id === activeParentId)
-    ) {
-      setActiveParentId(null);
-    }
-  }, [activeParentId, epicsData]);
-
-  const handleExpandEmptyColumn = useCallback((statusId: string) => {
-    setExpandedEmptyColumns((prev) => new Set(prev).add(statusId));
-  }, []);
-
-  const handleToggleColumnCollapse = useCallback(
-    (statusId: string) => {
-      if (!selectedProjectId) return;
-
-      setBoardPrefs((prev) => {
-        const isCurrentlyCollapsed = prev.collapsedStatusIds.includes(statusId);
-        const newPrefs = {
-          ...prev,
-          collapsedStatusIds: isCurrentlyCollapsed
-            ? prev.collapsedStatusIds.filter((id) => id !== statusId)
-            : [...prev.collapsedStatusIds, statusId],
-          // Track explicitly expanded columns (not collapsed)
-          explicitlyExpandedStatusIds: isCurrentlyCollapsed
-            ? [...prev.explicitlyExpandedStatusIds, statusId]
-            : prev.explicitlyExpandedStatusIds.filter((id) => id !== statusId),
-        };
-        saveBoardPreferences(selectedProjectId, newPrefs);
-        return newPrefs;
-      });
-    },
-    [selectedProjectId],
-  );
-
-  const handleCollapseAll = useCallback(() => {
-    if (!selectedProjectId) return;
-
-    const allIds = sortedStatuses.map((s: Status) => s.id);
-    const newPrefs: BoardViewPreferences = {
-      collapsedStatusIds: allIds,
-      autoCollapseEmpty: boardPrefs.autoCollapseEmpty,
-      explicitlyExpandedStatusIds: [],
-      viewMode: boardPrefs.viewMode,
-      listPageSize: boardPrefs.listPageSize,
-    };
-    setBoardPrefs(newPrefs);
-    saveBoardPreferences(selectedProjectId, newPrefs);
-    setExpandedEmptyColumns(new Set());
-  }, [
-    selectedProjectId,
-    sortedStatuses,
-    boardPrefs.autoCollapseEmpty,
-    boardPrefs.viewMode,
-    boardPrefs.listPageSize,
-  ]);
-
-  const handleResetDefaults = useCallback(() => {
-    if (!selectedProjectId) return;
-
-    const defaultPrefs: BoardViewPreferences = {
-      collapsedStatusIds: [],
-      autoCollapseEmpty: true,
-      explicitlyExpandedStatusIds: [],
-      viewMode: 'kanban',
-      listPageSize: 25,
-    };
-    setBoardPrefs(defaultPrefs);
-    saveBoardPreferences(selectedProjectId, defaultPrefs);
-  }, [selectedProjectId]);
-
-  // Current view mode: URL takes precedence, falls back to localStorage
-  const currentViewMode = filters.view ?? boardPrefs.viewMode;
-
-  const handleViewModeChange = useCallback(
-    (mode: 'kanban' | 'list') => {
-      if (!selectedProjectId) return;
-      if (mode === currentViewMode) return;
-
-      // Update localStorage preferences
-      const newPrefs: BoardViewPreferences = {
-        ...boardPrefs,
-        viewMode: mode,
-      };
-      setBoardPrefs(newPrefs);
-      saveBoardPreferences(selectedProjectId, newPrefs);
-
-      // Update URL with new view param
-      const newFilters: BoardFilterParams = { ...filters, view: mode };
-      const canonical = serializeBoardFilters(newFilters);
-      navigate(
-        { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-        { replace: true },
-      );
-    },
-    [selectedProjectId, currentViewMode, boardPrefs, filters, navigate, location.pathname],
-  );
-
-  // Handler for toggling a status in the filter (multi-select)
   const handleToggleStatusFilter = useCallback(
-    (statusId: string) => {
-      const currentStatuses = filters.status ?? [];
-      const allStatusIds = sortedStatuses.map((s: Status) => s.id);
-      let newStatuses: string[];
-
-      if (currentStatuses.length === 0) {
-        // No filter active = all selected. Clicking one means "select only others" (deselect this one)
-        newStatuses = allStatusIds.filter((id: string) => id !== statusId);
-      } else if (currentStatuses.includes(statusId)) {
-        // Remove this status from filter
-        newStatuses = currentStatuses.filter((id: string) => id !== statusId);
-      } else {
-        // Add this status to filter
-        newStatuses = [...currentStatuses, statusId];
-      }
-
-      // If all statuses selected, clear the filter (show all)
-      if (newStatuses.length === allStatusIds.length || newStatuses.length === 0) {
-        const newFilters: BoardFilterParams = { ...filters };
-        delete newFilters.status;
-        delete newFilters.page; // Reset pagination
-        const canonical = serializeBoardFilters(newFilters);
-        navigate(
-          { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-          { replace: true },
-        );
-      } else {
-        const newFilters: BoardFilterParams = { ...filters, status: newStatuses };
-        delete newFilters.page; // Reset pagination
-        const canonical = serializeBoardFilters(newFilters);
-        navigate(
-          { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-          { replace: true },
-        );
-      }
-    },
-    [filters, sortedStatuses, navigate, location.pathname],
-  );
-
-  // Handler for "Select All" / "Clear All" status filter
-  const handleSelectAllStatuses = useCallback(() => {
-    const newFilters: BoardFilterParams = { ...filters };
-    delete newFilters.status;
-    delete newFilters.page;
-    const canonical = serializeBoardFilters(newFilters);
-    navigate(
-      { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-      { replace: true },
-    );
-  }, [filters, navigate, location.pathname]);
-
-  // Handler for archived toggle
-  const handleToggleArchived = useCallback(
-    (showArchived: boolean) => {
-      const newFilters: BoardFilterParams = {
-        ...filters,
-        archived: showArchived ? 'all' : 'active',
-      };
-      delete newFilters.page; // Reset pagination
-      const canonical = serializeBoardFilters(newFilters);
-      navigate(
-        { pathname: location.pathname, search: canonical ? `?${canonical}` : '' },
-        { replace: true },
+    (statusId: string): void => {
+      routeState.toggleStatus(
+        statusId,
+        sortedStatuses.map((status: Status) => status.id),
       );
     },
-    [filters, navigate, location.pathname],
+    [routeState, sortedStatuses],
   );
 
-  // Handler for applying saved filters (replaces current filters, doesn't merge)
-  const handleApplySavedFilter = useCallback(
-    (qs: string) => {
-      // Parse saved query string
-      const saved = parseBoardFilters(qs);
-      // Remove pagination (always start fresh)
-      delete saved.page;
-      delete saved.pageSize;
-      // Replace current URL with saved filters
-      const newQs = serializeBoardFilters(saved);
-      navigate({ pathname: location.pathname, search: newQs ? `?${newQs}` : '' });
-    },
-    [navigate, location.pathname],
-  );
-
-  // Check if any filters are active (for visual indication)
-  const hasActiveFilters =
-    (filters.status && filters.status.length > 0) || filters.archived === 'all';
+  const handleCollapseAll = useCallback((): void => {
+    viewPreferences.collapseAll(sortedStatuses.map((status: Status) => status.id));
+  }, [sortedStatuses, viewPreferences]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -477,35 +133,30 @@ export function useBoardPageController() {
       .map((t) => t.trim())
       .filter((t) => t.length > 0);
 
-    if (editingEpic) {
-      updateMutation.mutate({
-        id: editingEpic.id,
-        data: {
-          title: formData.title,
-          description: formData.description || null,
-          tags,
-          version: editingEpic.version,
-        },
-      });
-    } else {
-      createMutation.mutate({
-        projectId: selectedProjectId,
-        statusId: selectedStatusId,
-        title: formData.title,
-        description: formData.description || null,
-        tags,
-        parentId: formData.parentId === 'none' ? null : formData.parentId,
-      });
-    }
+    createMutation.mutate({
+      projectId: selectedProjectId,
+      statusId: selectedStatusId,
+      title: formData.title,
+      description: formData.description || null,
+      tags,
+      parentId: formData.parentId === 'none' ? null : formData.parentId,
+    });
   };
 
-  const handleEdit = (epic: Epic) => {
-    navigate(`/epics/${epic.id}?edit=1`);
-  };
+  const handleEdit = useCallback(
+    (epic: Epic) => {
+      navigate(`/epics/${epic.id}?edit=1`);
+    },
+    [navigate],
+  );
 
-  const handleDelete = (epic: Epic) => {
+  const openEpicDetails = useCallback((epic: Epic) => navigate(`/epics/${epic.id}`), [navigate]);
+
+  const openStatusManagement = useCallback(() => navigate('/statuses'), [navigate]);
+
+  const handleDelete = useCallback((epic: Epic) => {
     setDeleteConfirm(epic);
-  };
+  }, []);
 
   const handleMoveToWorktree = useCallback((epic: Epic) => {
     setMoveToWorktreeEpic(epic);
@@ -514,143 +165,20 @@ export function useBoardPageController() {
   const handleToggleParentFilter = useCallback(
     (epic: Epic) => {
       if (epic.parentId) return; // only top-level epics can be parent filters
-      const base = parseBoardFilters(location.search);
-      const next: BoardFilterParams = { ...base };
-      if (filters.parent === epic.id) {
-        delete next.parent; // clear filter
-      } else {
-        next.parent = epic.id;
-      }
-      // Reset page to 1 when filter changes
-      delete next.page;
-      const qs = serializeBoardFilters(next);
-      navigate({ pathname: location.pathname, search: qs ? `?${qs}` : '' }); // push
+      routeState.setParent(filters.parent === epic.id ? null : epic.id);
     },
-    [filters.parent, location.pathname, location.search, navigate],
+    [filters.parent, routeState],
   );
 
-  const clearParentFilter = useCallback(() => {
-    const base = parseBoardFilters(location.search);
-    const next: BoardFilterParams = { ...base };
-    delete next.parent;
-    // Reset page to 1 when filter changes
-    delete next.page;
-    const qs = serializeBoardFilters(next);
-    navigate({ pathname: location.pathname, search: qs ? `?${qs}` : '' });
-  }, [location.pathname, location.search, navigate]);
+  const clearParentFilter = useCallback((): void => {
+    routeState.setParent(null);
+  }, [routeState]);
 
-  const handleOpenBulkModal = useCallback((epic: Epic) => {
-    if (epic.parentId) return; // Only parent epics get bulk edit
-    setBulkTarget(epic);
-    setBulkModalOpen(true);
-  }, []);
-
-  const handleCloseBulkModal = useCallback(() => {
-    setBulkModalOpen(false);
-    setBulkTarget(null);
-    setBulkRows([]);
-    setBulkBaseline({});
-    setBulkError(null);
-    setBulkLoading(false);
-  }, []);
-
-  const handleBulkRowChange = useCallback(
-    (epicId: string, field: 'statusId' | 'agentId', value: string | null) => {
-      setBulkRows((prev) =>
-        prev.map((row) =>
-          row.epic.id === epicId
-            ? { ...row, [field]: field === 'agentId' ? value : (value as string) }
-            : row,
-        ),
-      );
-    },
-    [],
-  );
-
-  const bulkHasChanges = useMemo(
-    () =>
-      bulkRows.some((row) => {
-        const baseline = bulkBaseline[row.epic.id];
-        if (!baseline) return false;
-        return (
-          baseline.statusId !== row.statusId || (baseline.agentId ?? null) !== (row.agentId ?? null)
-        );
-      }),
-    [bulkRows, bulkBaseline],
-  );
-
-  useEffect(() => {
-    if (!bulkTarget) return;
-
-    let cancelled = false;
-    setBulkLoading(true);
-    setBulkError(null);
-
-    const resolvedParent =
-      (epicsData?.items ?? []).find((item: Epic) => item.id === bulkTarget.id) ?? bulkTarget;
-
-    (async () => {
-      try {
-        const subEpics = await fetchSubEpics(bulkTarget.id, apiFetch);
-        if (cancelled) return;
-        const children = Array.isArray(subEpics?.items) ? (subEpics.items as Epic[]) : [];
-        const rows: BulkEditRow[] = [
-          {
-            epic: resolvedParent,
-            statusId: resolvedParent.statusId,
-            agentId: resolvedParent.agentId ?? null,
-          },
-          ...children.map((child: Epic) => ({
-            epic: child,
-            statusId: child.statusId,
-            agentId: child.agentId ?? null,
-          })),
-        ];
-        setBulkRows(rows);
-        const baseline = Object.fromEntries(
-          rows.map((row) => [
-            row.epic.id,
-            { statusId: row.statusId, agentId: row.agentId ?? null },
-          ]),
-        );
-        setBulkBaseline(baseline);
-      } catch (error) {
-        if (cancelled) return;
-        setBulkError(error instanceof Error ? error.message : 'Failed to load sub-epics');
-      } finally {
-        if (!cancelled) {
-          setBulkLoading(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [bulkTarget?.id, epicsData?.items]);
-
-  const handleBulkSubmit = useCallback(() => {
-    if (!bulkTarget) return;
-    if (!bulkHasChanges) {
-      toast({
-        title: 'No changes',
-        description: 'Update at least one epic before saving.',
-      });
-      return;
-    }
-
-    mutateBulkUpdate({
-      rows: bulkRows,
-      baseline: bulkBaseline,
-      parentId: bulkTarget.id,
-    });
-  }, [bulkTarget, bulkHasChanges, bulkRows, bulkBaseline, mutateBulkUpdate, toast]);
-
-  const confirmDelete = () => {
+  const confirmDelete = useCallback(() => {
     if (deleteConfirm) {
       mutateDeleteEpic(deleteConfirm.id);
     }
-  };
+  }, [deleteConfirm, mutateDeleteEpic]);
 
   // Bulk delete handlers for list view multi-select
   const handleBulkDelete = useCallback((epicIds: string[]) => {
@@ -658,7 +186,7 @@ export function useBoardPageController() {
     setBulkDeleteIds(epicIds);
   }, []);
 
-  const confirmBulkDelete = async () => {
+  const confirmBulkDelete = useCallback(async () => {
     if (!bulkDeleteIds || bulkDeleteIds.length === 0) return;
     await deleteEpicsByIds(bulkDeleteIds);
     setBulkDeleteIds(null);
@@ -666,7 +194,7 @@ export function useBoardPageController() {
       title: 'Success',
       description: `Deleted ${bulkDeleteIds.length} epic${bulkDeleteIds.length > 1 ? 's' : ''} successfully`,
     });
-  };
+  }, [bulkDeleteIds, deleteEpicsByIds, toast]);
 
   useBoardSync({ selectedProjectId, parentFilter: filters.parent });
   const {
@@ -708,106 +236,211 @@ export function useBoardPageController() {
     [sortedStatuses, mutateUpdateEpicStatus, toast],
   );
 
-  const handleAddEpic = (statusId: string) => {
-    setSelectedStatusId(statusId);
-    setEditingEpic(null);
-    setFormData({
-      title: '',
-      description: '',
-      tags: '',
-      parentId: filters.parent ?? 'none',
-    });
-    setShowDialog(true);
-  };
+  const handleAddEpic = useCallback(
+    (statusId: string) => {
+      setSelectedStatusId(statusId);
+      setFormData({
+        title: '',
+        description: '',
+        tags: '',
+        parentId: filters.parent ?? 'none',
+      });
+      setShowDialog(true);
+    },
+    [filters.parent],
+  );
+
+  const changeCreateDialogOpen = useCallback(
+    (open: boolean) => {
+      if (open) {
+        setShowDialog(true);
+      } else {
+        resetCreateDialog();
+      }
+    },
+    [resetCreateDialog],
+  );
+  const changeCreateForm = useCallback((data: EpicFormData) => setFormData(data), []);
+  const closeDeleteDialog = useCallback(() => setDeleteConfirm(null), []);
+  const closeBulkDeleteDialog = useCallback(() => setBulkDeleteIds(null), []);
+  const changeDeleteDialogOpen = useCallback(
+    (open: boolean) => !open && setDeleteConfirm(null),
+    [],
+  );
+  const changeBulkDeleteDialogOpen = useCallback(
+    (open: boolean) => !open && setBulkDeleteIds(null),
+    [],
+  );
+  const changeMoveToWorktreeDialogOpen = useCallback(
+    (open: boolean) => !open && setMoveToWorktreeEpic(null),
+    [],
+  );
+  const changeFilterPopoverOpen = useCallback((open: boolean) => setFilterPopoverOpen(open), []);
+  const changeColumnPickerOpen = useCallback((open: boolean) => setColumnPickerOpen(open), []);
+
+  const statusEpicCounts = Object.fromEntries(
+    sortedStatuses.map((status) => [status.id, getEpicsByStatus(status.id).length]),
+  );
+
+  const columns: BoardKanbanColumnModel[] = visibleStatuses.map((status) => {
+    const epics = getEpicsByStatus(status.id);
+    const common = {
+      status,
+      epics,
+      activeParentId: filters.parent ?? null,
+      isActiveDrop: activeDropStatusId === status.id,
+      statusOrder: sortedStatuses,
+      subEpicCounts: subEpicCountsMap,
+      subEpicStatusCountsByEpicId,
+      hasRunningWorktrees,
+      getAgentName,
+      addEpic: handleAddEpic,
+      editEpic: handleEdit,
+      deleteEpic: handleDelete,
+      openBulkEdit: bulkEdit.open,
+      openEpicDetails,
+      toggleParentFilter: handleToggleParentFilter,
+      moveToWorktree: handleMoveToWorktree,
+      dragStart: handleDragStart,
+      dragEnd: handleDragEnd,
+      dragOver: () => handleDragOverStatus(status.id),
+      drop: () => handleDrop(status.id),
+    };
+
+    if (viewPreferences.isColumnCollapsed(status.id, epics.length === 0)) {
+      return {
+        ...common,
+        kind: 'collapsed',
+        expand: () => viewPreferences.expandColumn(status.id),
+      };
+    }
+
+    return {
+      ...common,
+      kind: 'expanded',
+      draggedEpic,
+      collapse: () => viewPreferences.toggleColumnCollapse(status.id),
+      keyboardMove: handleKeyboardMove,
+    };
+  });
+
+  let content: BoardContentModel;
+  if (!selectedProjectId) {
+    content = { kind: 'no-project' };
+  } else if (statusesLoading) {
+    content = { kind: 'loading' };
+  } else if (sortedStatuses.length === 0) {
+    content = { kind: 'no-statuses', openStatusManagement };
+  } else if (currentViewMode === 'kanban') {
+    content = { kind: 'kanban', columns };
+  } else {
+    const sourceEpics = filters.parent
+      ? ((subEpicsData?.items ?? []) as Epic[])
+      : ((epicsData?.items ?? []) as Epic[]).filter((epic) => !epic.parentId);
+    content = {
+      kind: 'list',
+      epics: filterEpicsByStatus(sourceEpics),
+      statuses: sortedStatuses,
+      agents: (agentsData?.items ?? []) as Agent[],
+      pageSize: currentPageSize,
+      currentPage: filters.page ?? 1,
+      subEpicCounts: subEpicCountsMap,
+      hasRunningWorktrees,
+      changePage: routeState.setPage,
+      changePageSize: viewPreferences.changePageSize,
+      editEpic: handleEdit,
+      deleteEpic: handleDelete,
+      deleteEpics: handleBulkDelete,
+      openEpicDetails,
+      openBulkEdit: bulkEdit.open,
+      toggleParentFilter: handleToggleParentFilter,
+      changeStatus: async (epic, statusId) => {
+        await mutateUpdateEpicStatusAsync(epic, statusId);
+      },
+      changeAgent: async (epic, agentId) => {
+        await mutateUpdateEpicAgentAsync(epic, agentId);
+      },
+      moveToWorktree: handleMoveToWorktree,
+    };
+  }
 
   return {
-    navigate,
-    location,
-    selectedProjectId,
-    activeProject,
-    hasRunningWorktrees,
-    showDialog,
-    setShowDialog,
-    editingEpic,
-    setEditingEpic,
-    deleteConfirm,
-    setDeleteConfirm,
-    moveToWorktreeEpic,
-    setMoveToWorktreeEpic,
-    bulkDeleteIds,
-    setBulkDeleteIds,
-    formData,
-    setFormData,
-    boardPrefs,
-    setBoardPrefs,
-    filterPopoverOpen,
-    setFilterPopoverOpen,
-    columnPickerOpen,
-    setColumnPickerOpen,
-    bulkModalOpen,
-    setBulkModalOpen,
-    bulkTarget,
-    bulkRows,
-    bulkError,
-    bulkLoading,
-    expandedEmptyColumns,
-    filters,
-    statusesLoading,
-    epicsData,
-    agentsData,
-    subEpicsData,
-    subEpicsLoading,
-    sortedStatuses,
-    visibleStatuses,
-    getAgentName,
-    activeParent,
-    parentCandidates,
-    getEpicsByStatus,
-    subEpicStatusCountsByEpicId,
-    subEpicCountsMap,
-    createMutation,
-    updateMutation,
-    deleteMutation,
-    bulkUpdateMutation,
-    mutateUpdateEpicStatusAsync,
-    mutateUpdateEpicAgentAsync,
-    draggedEpic,
-    activeDropStatusId,
-    activeParentName,
-    currentViewMode,
-    hasActiveFilters,
-    bulkHasChanges,
-    filterEpicsByStatus,
-    handleViewModeChange,
-    handleApplySavedFilter,
-    handleSelectAllStatuses,
-    handleToggleStatusFilter,
-    handleToggleArchived,
-    handleToggleColumnCollapse,
-    handleCollapseAll,
-    handleResetDefaults,
-    clearParentFilter,
-    handleEdit,
-    handleDelete,
-    handleMoveToWorktree,
-    handleToggleParentFilter,
-    handleOpenBulkModal,
-    handleCloseBulkModal,
-    handleBulkRowChange,
-    handleBulkSubmit,
-    confirmDelete,
-    handleBulkDelete,
-    confirmBulkDelete,
-    handleDragStart,
-    handleDragEnd,
-    handleDragOverStatus,
-    handleDrop,
-    handleKeyboardMove,
-    handleAddEpic,
-    handleSubmit,
-    handleExpandEmptyColumn,
-    saveBoardPreferences,
+    header: {
+      hasProject: Boolean(selectedProjectId),
+      projectName: activeProject?.name ?? null,
+    },
+    toolbar:
+      selectedProjectId && !statusesLoading && sortedStatuses.length > 0
+        ? {
+            projectId: selectedProjectId,
+            currentViewMode,
+            filters,
+            hasActiveFilters: routeState.hasActiveFilters,
+            filterPopoverOpen,
+            columnPickerOpen,
+            statuses: sortedStatuses,
+            collapsedStatusIds: boardPrefs.collapsedStatusIds,
+            statusEpicCounts,
+            changeViewMode: viewPreferences.changeViewMode,
+            applySavedFilter: routeState.applySavedFilter,
+            changeFilterPopoverOpen,
+            clearStatuses: routeState.clearStatuses,
+            toggleStatus: handleToggleStatusFilter,
+            changeArchivedVisible: routeState.setArchivedVisible,
+            changeColumnPickerOpen,
+            toggleColumn: viewPreferences.toggleColumnCollapse,
+            collapseAll: handleCollapseAll,
+            resetDefaults: viewPreferences.resetDefaults,
+          }
+        : null,
+    parentBanner: filters.parent
+      ? {
+          parentName: activeParent?.title || filters.parent,
+          isLoading: subEpicsLoading,
+          clear: clearParentFilter,
+        }
+      : null,
+    content,
+    dialogs: {
+      create: {
+        isOpen: showDialog,
+        activeProjectName: activeProject?.name,
+        formData,
+        parentCandidates,
+        hasParentFilter: Boolean(filters.parent),
+        activeParent,
+        isSubmitting: createMutation.isPending,
+        changeOpen: changeCreateDialogOpen,
+        changeForm: changeCreateForm,
+        cancel: resetCreateDialog,
+        submit: handleSubmit,
+      },
+      deleteEpic: {
+        epic: deleteConfirm,
+        isSubmitting: deleteMutation.isPending,
+        changeOpen: changeDeleteDialogOpen,
+        close: closeDeleteDialog,
+        confirm: confirmDelete,
+      },
+      bulkDelete: {
+        epicCount: bulkDeleteIds?.length ?? 0,
+        isOpen: bulkDeleteIds !== null,
+        isSubmitting: deleteMutation.isPending,
+        changeOpen: changeBulkDeleteDialogOpen,
+        close: closeBulkDeleteDialog,
+        confirm: confirmBulkDelete,
+      },
+      bulkEdit: {
+        controller: bulkEdit,
+        statuses: sortedStatuses,
+        agents: (agentsData?.items ?? []) as Agent[],
+      },
+      moveToWorktree: {
+        epic: moveToWorktreeEpic,
+        statuses: sortedStatuses,
+        agents: (agentsData?.items ?? []) as Agent[],
+        changeOpen: changeMoveToWorktreeDialogOpen,
+      },
+    },
   };
 }
-
-export type BoardPageController = ReturnType<typeof useBoardPageController>;

@@ -19,8 +19,26 @@ import {
 import { TerminalIOService } from '../services/terminal-io/terminal-io.service';
 import { TerminalSessionRegistry } from '../services/terminal-session/terminal-session-registry';
 import { createEnvelope } from '../dtos/ws-envelope.dto';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import type { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import type { Socket } from 'socket.io';
+
+function runtimeDescriptor(sessionId: string, usesAlternateScreen = false) {
+  return {
+    sessionId,
+    tmuxSessionName: `tmux_${sessionId}`,
+    normalizeLf: true,
+    usesAlternateScreen,
+  };
+}
+
+function setUsesAlternateScreen(
+  runtime: Partial<SessionTerminalRuntimeService>,
+  usesAlternateScreen: boolean,
+): void {
+  (runtime.getDescriptor as jest.Mock).mockImplementation((sessionId: string) =>
+    runtimeDescriptor(sessionId, usesAlternateScreen),
+  );
+}
 import { TerminalViewportFacade } from '../services/terminal-viewport/terminal-viewport.facade';
 import {
   TerminalSendAdmission,
@@ -231,6 +249,7 @@ const createGateway = (options?: {
   };
 
   const ptyService: Partial<PtyService> = {
+    setOutputHandler: jest.fn(),
     resize: jest.fn(),
     startStreaming: jest.fn(),
     isStreaming: jest.fn().mockReturnValue(true),
@@ -272,10 +291,11 @@ const createGateway = (options?: {
     applyWindowTheme: jest.fn().mockResolvedValue(undefined),
   };
 
-  const sessionsService: Partial<SessionsService> = {
-    markSessionFailed: jest.fn(),
-    shouldNormalizeLfFor: jest.fn().mockReturnValue(true),
-    usesAlternateScreenFor: jest.fn().mockReturnValue(false),
+  const sessionTerminalRuntime: Partial<SessionTerminalRuntimeService> = {
+    retireConfirmedLoss: jest.fn(),
+    getDescriptor: jest
+      .fn()
+      .mockImplementation((sessionId: string) => runtimeDescriptor(sessionId)),
   };
 
   const registry = new TerminalSessionRegistry();
@@ -324,7 +344,7 @@ const createGateway = (options?: {
     seedService as TerminalSeedService,
     terminalIO as TerminalIOService,
     registry,
-    sessionsService as SessionsService,
+    sessionTerminalRuntime as SessionTerminalRuntimeService,
     mockRealtimeBroadcast as never,
     options?.sendScheduler ?? (sendScheduler as never),
     mockMetricsService,
@@ -351,12 +371,31 @@ const createGateway = (options?: {
     ptyService,
     seedService,
     terminalIO,
-    sessionsService,
+    sessionTerminalRuntime,
     registry,
     roomEmit,
     sendScheduler,
   };
 };
+
+describe('TerminalGateway lifecycle', () => {
+  it('registers its existing synchronous broadcast path only when the Nest lifecycle hook runs', () => {
+    const { gateway, ptyService } = createGateway();
+    const broadcast = jest.spyOn(gateway, 'broadcastTerminalData').mockImplementation(() => {});
+
+    expect(ptyService.setOutputHandler).not.toHaveBeenCalled();
+
+    gateway.onModuleInit();
+
+    expect(ptyService.setOutputHandler).toHaveBeenCalledTimes(1);
+    const handler = (ptyService.setOutputHandler as jest.Mock).mock.calls[0][0] as (
+      sessionId: string,
+      data: string,
+    ) => void;
+    handler('session-output', 'ordered-data');
+    expect(broadcast).toHaveBeenCalledWith('session-output', 'ordered-data');
+  });
+});
 
 describe('TerminalGateway.handleRequestFullHistory', () => {
   it('accepts maxLines larger than scrollback (clamping happens internally)', async () => {
@@ -984,8 +1023,8 @@ describe('TerminalGateway.handleSubscribe', () => {
       | undefined;
 
   it('publishes historyRefreshable=true for a line-oriented provider on the subscribed ack', async () => {
-    const { gateway, sessionsService } = createGateway();
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(false);
+    const { gateway, sessionTerminalRuntime } = createGateway();
+    setUsesAlternateScreen(sessionTerminalRuntime, false);
     const client = createMockSocket('client-refreshable');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -1002,8 +1041,8 @@ describe('TerminalGateway.handleSubscribe', () => {
   });
 
   it('publishes historyRefreshable=false for an alternate-screen provider on the subscribed ack', async () => {
-    const { gateway, sessionsService } = createGateway();
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    const { gateway, sessionTerminalRuntime } = createGateway();
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-altscreen');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -1017,8 +1056,8 @@ describe('TerminalGateway.handleSubscribe', () => {
   });
 
   it('publishes historyRefreshable on the fallback (no-registry) subscribed ack', async () => {
-    const { gateway, sessionsService, registry } = createGateway();
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    const { gateway, sessionTerminalRuntime, registry } = createGateway();
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     registry.get = () => undefined;
     const client = createMockSocket('client-fallback-cap');
 
@@ -2846,7 +2885,7 @@ describe('TerminalGateway activity routing', () => {
 
 describe('TerminalGateway dead-tmux detection', () => {
   it('subscribe: emits state_change(crashed) and marks session failed when tmux is dead', async () => {
-    const { gateway, terminalIO, sessionsService, ptyService } = createGateway();
+    const { gateway, terminalIO, sessionTerminalRuntime, ptyService } = createGateway();
     (terminalIO.sessionExists as jest.Mock).mockResolvedValue(false);
 
     const client = createMockSocket('client-dead-subscribe');
@@ -2854,7 +2893,7 @@ describe('TerminalGateway dead-tmux detection', () => {
 
     await gateway.handleSubscribe(client, { sessionId: 'dead-session' });
 
-    expect(sessionsService.markSessionFailed).toHaveBeenCalledWith(
+    expect(sessionTerminalRuntime.retireConfirmedLoss).toHaveBeenCalledWith(
       'dead-session',
       expect.any(String),
     );
@@ -2872,7 +2911,7 @@ describe('TerminalGateway dead-tmux detection', () => {
   });
 
   it('subscribe: does not mark failed when tmux is alive', async () => {
-    const { gateway, terminalIO, sessionsService } = createGateway();
+    const { gateway, terminalIO, sessionTerminalRuntime } = createGateway();
     (terminalIO.sessionExists as jest.Mock).mockResolvedValue(true);
 
     const client = createMockSocket('client-alive-subscribe');
@@ -2880,11 +2919,11 @@ describe('TerminalGateway dead-tmux detection', () => {
 
     await gateway.handleSubscribe(client, { sessionId: 'alive-session' });
 
-    expect(sessionsService.markSessionFailed).not.toHaveBeenCalled();
+    expect(sessionTerminalRuntime.retireConfirmedLoss).not.toHaveBeenCalled();
   });
 
   it('resize: emits state_change(crashed) when tmux is dead', async () => {
-    const { gateway, terminalIO, sessionsService } = createGateway();
+    const { gateway, terminalIO, sessionTerminalRuntime } = createGateway();
     (terminalIO.sessionExists as jest.Mock).mockResolvedValue(false);
 
     const client = createMockSocket('client-dead-resize');
@@ -2892,7 +2931,7 @@ describe('TerminalGateway dead-tmux detection', () => {
 
     await gateway.handleResize(client, { sessionId: 'dead-resize', rows: 24, cols: 80 });
 
-    expect(sessionsService.markSessionFailed).toHaveBeenCalledWith(
+    expect(sessionTerminalRuntime.retireConfirmedLoss).toHaveBeenCalledWith(
       'dead-resize',
       expect.any(String),
     );
@@ -2905,7 +2944,7 @@ describe('TerminalGateway dead-tmux detection', () => {
   });
 
   it('input: emits state_change(crashed) when tmux is dead', async () => {
-    const { gateway, terminalIO, sessionsService } = createGateway();
+    const { gateway, terminalIO, sessionTerminalRuntime } = createGateway();
 
     const client = createMockSocket('client-dead-input');
     gateway.handleConnection(client);
@@ -2921,7 +2960,7 @@ describe('TerminalGateway dead-tmux detection', () => {
 
     await gateway.handleInput(client, { sessionId: 'dead-input', data: 'x' });
 
-    expect(sessionsService.markSessionFailed).toHaveBeenCalledWith(
+    expect(sessionTerminalRuntime.retireConfirmedLoss).toHaveBeenCalledWith(
       'dead-input',
       expect.any(String),
     );
@@ -3737,7 +3776,7 @@ describe('TerminalGateway.handleTheme', () => {
   });
 
   it('clears theme cache and disposes terminal state on session.crashed', async () => {
-    const { gateway, terminalIO, registry, sessionsService, ptyService } = createGateway({
+    const { gateway, terminalIO, registry, sessionTerminalRuntime, ptyService } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('crashed-sess', 'tmux_crashed-sess');
@@ -3754,7 +3793,7 @@ describe('TerminalGateway.handleTheme', () => {
 
     // Crash cleanup: DB marked failed, streaming stopped, registry entry gone —
     // a stale entry here would block a later restore.
-    expect(sessionsService.markSessionFailed).toHaveBeenCalledWith(
+    expect(sessionTerminalRuntime.retireConfirmedLoss).toHaveBeenCalledWith(
       'crashed-sess',
       expect.any(String),
     );
@@ -3788,13 +3827,13 @@ describe('TerminalGateway.handleTheme', () => {
   });
 
   it('triggers redraw after successful theme application', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('redraw-sess', 'tmux_redraw-sess');
     // Alt-screen providers (agy/opencode/copilot) keep the redraw jiggle — state intent
     // explicitly so the assertion can't pass vacuously under the non-alt-screen default.
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-redraw');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3808,13 +3847,13 @@ describe('TerminalGateway.handleTheme', () => {
   });
 
   it('does not trigger redraw when theme is unchanged (skipped by dedup cache)', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('nodedup-sess', 'tmux_nodedup-sess');
     // Alt-screen true: the FIRST apply provably redraws, so the SECOND call's no-redraw is
     // genuinely the dedup cache — not the non-alt-screen gate passing vacuously.
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-nodedup');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3837,13 +3876,13 @@ describe('TerminalGateway.handleTheme', () => {
   });
 
   it('does not trigger redraw when applyWindowTheme fails', async () => {
-    const { gateway, terminalIO, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, terminalIO, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('failredraw-sess', 'tmux_failredraw-sess');
     // Alt-screen true so the apply FAILURE (not the non-alt-screen gate) is what suppresses
     // the redraw — without this the assertion passes vacuously.
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     (terminalIO.applyWindowTheme as jest.Mock).mockRejectedValueOnce(new Error('gone'));
     const client = createMockSocket('client-failredraw');
 
@@ -3858,14 +3897,14 @@ describe('TerminalGateway.handleTheme', () => {
   });
 
   it('non-alt-screen session: applies tmux window theme but never triggers the redraw jiggle', async () => {
-    // The factory stubs usesAlternateScreenFor to a constant false (spec fixture policy) —
+    // The factory descriptor uses the non-alternate-screen policy by default —
     // this is the claude/codex default. The gate must skip ONLY the SIGWINCH jiggle; tmux
     // window style + the dedup cache keep working for every provider.
-    const { gateway, terminalIO, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, terminalIO, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('nonalt-sess', 'tmux_nonalt-sess');
-    expect((sessionsService.usesAlternateScreenFor as jest.Mock)()).toBe(false);
+    expect(sessionTerminalRuntime.getDescriptor?.('nonalt-sess').usesAlternateScreen).toBe(false);
     const client = createMockSocket('client-nonalt');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3883,11 +3922,11 @@ describe('TerminalGateway.handleTheme', () => {
 
 describe('TerminalGateway viewport-mode restore (Task 2)', () => {
   it('triggers a redraw for an alt-screen session on terminal:restore_viewport_modes', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('alt-sess', 'tmux_alt-sess');
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-alt');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3899,12 +3938,12 @@ describe('TerminalGateway viewport-mode restore (Task 2)', () => {
     expect(ptyService.triggerRedraw).toHaveBeenCalledWith('alt-sess');
   });
 
-  it('no-ops the redraw for a non-alt-screen provider (gated on usesAlternateScreenFor)', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+  it('no-ops the redraw for a non-alt-screen provider from the runtime descriptor', async () => {
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('cli-sess', 'tmux_cli-sess');
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(false);
+    setUsesAlternateScreen(sessionTerminalRuntime, false);
     const client = createMockSocket('client-cli');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3917,8 +3956,8 @@ describe('TerminalGateway viewport-mode restore (Task 2)', () => {
   });
 
   it('ignores a restore request from a client not subscribed to that session', async () => {
-    const { gateway, ptyService, sessionsService } = createGateway();
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    const { gateway, ptyService, sessionTerminalRuntime } = createGateway();
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-unsub');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3929,11 +3968,11 @@ describe('TerminalGateway viewport-mode restore (Task 2)', () => {
   });
 
   it('coalesces simultaneous restore requests into a single redraw', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('coalesce-sess', 'tmux_coalesce-sess');
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-coalesce');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3948,11 +3987,11 @@ describe('TerminalGateway viewport-mode restore (Task 2)', () => {
   });
 
   it('restores viewport modes server-side on a no-seed (reconnect) attach to an alt-screen session', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('reconnect-sess', 'tmux_reconnect-sess');
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-reconnect');
 
     gateway.handleConnection(client as unknown as Socket);
@@ -3970,11 +4009,11 @@ describe('TerminalGateway viewport-mode restore (Task 2)', () => {
   });
 
   it('does NOT server-side redraw on a first (seeded) attach — the client requests it post-seed', async () => {
-    const { gateway, ptyService, sessionsService, registry } = createGateway({
+    const { gateway, ptyService, sessionTerminalRuntime, registry } = createGateway({
       autoCreateRegistrySessions: false,
     });
     registry.create('firstattach-sess', 'tmux_firstattach-sess');
-    (sessionsService.usesAlternateScreenFor as jest.Mock).mockReturnValue(true);
+    setUsesAlternateScreen(sessionTerminalRuntime, true);
     const client = createMockSocket('client-firstattach');
 
     gateway.handleConnection(client as unknown as Socket);

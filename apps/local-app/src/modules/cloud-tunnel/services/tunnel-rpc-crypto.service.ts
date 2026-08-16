@@ -12,11 +12,12 @@ import {
 import { createLogger } from '../../../common/logging/logger';
 import { E2eeKeypairService } from '../../e2ee/services/e2ee-keypair.service';
 import { E2eeDeviceStoreService } from '../../e2ee/services/e2ee-device-store.service';
+import { getMobileRpcCryptoMode, isMobileRpcMethod } from './mobile-rpc-contract.generated';
 
 const logger = createLogger('TunnelRpcCrypto');
 
 /**
- * DI token for the PC-side E2EE-required policy (Phase 2, Task:2). When true, the PC
+ * DI token for the PC-side E2EE-required policy. When true, the PC
  * refuses to accept plaintext RPC `params` — every inbound request MUST be an
  * `E2eeEnvelope` (fail closed). Env-gated (`E2EE_REQUIRED=true`) for gradual rollout;
  * default false so mixed old/new clients keep interoperating in plaintext. The SAME
@@ -24,27 +25,6 @@ const logger = createLogger('TunnelRpcCrypto');
  * consistently (`tunnel-client.service.ts#buildE2eeCapability`).
  */
 export const E2EE_REQUIRED_POLICY = 'E2EE_REQUIRED_POLICY';
-
-/**
- * Methods that bootstrap E2EE itself and therefore MUST travel plaintext — the PC cannot
- * decrypt them yet. `e2ee.adoptDeviceKey` (RE2E1) delivers the mobile's PUBLIC key so the
- * PC can derive the shared key for that device; it carries no secret content. These are
- * exempt from the `e2eeRequired` plaintext rejection so strict-mode can't deadlock the
- * key exchange (can't encrypt before the key is delivered, can't deliver if plaintext is
- * refused).
- */
-export const RPC_BOOTSTRAP_METHODS = new Set<string>(['e2ee.adoptDeviceKey']);
-
-/**
- * Methods that MUST arrive sealed and are rejected if they travel plaintext — REGARDLESS of
- * `e2eeRequired`. `e2ee.revokeDeviceKey` (M3 `paired-device-dedup`) removes the SENDER's own
- * device using the verified envelope kid; a plaintext revoke has no verified sender, so a
- * bridge-position actor could name and force-unpair a device it never proved possession of.
- * The default mixed-client path (`e2eeRequired=false`) would otherwise dispatch it plaintext,
- * so this needs an explicit method-level guard here — `RPC_BOOTSTRAP_METHODS`/`e2eeRequired`
- * do not cover it.
- */
-export const RPC_SEALED_ONLY_METHODS = new Set<string>(['e2ee.revokeDeviceKey']);
 
 /**
  * Trusted per-request crypto context handed to the dispatch layer. `senderKid` is set BY THE
@@ -84,7 +64,7 @@ export type SealedRpcResult =
   | { ok: false; error: { code: number; message: string; data?: unknown } };
 
 /**
- * The PC-side RPC transport seam (Phase 2, Task:1).
+ * The PC-side RPC transport seam.
  *
  * Wraps the tunnel RPC handler so EVERY method's `params`/`result` is sealed with the
  * shared {@link CryptoEnvelopeService}, while `method` + correlation `id` stay cleartext
@@ -126,8 +106,11 @@ export class TunnelRpcCryptoService {
     ) => Promise<JsonRpcResponseLike>,
   ): Promise<JsonRpcResponseLike> {
     const params = req.params;
+    const cryptoMode = isMobileRpcMethod(req.method)
+      ? getMobileRpcCryptoMode(req.method)
+      : 'conditional-seal';
 
-    // Fail-closed enforcement (Phase 2, Task:2): when the PC's policy is `e2eeRequired`,
+    // When the PC's policy is `e2eeRequired`,
     // a plaintext (non-envelope) request is REJECTED — no domain content is dispatched.
     // This is the strict-rollout mode; when the policy is false (default), a non-envelope
     // request rides the plaintext path so mixed old/new clients interoperate.
@@ -136,7 +119,7 @@ export class TunnelRpcCryptoService {
       // of e2eeRequired — a plaintext request carries no verified sender, so it must never
       // reach the dispatch layer (force-unpair defense). Checked before the e2eeRequired gate
       // because the default mixed-client path below would otherwise dispatch it.
-      if (RPC_SEALED_ONLY_METHODS.has(req.method)) {
+      if (cryptoMode === 'sealed-only') {
         logger.warn(
           { id: req.id, method: req.method },
           'Plaintext RPC rejected — method is sealed-only',
@@ -147,7 +130,7 @@ export class TunnelRpcCryptoService {
           error: { code: -32603, message: 'E2EE required' },
         };
       }
-      if (this.e2eeRequired && !RPC_BOOTSTRAP_METHODS.has(req.method)) {
+      if (this.e2eeRequired && cryptoMode !== 'plaintext-bootstrap') {
         logger.warn(
           { id: req.id, method: req.method },
           'Plaintext RPC rejected — E2EE is required on this instance',

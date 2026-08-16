@@ -12,7 +12,8 @@ import {
 import { NotFoundError, ValidationError } from '../../../common/errors/error-types';
 import { createLogger } from '../../../common/logging/logger';
 import { E2eeKeypairService } from './e2ee-keypair.service';
-import { E2eeDeviceStoreService } from './e2ee-device-store.service';
+import { E2eeDeviceStoreService, type E2eePeerDevice } from './e2ee-device-store.service';
+import { normalizeDeviceLabel } from './e2ee-device-label';
 
 const logger = createLogger('E2eeTrust');
 
@@ -36,6 +37,7 @@ export interface DeviceTrustResult {
 export interface PairedDeviceSummary {
   kid: string;
   label?: string;
+  localAlias?: string;
   trust: E2eeTrustStatus;
   adoptedVia?: E2eeAdoptionMethod;
   verifiedVia?: E2eeVerificationMethod;
@@ -68,16 +70,22 @@ export class E2eeTrustService {
   listDevices(): PairedDeviceSummary[] {
     return this.deviceStore
       .list()
-      .map((d) => ({
-        kid: d.kid,
-        trust: d.trust,
-        addedAt: d.addedAt,
-        ...(d.label !== undefined ? { label: d.label } : {}),
-        ...(d.adoptedVia !== undefined ? { adoptedVia: d.adoptedVia } : {}),
-        ...(d.verifiedVia !== undefined ? { verifiedVia: d.verifiedVia } : {}),
-        ...(d.verifiedAt !== undefined ? { verifiedAt: d.verifiedAt } : {}),
-      }))
+      .map((d) => this.toSummary(d))
       .sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  }
+
+  /** Resolve current display metadata for a decrypt-authenticated paired-device kid. */
+  resolveEffectiveDeviceName(kid: string): string | undefined {
+    const device = this.deviceStore.get(kid);
+    if (!device) return undefined;
+    return device.localAlias ?? device.label ?? 'Mobile device';
+  }
+
+  /** Rename a paired device only on this PC, or clear its local alias. */
+  setLocalAlias(kid: string, localAlias: string | null): PairedDeviceSummary {
+    const record = this.deviceStore.setLocalAlias(kid, localAlias);
+    if (!record) throw new NotFoundError('E2EE device', kid);
+    return this.toSummary(record);
   }
 
   /** Compute the safety number for a paired device. Throws if the device is unknown. */
@@ -166,7 +174,13 @@ export class E2eeTrustService {
       );
       throw new ValidationError('kid does not match public key');
     }
-    const record = this.deviceStore.reconcile(incoming, undefined, {
+    const label = normalizeDeviceLabel(incoming.label);
+    const normalizedIncoming: IncomingPeerKey = {
+      kid: incoming.kid,
+      publicKeyB64: incoming.publicKeyB64,
+      ...(label !== undefined ? { label } : {}),
+    };
+    const record = this.deviceStore.reconcile(normalizedIncoming, undefined, {
       installId,
       evictVerified: false,
     });
@@ -174,6 +188,19 @@ export class E2eeTrustService {
       kid: record.kid,
       trust: record.trust,
       ...(record.verifiedVia !== undefined ? { verifiedVia: record.verifiedVia } : {}),
+    };
+  }
+
+  private toSummary(record: E2eePeerDevice): PairedDeviceSummary {
+    return {
+      kid: record.kid,
+      trust: record.trust,
+      addedAt: record.addedAt,
+      ...(record.label !== undefined ? { label: record.label } : {}),
+      ...(record.localAlias !== undefined ? { localAlias: record.localAlias } : {}),
+      ...(record.adoptedVia !== undefined ? { adoptedVia: record.adoptedVia } : {}),
+      ...(record.verifiedVia !== undefined ? { verifiedVia: record.verifiedVia } : {}),
+      ...(record.verifiedAt !== undefined ? { verifiedAt: record.verifiedAt } : {}),
     };
   }
 }

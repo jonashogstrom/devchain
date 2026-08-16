@@ -7,6 +7,7 @@ import { EventMapperService, type IngestPayload } from '../../cloud/services/eve
 import { ProjectEgressConfigService } from '../../cloud/services/project-egress-config.service';
 import type { ClaudeHooksAskUserQuestionPendingEventPayload } from '../../events/catalog/claude.hooks.ask_user_question.pending';
 import { TunnelClientService } from './tunnel-client.service';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const logger = createLogger('AskUserQuestionPushGate');
 
@@ -45,6 +46,7 @@ export class AskUserQuestionPushGateService implements OnModuleDestroy {
     private readonly eventMapper: EventMapperService,
     private readonly projectConfig: ProjectEgressConfigService,
     private readonly tunnelClient: TunnelClientService,
+    private readonly workspaceMode: WorkspaceModeCoordinatorService,
   ) {}
 
   @OnEvent('claude.hooks.ask_user_question.pending', { async: true })
@@ -59,22 +61,24 @@ export class AskUserQuestionPushGateService implements OnModuleDestroy {
     // catch-up) collapse to one notification via the notifications-service unique
     // (source, sourceEventId) constraint.
     const sourceEventId = `auq.pending:${payload.toolUseId}`;
-    const ingestPayload = this.eventMapper.mapToIngestPayload(
-      { name: 'claude.hooks.ask_user_question.pending', payload },
-      sourceEventId,
-      status.userId,
-      { instanceId: this.tunnelClient.getInstanceId() },
-    );
-
     const timer = setTimeout(() => {
       this.pendingTimers.delete(timer);
-      void this.decide(ingestPayload, payload.toolUseId);
+      void this.decide(payload, sourceEventId, status.userId!);
     }, AUQ_NATIVE_PUSH_GRACE_MS);
     if (typeof timer.unref === 'function') timer.unref();
     this.pendingTimers.add(timer);
   }
 
-  private async decide(ingestPayload: IngestPayload, toolUseId: string): Promise<void> {
+  private async decide(
+    payload: ClaudeHooksAskUserQuestionPendingEventPayload,
+    sourceEventId: string,
+    userId: string,
+  ): Promise<void> {
+    if (await this.requiresGenericNotice()) {
+      this.enqueueGenericNotice(sourceEventId, userId);
+      return;
+    }
+
     let live = false;
     try {
       ({ live } = await this.tunnelClient.querySseLiveness());
@@ -82,13 +86,42 @@ export class AskUserQuestionPushGateService implements OnModuleDestroy {
       live = false; // fail toward delivering the native push
     }
 
-    if (live) {
-      logger.debug({ toolUseId }, 'SSE live — suppressing AskUserQuestion native push');
+    if (await this.requiresGenericNotice()) {
+      this.enqueueGenericNotice(sourceEventId, userId);
       return;
     }
 
+    if (live) {
+      logger.debug(
+        { toolUseId: payload.toolUseId },
+        'SSE live — suppressing AskUserQuestion native push',
+      );
+      return;
+    }
+
+    const ingestPayload: IngestPayload = this.eventMapper.mapToIngestPayload(
+      { name: 'claude.hooks.ask_user_question.pending', payload },
+      sourceEventId,
+      userId,
+      { instanceId: this.tunnelClient.getInstanceId() },
+    );
     this.egressQueue.enqueue(ingestPayload);
-    logger.debug({ toolUseId }, 'SSE down — enqueued AskUserQuestion native push');
+    logger.debug(
+      { toolUseId: payload.toolUseId },
+      'SSE down — enqueued AskUserQuestion native push',
+    );
+  }
+
+  private async requiresGenericNotice(): Promise<boolean> {
+    const mode = await this.workspaceMode.getSnapshot().catch(() => null);
+    return !mode || mode.multiWorkspaceMode || mode.failClosedPending;
+  }
+
+  private enqueueGenericNotice(sourceEventId: string, userId: string): void {
+    this.egressQueue.enqueue(
+      this.eventMapper.mapToGenericAskUserQuestionNotice(sourceEventId, userId),
+    );
+    logger.debug('Enqueued account-level AskUserQuestion notice');
   }
 
   onModuleDestroy(): void {

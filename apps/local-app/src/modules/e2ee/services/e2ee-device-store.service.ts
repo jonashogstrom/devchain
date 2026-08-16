@@ -1,4 +1,5 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Optional } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 import { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import Database from 'better-sqlite3';
@@ -13,7 +14,12 @@ import {
 } from '@devchain/shared';
 import { DB_CONNECTION } from '../../storage/db/db.provider';
 import { getRawSqliteClient } from '../../storage/db/sqlite-raw';
+import { TransactionRunner } from '../../storage/db/transaction-runner';
 import { createLogger } from '../../../common/logging/logger';
+import {
+  PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT,
+  type PairedDeviceWorkspaceAccessRevokedEvent,
+} from '../events/paired-device-workspace-access.events';
 
 const logger = createLogger('E2eeDeviceStore');
 
@@ -44,16 +50,21 @@ export interface E2eePeerDevice {
   verifiedAt?: string;
   /** Optional human label (device name); populated when known. */
   label?: string;
+  /** User-chosen name stored only on this PC. Never synchronized to the peer. */
+  localAlias?: string;
   /**
    * Stable per-install id of the mobile app that adopted this key (M2 `paired-device-dedup`).
-   * Survives logout on the phone (it is NOT key material), so re-login mints a fresh kid but
-   * carries the SAME installId — the supersede sweep uses it to evict the phone's prior row.
+   * Ordinary logout preserves both this value and the kid. If an exceptional same-install
+   * identity reset mints a new kid, the supersede sweep can use the retained installId to evict
+   * the prior row.
    * UNAUTHENTICATED grouping metadata only (never a trust signal); carried BESIDE the shared
    * `E2eeTrustRecord` (deliberately NOT part of `@devchain/shared`). Absent on pre-M2 records
    * and old-client adopts. Never logged (minimize unauthenticated metadata).
    */
   installId?: string;
 }
+
+type StoredE2eeTrustRecord = E2eeTrustRecord & Pick<E2eePeerDevice, 'installId' | 'localAlias'>;
 
 interface StoredDirectory {
   v: number;
@@ -85,9 +96,14 @@ function isCanonicalUuid(value: unknown): value is string {
 @Injectable()
 export class E2eeDeviceStoreService {
   private sqlite: Database.Database;
+  private readonly transactionRunner: TransactionRunner;
 
-  constructor(@Inject(DB_CONNECTION) private readonly db: BetterSQLite3Database) {
+  constructor(
+    @Inject(DB_CONNECTION) private readonly db: BetterSQLite3Database,
+    @Optional() private readonly eventEmitter?: EventEmitter2,
+  ) {
     this.sqlite = getRawSqliteClient(this.db);
+    this.transactionRunner = new TransactionRunner(this.sqlite);
   }
 
   /**
@@ -96,13 +112,12 @@ export class E2eeDeviceStoreService {
    * when supplied (the QR path passes `'verified'`/`'qr'`).
    */
   add(
-    device: Omit<E2eePeerDevice, 'addedAt' | 'trust'> & {
+    device: Omit<E2eePeerDevice, 'addedAt' | 'trust' | 'localAlias'> & {
       addedAt?: string;
       trust?: E2eeTrustStatus;
     },
     opts: { evictVerified?: boolean } = {},
   ): E2eePeerDevice {
-    const dir = this.load();
     const record: E2eePeerDevice = {
       kid: device.kid,
       publicKeyB64: device.publicKeyB64,
@@ -115,18 +130,25 @@ export class E2eeDeviceStoreService {
       // Persist installId only when it is a canonical UUID (validate BEFORE storing).
       ...(isCanonicalUuid(device.installId) ? { installId: device.installId } : {}),
     };
-    dir.devices[record.kid] = record;
-    // Supersede the same phone's prior rows in the SAME load/save (no add-then-evict window).
-    // QR complete passes evictVerified:true (MAC-authenticated); a plaintext seam must not.
-    const superseded = this.supersedeByInstallId(
-      dir.devices,
-      record.installId,
-      record.kid,
-      opts.evictVerified ?? false,
-    );
-    this.save(dir);
+    const supersededKids = this.transactionRunner.runImmediate(() => {
+      const dir = this.load();
+      const existing = dir.devices[record.kid];
+      if (existing?.localAlias !== undefined) record.localAlias = existing.localAlias;
+      if (!existing) this.deleteWorkspaceGrants(record.kid);
+      dir.devices[record.kid] = record;
+      const evicted = this.supersedeByInstallId(
+        dir.devices,
+        record.installId,
+        record.kid,
+        opts.evictVerified ?? false,
+      );
+      for (const kid of evicted) this.deleteWorkspaceGrants(kid);
+      this.save(dir);
+      return evicted;
+    });
+    this.emitDeviceRevocations(supersededKids);
     logger.info(
-      { kid: record.kid, trust: record.trust, superseded },
+      { kid: record.kid, trust: record.trust, superseded: supersededKids.length },
       'Peer E2EE device public key added',
     );
     return record;
@@ -145,36 +167,36 @@ export class E2eeDeviceStoreService {
     now: string = new Date().toISOString(),
     opts: { installId?: string; evictVerified?: boolean } = {},
   ): E2eePeerDevice {
-    const dir = this.load();
-    const existing = (dir.devices[incoming.kid] ?? null) as E2eeTrustRecord | null;
-    // A key change keeps the same logical device but a new kid — find any prior record
-    // for this device by walking the directory so a rotation reverts the old entry too.
-    const prior =
-      existing ??
-      Object.values(dir.devices).find((d) => d.publicKeyB64 === incoming.publicKeyB64) ??
-      null;
-    const reconciled = reconcilePeerKey(prior as E2eeTrustRecord | null, incoming, now);
-    // `toDevice` preserves any installId already on an unchanged record; a fresh/rotated
-    // record has none. Then backfill from the adopt: a same-key adopt carrying a valid
-    // installId writes it onto the record EVEN when reconcile returned the prior unchanged,
-    // so a pre-installId row gains one and dedupes on its next rotation.
-    const record = this.toDevice(reconciled as E2eeTrustRecord & { installId?: string });
-    if (isCanonicalUuid(opts.installId)) {
-      record.installId = opts.installId;
-    }
-    dir.devices[record.kid] = record;
-    // Single load/save: supersede the phone's prior rows here, not in a second store call.
-    // TOFU adopt (this path) MUST NOT evict verified rows — an unauthenticated plaintext
-    // bootstrap adopt must never force-unpair a QR-verified device (see supersedeByInstallId).
-    const superseded = this.supersedeByInstallId(
-      dir.devices,
-      record.installId,
-      record.kid,
-      opts.evictVerified ?? false,
-    );
-    this.save(dir);
+    const { record, supersededKids } = this.transactionRunner.runImmediate(() => {
+      const dir = this.load();
+      const existing = dir.devices[incoming.kid] ?? null;
+      const prior =
+        existing ??
+        Object.values(dir.devices).find((d) => d.publicKeyB64 === incoming.publicKeyB64) ??
+        null;
+      const reconciled = reconcilePeerKey(prior, incoming, now) as StoredE2eeTrustRecord;
+      const next = this.toDevice(reconciled);
+      if (isCanonicalUuid(opts.installId)) next.installId = opts.installId;
+      if (!existing) this.deleteWorkspaceGrants(next.kid);
+      dir.devices[next.kid] = next;
+      const evicted = this.supersedeByInstallId(
+        dir.devices,
+        next.installId,
+        next.kid,
+        opts.evictVerified ?? false,
+      );
+      for (const kid of evicted) this.deleteWorkspaceGrants(kid);
+      this.save(dir);
+      return { record: next, supersededKids: evicted };
+    });
+    this.emitDeviceRevocations(supersededKids);
     logger.info(
-      { kid: record.kid, trust: record.trust, adoptedVia: record.adoptedVia, superseded },
+      {
+        kid: record.kid,
+        trust: record.trust,
+        adoptedVia: record.adoptedVia,
+        superseded: supersededKids.length,
+      },
       'Peer E2EE device reconciled (TOFU adopt / rotation)',
     );
     return record;
@@ -188,7 +210,9 @@ export class E2eeDeviceStoreService {
     const dir = this.load();
     const existing = dir.devices[kid];
     if (!existing) return null;
-    const record = this.toDevice(markVerifiedViaSafetyNumber(existing as E2eeTrustRecord, now));
+    const record = this.toDevice(
+      markVerifiedViaSafetyNumber(existing, now) as StoredE2eeTrustRecord,
+    );
     dir.devices[kid] = record;
     this.save(dir);
     logger.info({ kid }, 'Peer E2EE device marked VERIFIED via safety-number');
@@ -197,11 +221,11 @@ export class E2eeDeviceStoreService {
 
   /**
    * Project a shared `E2eeTrustRecord` onto the persisted device shape (drop undefineds).
-   * `installId` is carried BESIDE the shared record (not a `@devchain/shared` field), so the
-   * param is widened to preserve it: an unchanged same-key reconcile returns the prior record,
-   * and without this projection its installId would be silently dropped on every re-adopt.
+   * Local-only metadata is carried beside the shared record, so the param is widened to
+   * preserve it: same-key reconcile and verification spread the prior runtime record, and
+   * this projection must not silently drop its install id or alias.
    */
-  private toDevice(rec: E2eeTrustRecord & { installId?: string }): E2eePeerDevice {
+  private toDevice(rec: StoredE2eeTrustRecord): E2eePeerDevice {
     return {
       kid: rec.kid,
       publicKeyB64: rec.publicKeyB64,
@@ -211,16 +235,18 @@ export class E2eeDeviceStoreService {
       ...(rec.verifiedVia !== undefined ? { verifiedVia: rec.verifiedVia } : {}),
       ...(rec.verifiedAt !== undefined ? { verifiedAt: rec.verifiedAt } : {}),
       ...(rec.label !== undefined ? { label: rec.label } : {}),
+      ...(rec.localAlias !== undefined ? { localAlias: rec.localAlias } : {}),
       ...(rec.installId !== undefined ? { installId: rec.installId } : {}),
     };
   }
 
   /**
-   * The ONE place the re-login supersede rule lives: evict every stored device that shares
-   * `installId` with the just-adopted device but has a DIFFERENT kid (the phone's dead
-   * pre-logout rows). Mutates the in-memory directory in place and returns the eviction
-   * count — the caller folds it into a SINGLE load/save so no intermediate state ever
-   * persists the new entry alongside the rows it supersedes.
+   * The ONE place the exceptional same-install identity-rotation supersede rule lives:
+   * evict every stored device that shares `installId` with the just-adopted device but has
+   * a DIFFERENT kid. This handles reinstall, key loss, or an explicit identity reset;
+   * ordinary logout preserves the kid and does not enter this path. Mutates the in-memory
+   * directory in place and returns the evicted kids so their independent grants can be
+   * removed in the same transaction.
    *
    * SECURITY INVARIANT (not a style choice): with `evictVerified === false` a
    * `trust === 'verified'` row is NEVER evicted. `e2ee.adoptDeviceKey` arrives PLAINTEXT
@@ -232,23 +258,24 @@ export class E2eeDeviceStoreService {
    * The installId is validated canonical BEFORE any eviction; an invalid/absent installId
    * evicts nothing (old-client append behavior). installId values are never logged.
    *
-   * Accepted residue (M3's case): an OFFLINE logout + email re-login leaves the phone's prior
-   * VERIFIED row in place (this guard forbids evicting it) until QR re-pair or manual unpair.
+   * Accepted residue: after exceptional same-install identity rotation without an explicit
+   * revoke, email TOFU leaves the prior VERIFIED row in place (this guard forbids evicting
+   * it) until QR re-pair or manual unpair.
    */
   private supersedeByInstallId(
     devices: Record<string, E2eePeerDevice>,
     installId: string | undefined,
     keepKid: string,
     evictVerified: boolean,
-  ): number {
-    if (!isCanonicalUuid(installId)) return 0;
-    let evicted = 0;
+  ): string[] {
+    if (!isCanonicalUuid(installId)) return [];
+    const evicted: string[] = [];
     for (const [kid, device] of Object.entries(devices)) {
       if (kid === keepKid) continue;
       if (device.installId !== installId) continue;
       if (!evictVerified && device.trust === 'verified') continue;
       delete devices[kid];
-      evicted++;
+      evicted.push(kid);
     }
     return evicted;
   }
@@ -258,12 +285,31 @@ export class E2eeDeviceStoreService {
     return this.load().devices[kid] ?? null;
   }
 
+  /** Set or clear the local-only alias for a known device. */
+  setLocalAlias(kid: string, localAlias: string | null): E2eePeerDevice | null {
+    return this.transactionRunner.runImmediate(() => {
+      const dir = this.load();
+      const existing = dir.devices[kid];
+      if (!existing) return null;
+      if (localAlias === null) delete existing.localAlias;
+      else existing.localAlias = localAlias;
+      this.save(dir);
+      return existing;
+    });
+  }
+
   /** Remove a peer device's public key (unpair / revoke). No-op if unknown. */
   revoke(kid: string): boolean {
-    const dir = this.load();
-    if (!dir.devices[kid]) return false;
-    delete dir.devices[kid];
-    this.save(dir);
+    const removed = this.transactionRunner.runImmediate(() => {
+      const dir = this.load();
+      if (!dir.devices[kid]) return false;
+      delete dir.devices[kid];
+      this.deleteWorkspaceGrants(kid);
+      this.save(dir);
+      return true;
+    });
+    if (!removed) return false;
+    this.emitDeviceRevocations([kid]);
     logger.info({ kid }, 'Peer E2EE device public key revoked');
     return true;
   }
@@ -307,5 +353,19 @@ export class E2eeDeviceStoreService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(randomUUID(), SETTINGS_KEY, JSON.stringify(dir), now, now);
+  }
+
+  private deleteWorkspaceGrants(kid: string): void {
+    this.sqlite.prepare('DELETE FROM paired_device_workspace_grants WHERE device_kid = ?').run(kid);
+  }
+
+  private emitDeviceRevocations(kids: string[]): void {
+    for (const deviceKid of kids) {
+      const event: PairedDeviceWorkspaceAccessRevokedEvent = {
+        deviceKid,
+        reason: 'device-revoked',
+      };
+      this.eventEmitter?.emit(PAIRED_DEVICE_WORKSPACE_ACCESS_REVOKED_EVENT, event);
+    }
   }
 }

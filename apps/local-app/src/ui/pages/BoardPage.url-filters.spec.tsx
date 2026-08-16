@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
+import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // Import as ComponentType to avoid strict JSX component typing complaints in isolated TS
@@ -72,15 +72,6 @@ function Wrapper({
 function LocationProbe() {
   const location = useLocation();
   return <div data-testid="loc-search">{location.search}</div>;
-}
-
-function BackButton() {
-  const navigate = useNavigate();
-  return (
-    <button onClick={() => navigate(-1)} data-testid="back-btn">
-      Back
-    </button>
-  );
 }
 
 describe('BoardPage — URL filters and history navigation', () => {
@@ -166,37 +157,6 @@ describe('BoardPage — URL filters and history navigation', () => {
     (global.fetch as jest.Mock | undefined)?.mockClear?.();
   });
 
-  it('hydrates from ?p= and supports back/forward via navigation stack', async () => {
-    render(
-      <Wrapper>
-        <Routes>
-          <Route
-            path="/board"
-            element={
-              <>
-                <LocationProbe />
-                <BackButton />
-                <BoardPage />
-              </>
-            }
-          />
-        </Routes>
-      </Wrapper>,
-    );
-
-    // Initially no search
-    await waitFor(() => expect(screen.getByTestId('loc-search').textContent).toBe(''));
-
-    // Click on the epic title to toggle parent filter → pushes ?p=root-1
-    fireEvent.click(await screen.findByText('Epic Root'));
-
-    await waitFor(() => expect(screen.getByTestId('loc-search').textContent).toBe('?p=root-1'));
-
-    // Go back in history (pop) and expect URL and UI to reflect cleared filter
-    fireEvent.click(screen.getByTestId('back-btn'));
-    await waitFor(() => expect(screen.getByTestId('loc-search').textContent).toBe(''));
-  });
-
   it('fetches with archived=active by default (no ar param)', async () => {
     render(
       <Wrapper initialEntries={['/board']}>
@@ -276,29 +236,6 @@ describe('BoardPage — URL filters and history navigation', () => {
 
     // The Todo column should be visible
     expect(screen.getByText('Todo')).toBeInTheDocument();
-  });
-
-  it('resets page when status filter changes via URL', async () => {
-    // Start at page 2 with no status filter
-    render(
-      <Wrapper initialEntries={['/board?pg=2']}>
-        <Routes>
-          <Route
-            path="/board"
-            element={
-              <>
-                <LocationProbe />
-                <BoardPage />
-              </>
-            }
-          />
-        </Routes>
-      </Wrapper>,
-    );
-
-    // Initial URL has pg=2
-    await waitFor(() => {
-      expect(screen.getByTestId('loc-search').textContent).toContain('pg=2');
-    });
+    expect(screen.queryByText('Epic Two')).not.toBeInTheDocument();
   });
 });

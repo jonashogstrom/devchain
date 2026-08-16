@@ -107,7 +107,7 @@ describe('0005_seed_renew_instructions_subscriber', () => {
             source: 'custom',
             customValue: expect.stringContaining('Re-load your agent profile'),
           }),
-          immediate: { source: 'custom', customValue: 'false' },
+          deliveryMode: { source: 'custom', customValue: 'default' },
         }),
         delayMs: 3000,
         cooldownMs: 2000,

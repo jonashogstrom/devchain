@@ -1,3 +1,7 @@
+import type { MessageDeliveryMode } from '../../sessions/services/message-pool.types';
+
+export type { MessageDeliveryMode } from '../../sessions/services/message-pool.types';
+
 export type DeliveryKind = 'mcp.direct' | 'mcp.project' | 'pooled';
 
 export interface DeliveryMessage {
@@ -22,12 +26,13 @@ export interface DeliveryMessage {
    * `mcp.direct`; ignored for `'mcp.project'` and `'pooled'`.
    * `'agent-banner'` (default when unset) wraps the body in the agent-oriented
    * `[This message is sent from …]` banner; `'plain'` delivers the raw body with
-   * no wrapper — used for human (mobile) user turns where the banner is wrong.
+   * no wrapper; `'sender-footer'` appends the authenticated sender display name.
    */
-  readonly framing?: 'agent-banner' | 'plain';
+  readonly framing?: 'agent-banner' | 'plain' | 'sender-footer';
 }
 
 export interface DeliveryPolicy {
+  readonly deliveryMode?: MessageDeliveryMode;
   readonly immediate?: boolean;
   readonly submitKeys?: readonly string[];
   readonly skipConfirmation?: boolean;

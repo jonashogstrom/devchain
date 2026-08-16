@@ -275,13 +275,45 @@ describe('WorktreeTabProvider', () => {
           ],
         } as Response);
       }
-      if (url === '/wt/feature-auth/api/projects') {
+      if (url === '/wt/feature-auth/api/workspaces') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: 'workspace-default',
+              name: 'Default',
+              isDefault: true,
+              position: 0,
+              projectCount: 1,
+              deviceGrantCount: 0,
+              createdAt: '2024-01-01T00:00:00.000Z',
+              updatedAt: '2024-01-01T00:00:00.000Z',
+            },
+          ],
+        } as Response);
+      }
+      if (url === '/wt/feature-auth/api/projects/project-wt-1') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'project-wt-1',
+            workspaceId: 'workspace-default',
+            name: 'Worktree Project',
+            description: null,
+            rootPath: '/tmp/wt',
+            createdAt: '2024-01-01T00:00:00.000Z',
+            updatedAt: '2024-01-01T00:00:00.000Z',
+          }),
+        } as Response);
+      }
+      if (url === '/wt/feature-auth/api/projects?workspaceId=workspace-default') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
             items: [
               {
                 id: 'project-wt-1',
+                workspaceId: 'workspace-default',
                 name: 'Worktree Project',
                 description: null,
                 rootPath: '/tmp/wt',
@@ -365,7 +397,7 @@ describe('WorktreeTabProvider', () => {
 
     await waitFor(() => {
       const urls = fetchMock.mock.calls.map((call) => asRequestUrl(call[0] as RequestInfo));
-      expect(urls).toContain('/wt/feature-auth/api/projects');
+      expect(urls).toContain('/wt/feature-auth/api/projects?workspaceId=workspace-default');
       expect(urls.some((url) => url === '/api/projects')).toBe(false);
       expect(state.runtimeResolved).toBe(true);
       expect(state.activeWorktreeName).toBe('feature-auth');

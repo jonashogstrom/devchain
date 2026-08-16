@@ -131,6 +131,7 @@ export class AgentMessageDeliveryService {
           preKeys: policy.preKeys ? [...policy.preKeys] : undefined,
           preDelayMs: policy.preDelayMs,
           senderAgentId: message.senderAgentId,
+          deliveryMode: policy.deliveryMode,
           immediate: policy.immediate,
           projectId: message.projectId,
           agentName: undefined,
@@ -144,6 +145,7 @@ export class AgentMessageDeliveryService {
       return {
         agentId,
         status: poolResult.status,
+        ...(poolResult.status === 'failed' && poolResult.error ? { error: poolResult.error } : {}),
         ...(poolResult.logEntryId ? { messageId: poolResult.logEntryId } : {}),
       };
     } catch (error) {

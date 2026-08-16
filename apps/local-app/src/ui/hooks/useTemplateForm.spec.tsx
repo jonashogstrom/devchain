@@ -1,31 +1,24 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { useTemplateForm } from './useTemplateForm';
+import { InMemoryProjectsPageApi } from '../../../test/helpers/in-memory-projects-page-api';
 
 describe('useTemplateForm — handleTemplateFilePathChange', () => {
-  const originalFetch = global.fetch;
   const setShowTemplateDialog = jest.fn();
-  const validatePath = jest.fn(async () => ({ exists: false }));
   const toast = jest.fn();
 
-  function mockStat(body: unknown, ok = true): jest.Mock {
-    const fetchMock = jest.fn(
-      async () => ({ ok, json: async () => body }) as Response,
-    ) as jest.Mock;
-    global.fetch = fetchMock as unknown as typeof fetch;
-    return fetchMock;
+  function renderForm(api: InMemoryProjectsPageApi) {
+    return renderHook(() => useTemplateForm({ templates: [], setShowTemplateDialog, api, toast }));
   }
 
   afterEach(() => {
-    global.fetch = originalFetch;
     jest.clearAllMocks();
   });
 
   it('marks an existing file as valid with no error', async () => {
-    mockStat({ exists: true, isFile: true, isDirectory: false });
-
-    const { result } = renderHook(() =>
-      useTemplateForm({ templates: [], setShowTemplateDialog, validatePath, toast }),
-    );
+    const api = new InMemoryProjectsPageApi({
+      pathStats: { '/abs/path/template.json': { exists: true, isFile: true } },
+    });
+    const { result } = renderForm(api);
 
     await act(async () => {
       await result.current.handleTemplateFilePathChange('/abs/path/template.json');
@@ -38,14 +31,14 @@ describe('useTemplateForm — handleTemplateFilePathChange', () => {
       isFile: true,
       error: undefined,
     });
+    expect(api.calls.statPath).toEqual([['/abs/path/template.json']]);
   });
 
   it('reports "Path must be a file, not a directory" for an existing directory', async () => {
-    mockStat({ exists: true, isFile: false, isDirectory: true });
-
-    const { result } = renderHook(() =>
-      useTemplateForm({ templates: [], setShowTemplateDialog, validatePath, toast }),
-    );
+    const api = new InMemoryProjectsPageApi({
+      pathStats: { '/abs/path/somedir': { exists: true, isFile: false } },
+    });
+    const { result } = renderForm(api);
 
     await act(async () => {
       await result.current.handleTemplateFilePathChange('/abs/path/somedir');
@@ -61,11 +54,8 @@ describe('useTemplateForm — handleTemplateFilePathChange', () => {
   });
 
   it('reports "File does not exist" when stat returns exists: false', async () => {
-    mockStat({ exists: false });
-
-    const { result } = renderHook(() =>
-      useTemplateForm({ templates: [], setShowTemplateDialog, validatePath, toast }),
-    );
+    const api = new InMemoryProjectsPageApi();
+    const { result } = renderForm(api);
 
     await act(async () => {
       await result.current.handleTemplateFilePathChange('/abs/path/missing.json');
@@ -81,11 +71,8 @@ describe('useTemplateForm — handleTemplateFilePathChange', () => {
   });
 
   it('rejects relative paths without hitting the network', async () => {
-    const fetchMock = mockStat({ exists: true, isFile: true });
-
-    const { result } = renderHook(() =>
-      useTemplateForm({ templates: [], setShowTemplateDialog, validatePath, toast }),
-    );
+    const api = new InMemoryProjectsPageApi();
+    const { result } = renderForm(api);
 
     await act(async () => {
       await result.current.handleTemplateFilePathChange('relative/path.json');
@@ -96,6 +83,85 @@ describe('useTemplateForm — handleTemplateFilePathChange', () => {
       checked: true,
       error: 'Path must be absolute (start with / or drive letter)',
     });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(api.calls.statPath).toHaveLength(0);
+  });
+
+  it('keeps root-path validation fail-soft when stat rejects', async () => {
+    const api = new InMemoryProjectsPageApi({
+      overrides: { statPath: new Error('offline') },
+    });
+    const { result } = renderForm(api);
+
+    await act(async () => {
+      await result.current.handleTemplatePathChange('/abs/project');
+    });
+
+    expect(result.current.templatePathValidation).toEqual({
+      isAbsolute: true,
+      exists: false,
+      checked: true,
+    });
+  });
+
+  it('honors an explicit absent result for root-path validation', async () => {
+    const api = new InMemoryProjectsPageApi({
+      pathStats: { '/abs/missing-project': { exists: false, isFile: false } },
+    });
+    const { result } = renderForm(api);
+
+    await act(async () => {
+      await result.current.handleTemplatePathChange('/abs/missing-project');
+    });
+
+    expect(result.current.templatePathValidation).toEqual({
+      isAbsolute: true,
+      exists: false,
+      checked: true,
+    });
+  });
+
+  it('uses the template-file rejection copy when stat rejects', async () => {
+    const api = new InMemoryProjectsPageApi({
+      overrides: { statPath: new Error('offline') },
+    });
+    const { result } = renderForm(api);
+
+    await act(async () => {
+      await result.current.handleTemplateFilePathChange('/abs/template.json');
+    });
+
+    expect(result.current.templateFilePathValidation.error).toBe('Failed to validate path');
+  });
+
+  it('ignores a stale template-file stat result', async () => {
+    let resolveOld: ((result: { exists: boolean; isFile: boolean }) => void) | undefined;
+    const oldResult = new Promise<{ exists: boolean; isFile: boolean }>((resolve) => {
+      resolveOld = resolve;
+    });
+    const api = new InMemoryProjectsPageApi({
+      overrides: {
+        statPath: (path) => (path === '/abs/old.json' ? oldResult : { exists: true, isFile: true }),
+      },
+    });
+    const { result } = renderForm(api);
+    let oldRequest = Promise.resolve();
+
+    act(() => {
+      oldRequest = result.current.handleTemplateFilePathChange('/abs/old.json');
+    });
+    await act(async () => {
+      await result.current.handleTemplateFilePathChange('/abs/current.json');
+    });
+    await act(async () => {
+      resolveOld?.({ exists: false, isFile: false });
+      await oldRequest;
+    });
+
+    expect(result.current.templateFormData.templatePath).toBe('/abs/current.json');
+    expect(result.current.templateFilePathValidation).toMatchObject({
+      exists: true,
+      isFile: true,
+      error: undefined,
+    });
   });
 });

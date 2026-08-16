@@ -16,6 +16,9 @@ import {
 import { HTTP_CODE_METADATA } from '@nestjs/common/constants';
 import { resetEnvConfig } from '../../../common/config/env.config';
 import { NotFoundError as StorageNotFoundError } from '../../../common/errors/error-types';
+import { DEFAULT_PROJECT_WORKSPACE_ID } from '../../storage/db/schema';
+
+const SECOND_WORKSPACE_ID = '22222222-2222-4222-8222-222222222222';
 
 jest.mock('../../../common/logging/logger', () => ({
   createLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() }),
@@ -145,6 +148,7 @@ describe('ProjectsController', () => {
     const now = new Date().toISOString();
     return {
       id: overrides.id ?? 'p1',
+      workspaceId: overrides.workspaceId ?? DEFAULT_PROJECT_WORKSPACE_ID,
       name: overrides.name ?? 'Project One',
       description: overrides.description ?? null,
       rootPath: overrides.rootPath ?? '/tmp/one',
@@ -159,11 +163,17 @@ describe('ProjectsController', () => {
   describe('POST /api/projects/from-registry', () => {
     it('creates a project from a registry template through the projects-owned service', async () => {
       registryImportService.createProjectFromRegistry!.mockResolvedValue({
-        project: { id: 'p1', name: 'Project One', rootPath: '/tmp/one' },
+        project: {
+          id: 'p1',
+          name: 'Project One',
+          rootPath: '/tmp/one',
+          workspaceId: DEFAULT_PROJECT_WORKSPACE_ID,
+        },
         fromRegistry: true,
         templateSlug: 'starter-project',
         templateVersion: '1.2.3',
         imported: { prompts: 1, profiles: 1, agents: 1, statuses: 1 },
+        promptTransfer: { imported: 1, deleted: 0, preserved: 0, skipped: 0 },
       });
 
       const result = await controller.createProjectFromRegistry({
@@ -182,6 +192,44 @@ describe('ProjectsController', () => {
         rootPath: '/tmp/one',
       });
       expect(result.project.id).toBe('p1');
+    });
+
+    it('validates and forwards an explicit destination workspace', async () => {
+      registryImportService.createProjectFromRegistry!.mockResolvedValue({
+        project: {
+          id: 'p1',
+          name: 'Project One',
+          rootPath: '/tmp/one',
+          workspaceId: SECOND_WORKSPACE_ID,
+        },
+        fromRegistry: true,
+        templateSlug: 'starter-project',
+        templateVersion: '1.2.3',
+        imported: { prompts: 1, profiles: 1, agents: 1, statuses: 1 },
+        promptTransfer: { imported: 1, deleted: 0, preserved: 0, skipped: 0 },
+      });
+
+      await controller.createProjectFromRegistry({
+        slug: 'starter-project',
+        version: '1.2.3',
+        projectName: 'Project One',
+        rootPath: '/tmp/one',
+        workspaceId: SECOND_WORKSPACE_ID,
+      });
+
+      expect(registryImportService.createProjectFromRegistry).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceId: SECOND_WORKSPACE_ID }),
+      );
+      await expect(
+        controller.createProjectFromRegistry({
+          slug: 'starter-project',
+          version: '1.2.3',
+          projectName: 'Project One',
+          rootPath: '/tmp/one',
+          workspaceId: 'invalid',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(registryImportService.createProjectFromRegistry).toHaveBeenCalledTimes(1);
     });
 
     it('throws BadRequestException for invalid registry create body', async () => {
@@ -439,6 +487,50 @@ describe('ProjectsController', () => {
   });
 
   describe('GET /api/projects (list)', () => {
+    it('filters both items and total by workspaceId', async () => {
+      const project = makeProject({ id: 'p2', workspaceId: SECOND_WORKSPACE_ID });
+      storage.listProjects.mockResolvedValue({
+        items: [project],
+        total: 1,
+        limit: 25,
+        offset: 0,
+      });
+
+      const result = await controller.listProjects('25', '0', SECOND_WORKSPACE_ID);
+
+      expect(storage.listProjects).toHaveBeenCalledWith({
+        limit: 25,
+        offset: 0,
+        workspaceId: SECOND_WORKSPACE_ID,
+      });
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].workspaceId).toBe(SECOND_WORKSPACE_ID);
+      expect(result.total).toBe(1);
+    });
+
+    it('rejects an invalid workspace filter before storage access', async () => {
+      await expect(controller.listProjects(undefined, undefined, 'invalid')).rejects.toThrow();
+      expect(storage.listProjects).not.toHaveBeenCalled();
+      expect(storage.getProject).not.toHaveBeenCalled();
+    });
+
+    it('intersects workspace filtering with the narrower container project scope', async () => {
+      process.env.DEVCHAIN_MODE = 'normal';
+      process.env.CONTAINER_PROJECT_ID = '11111111-1111-4111-8111-111111111111';
+      resetEnvConfig();
+      storage.getProject.mockResolvedValue(
+        makeProject({
+          id: '11111111-1111-4111-8111-111111111111',
+          workspaceId: DEFAULT_PROJECT_WORKSPACE_ID,
+        }),
+      );
+
+      const result = await controller.listProjects(undefined, undefined, SECOND_WORKSPACE_ID);
+
+      expect(storage.listProjects).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ items: [], total: 0, limit: 1, offset: 0 });
+    });
+
     it('returns projects with templateMetadata', async () => {
       const project1 = makeProject({ id: 'p1', name: 'Project 1' });
       const project2 = makeProject({ id: 'p2', name: 'Project 2' });
@@ -842,6 +934,21 @@ describe('ProjectsController', () => {
     expect(fetched.isTemplate).toBe(false);
   });
 
+  it('validates and forwards workspace placement on project update before mutation', async () => {
+    projectsService.updateProject!.mockResolvedValue({
+      project: makeProject({ workspaceId: SECOND_WORKSPACE_ID }),
+      provisioningWarnings: [],
+    });
+
+    await controller.updateProject('p1', { workspaceId: SECOND_WORKSPACE_ID });
+    expect(projectsService.updateProject).toHaveBeenCalledWith('p1', {
+      workspaceId: SECOND_WORKSPACE_ID,
+    });
+
+    await expect(controller.updateProject('p1', { workspaceId: 'invalid' })).rejects.toThrow();
+    expect(projectsService.updateProject).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects update mutation for non-scoped project when CONTAINER_PROJECT_ID is set', async () => {
     process.env.DEVCHAIN_MODE = 'normal';
     process.env.CONTAINER_PROJECT_ID = '11111111-1111-4111-8111-111111111111';
@@ -941,6 +1048,33 @@ describe('ProjectsController', () => {
   });
 
   describe('POST /api/projects/from-template', () => {
+    it('validates and forwards an explicit destination workspace before creation', async () => {
+      (projectsService.createFromTemplate as jest.Mock).mockResolvedValue({
+        success: true,
+        project: makeProject({ workspaceId: SECOND_WORKSPACE_ID }),
+      });
+
+      await controller.createProjectFromTemplate({
+        name: 'New Project',
+        rootPath: '/tmp/new',
+        slug: 'my-template',
+        workspaceId: SECOND_WORKSPACE_ID,
+      });
+      expect(projectsService.createFromTemplate).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceId: SECOND_WORKSPACE_ID }),
+      );
+
+      await expect(
+        controller.createProjectFromTemplate({
+          name: 'New Project',
+          rootPath: '/tmp/new',
+          slug: 'my-template',
+          workspaceId: 'invalid',
+        }),
+      ).rejects.toThrow();
+      expect(projectsService.createFromTemplate).toHaveBeenCalledTimes(1);
+    });
+
     it('accepts optional projectId and passes it to service', async () => {
       const mockResult = {
         success: true,

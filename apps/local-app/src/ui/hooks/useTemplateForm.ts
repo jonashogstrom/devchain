@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  CreateFromTemplateInput,
+  ProjectTemplate,
+} from '@/ui/pages/projects/lib/project-contracts';
+import type { ProjectsPageApi } from '@/ui/pages/projects/lib/projects-page-api';
+import { projectsHttpApi } from '@/ui/pages/projects/lib/projects-http-api';
 
 type ToastFn = (args: { title: string; description: string; variant?: 'destructive' }) => void;
-
-export interface TemplateOption {
-  slug: string;
-  name: string;
-  source: 'bundled' | 'registry' | 'file';
-  versions: string[] | null;
-  latestVersion: string | null;
-}
 
 export interface TemplateFormData {
   name: string;
@@ -17,6 +15,7 @@ export interface TemplateFormData {
   templateId: string;
   version: string;
   templatePath: string;
+  workspaceId: string;
 }
 
 export interface TemplatePathValidation {
@@ -30,45 +29,10 @@ export interface TemplateFilePathValidation extends TemplatePathValidation {
   error?: string;
 }
 
-export interface TeamOverridePayload {
-  teamName: string;
-  allowTeamLeadCreateAgents?: boolean;
-  maxMembers?: number;
-  maxConcurrentTasks?: number;
-  profileNames?: string[];
-  profileSelections?: Array<{
-    profileName: string;
-    configNames: string[];
-  }>;
-}
-
-export interface AgentOverridePayload {
-  agentName: string;
-  providerConfigName: string;
-  modelOverride?: string | null;
-  effortOverride?: string | null;
-}
-
-export interface CreateFromTemplatePayload {
-  name: string;
-  description?: string;
-  rootPath: string;
-  templateId?: string;
-  templatePath?: string;
-  version?: string;
-  familyProviderMappings?: Record<string, string>;
-  presetName?: string;
-  /** Per-agent config overrides (wizard Step 2). Mutually exclusive with presetName. */
-  agentOverrides?: AgentOverridePayload[];
-  /** Transient provider choice metadata (wizard Step 1). */
-  selectedProviderNames?: string[];
-  teamOverrides?: TeamOverridePayload[];
-}
-
 interface UseTemplateFormArgs {
-  templates?: TemplateOption[];
+  templates?: ProjectTemplate[];
   setShowTemplateDialog: (open: boolean) => void;
-  validatePath: (path: string) => Promise<{ exists: boolean; error?: string }>;
+  api?: ProjectsPageApi;
   toast: ToastFn;
 }
 
@@ -79,23 +43,20 @@ interface UseTemplateFormResult {
   setTemplateFormData: React.Dispatch<React.SetStateAction<TemplateFormData>>;
   templatePathValidation: TemplatePathValidation;
   templateFilePathValidation: TemplateFilePathValidation;
-  selectedTemplate: TemplateOption | undefined;
+  selectedTemplate: ProjectTemplate | undefined;
   sortedVersions: string[];
   resetTemplateForm: () => void;
   handleOpenTemplateDialog: () => void;
   handleTemplatePathChange: (path: string) => Promise<void>;
   handleTemplateFilePathChange: (path: string) => Promise<void>;
-  handleTemplateSubmit: (
-    event: React.FormEvent,
-    submitTemplate: (payload: CreateFromTemplatePayload) => void,
-  ) => void;
+  submitTemplate: (submit: (payload: CreateFromTemplateInput) => void) => void;
   handleTemplateChange: (slug: string) => Promise<void>;
 }
 
 export function useTemplateForm({
   templates,
   setShowTemplateDialog,
-  validatePath,
+  api = projectsHttpApi,
   toast,
 }: UseTemplateFormArgs): UseTemplateFormResult {
   const [templateSourceTab, setTemplateSourceTab] = useState<'template' | 'file'>('template');
@@ -106,6 +67,7 @@ export function useTemplateForm({
     templateId: '',
     version: '',
     templatePath: '',
+    workspaceId: '',
   });
   const [templatePathValidation, setTemplatePathValidation] = useState<TemplatePathValidation>({
     isAbsolute: true,
@@ -129,6 +91,7 @@ export function useTemplateForm({
       templateId: '',
       version: '',
       templatePath: '',
+      workspaceId: '',
     });
     setTemplatePathValidation({ isAbsolute: true, exists: false, checked: false });
     setTemplateFilePathValidation({
@@ -153,8 +116,12 @@ export function useTemplateForm({
     setTemplatePathValidation({ isAbsolute, exists: false, checked: false });
 
     if (isAbsolute && path.length > 1) {
-      const validation = await validatePath(path);
-      setTemplatePathValidation({ isAbsolute, exists: validation.exists, checked: true });
+      try {
+        const validation = await api.statPath(path);
+        setTemplatePathValidation({ isAbsolute, exists: validation.exists, checked: true });
+      } catch {
+        setTemplatePathValidation({ isAbsolute, exists: false, checked: true });
+      }
     }
   };
 
@@ -173,40 +140,25 @@ export function useTemplateForm({
 
     if (isAbsolute && path.length > 1) {
       try {
-        const res = await fetch('/api/fs/stat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path }),
-        });
+        const stat = await api.statPath(path);
         if (latestTemplatePathRef.current !== path) return;
 
-        if (res.ok) {
-          const stat = await res.json();
-          if (!stat.exists) {
-            setTemplateFilePathValidation((prev) => ({
-              ...prev,
-              exists: false,
-              checked: true,
-              isFile: false,
-              error: 'File does not exist',
-            }));
-          } else {
-            const isFile = stat.isFile === true;
-            setTemplateFilePathValidation((prev) => ({
-              ...prev,
-              exists: true,
-              checked: true,
-              isFile,
-              error: isFile ? undefined : 'Path must be a file, not a directory',
-            }));
-          }
-        } else {
+        if (!stat.exists) {
           setTemplateFilePathValidation((prev) => ({
             ...prev,
             exists: false,
             checked: true,
             isFile: false,
             error: 'File does not exist',
+          }));
+        } else {
+          const isFile = stat.isFile === true;
+          setTemplateFilePathValidation((prev) => ({
+            ...prev,
+            exists: true,
+            checked: true,
+            isFile,
+            error: isFile ? undefined : 'Path must be a file, not a directory',
           }));
         }
       } catch {
@@ -222,12 +174,7 @@ export function useTemplateForm({
     }
   };
 
-  const handleTemplateSubmit = (
-    event: React.FormEvent,
-    submitTemplate: (payload: CreateFromTemplatePayload) => void,
-  ) => {
-    event.preventDefault();
-
+  const submitTemplate = (submit: (payload: CreateFromTemplateInput) => void) => {
     if (templateSourceTab === 'file') {
       if (!templateFormData.templatePath) {
         toast({
@@ -249,11 +196,12 @@ export function useTemplateForm({
         });
         return;
       }
-      submitTemplate({
+      submit({
         name: templateFormData.name,
         description: templateFormData.description,
         rootPath: templateFormData.rootPath,
         templatePath: templateFormData.templatePath,
+        workspaceId: templateFormData.workspaceId || undefined,
       });
       return;
     }
@@ -266,12 +214,13 @@ export function useTemplateForm({
       });
       return;
     }
-    submitTemplate({
+    submit({
       name: templateFormData.name,
       description: templateFormData.description,
       rootPath: templateFormData.rootPath,
       templateId: templateFormData.templateId,
       version: templateFormData.version,
+      workspaceId: templateFormData.workspaceId || undefined,
     });
   };
 
@@ -328,7 +277,7 @@ export function useTemplateForm({
     handleOpenTemplateDialog,
     handleTemplatePathChange,
     handleTemplateFilePathChange,
-    handleTemplateSubmit,
+    submitTemplate,
     handleTemplateChange,
   };
 }

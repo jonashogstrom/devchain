@@ -5,7 +5,7 @@ import { getUncoveredFamilies } from './providerSelection';
 import type {
   SetupPreviewFamilyAlternative,
   SetupPreviewProviderSummary,
-} from '@/ui/pages/projects/lib/project-api';
+} from '@/ui/pages/projects/lib/project-contracts';
 
 const PROVIDERS: SetupPreviewProviderSummary[] = [
   { name: 'claude', available: true, families: ['reasoning'], agentCount: 2 },

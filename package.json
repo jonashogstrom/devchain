@@ -1,6 +1,6 @@
 {
   "name": "devchain-cli",
-  "version": "0.20.3",
+  "version": "0.21.0",
   "description": "AI driven development platform",
   "homepage": "https://devchain.cc/",
   "repository": {
@@ -8,6 +8,15 @@
     "url": "https://github.com/twitech-lab/devchain.git"
   },
   "changelog": {
+    "0.21.0": [
+      "Workspaces: group your projects into workspaces, and give each agent and paired phone access to only the workspaces it needs",
+      "Dev Template: better task routing to Coders and clearer Coder instructions, with automatic cleanup for sub-agents and automatic compact for the Epic Manager and Code Reviewer",
+      "Subscribers: new Terminate Session and Delete Agent actions",
+      "Agents: the Agents page is now configuration-only — launch, restart, and terminate live in Chat",
+      "Devices: optional local alias for paired devices, messages from a phone say which device sent them, and logging out no longer resets a phone's access",
+      "Startup: fixed a Linux startup hang and false timeout caused by slow DNS (GitHub #18)",
+      "Mobile app 1.7.0"
+    ],
     "0.20.3": [
       "[Bug Fix] Plugins: Codex sessions with plugin policy launch again on Codex CLI 0.147 and newer"
     ],
@@ -359,7 +368,7 @@
     "dev": "pnpm --filter shared build && node scripts/cli.js start --dev",
     "dev:pure": "pnpm --filter local-app dev",
     "dev:ui": "pnpm --filter local-app dev:ui",
-    "build": "pnpm --filter shared build && pnpm --filter local-app build && node scripts/copy-local-app-dist.js && node scripts/copy-cli.js && node scripts/copy-prebuilds.js",
+    "build": "pnpm check:mobile-rpc-contract && pnpm --filter shared build && pnpm --filter local-app build && node scripts/copy-local-app-dist.js && node scripts/copy-cli.js && node scripts/copy-prebuilds.js",
     "build:fast": "pnpm --filter local-app build",
     "prepack": "npm run build",
     "postinstall": "node scripts/postinstall.js",

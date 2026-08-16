@@ -1,4 +1,8 @@
 import type { ActionDefinition, ActionContext, ActionResult } from './action.interface';
+import {
+  deliveryModeFromLegacyImmediate,
+  isMessageDeliveryMode,
+} from '../../sessions/services/message-pool.types';
 
 /**
  * SendAgentMessage Action
@@ -53,12 +57,17 @@ export const sendMessageAction: ActionDefinition = {
       allowedSources: ['custom'], // Submit key should be a static choice, not event-driven
     },
     {
-      name: 'immediate',
-      label: 'Deliver Immediately',
-      type: 'boolean',
+      name: 'deliveryMode',
+      label: 'Delivery Mode',
+      type: 'select',
       required: false,
-      defaultValue: false,
-      description: 'Bypass message pooling and deliver instantly (use for commands like /compact)',
+      defaultValue: 'default',
+      description: 'Choose when this message is delivered to the agent session',
+      options: [
+        { value: 'default', label: 'Default (queue)' },
+        { value: 'immediate', label: 'Deliver Immediately' },
+        { value: 'on_idle', label: 'Delivery on Idle' },
+      ],
       allowedSources: ['custom'],
     },
   ],
@@ -73,7 +82,14 @@ export const sendMessageAction: ActionDefinition = {
     const text = inputs.text as string;
     const inputAgentName = typeof inputs.agentName === 'string' ? inputs.agentName.trim() : '';
     const submitKey = (inputs.submitKey as string) || 'Enter';
-    const immediate = (inputs.immediate as boolean) ?? false;
+    const requestedDeliveryMode = inputs.deliveryMode;
+    if (requestedDeliveryMode !== undefined && !isMessageDeliveryMode(requestedDeliveryMode)) {
+      return {
+        success: false,
+        error: `Unsupported delivery mode: ${String(requestedDeliveryMode)}`,
+      };
+    }
+    const deliveryMode = requestedDeliveryMode ?? deliveryModeFromLegacyImmediate(inputs.immediate);
 
     if (!text || text.trim().length === 0) {
       return {
@@ -134,7 +150,7 @@ export const sendMessageAction: ActionDefinition = {
         },
         {
           submitKeys,
-          immediate,
+          deliveryMode,
         },
       );
 
@@ -155,7 +171,7 @@ export const sendMessageAction: ActionDefinition = {
           resolvedBy,
           textLength: text.length,
           submitKey,
-          immediate,
+          deliveryMode,
           status: result.status,
         },
         result.status === 'queued' ? 'Message enqueued to pool' : 'Message sent to terminal',
@@ -173,7 +189,7 @@ export const sendMessageAction: ActionDefinition = {
           resolvedBy,
           textLength: text.length,
           submitKey,
-          immediate,
+          deliveryMode,
           status: result.status,
         },
       };

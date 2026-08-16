@@ -15,9 +15,10 @@ import { DevicesProxyController } from './controllers/devices-proxy.controller';
 import { QrInitiateProxyController } from './controllers/qr-initiate-proxy.controller';
 import { PreferencesProxyController } from './controllers/preferences-proxy.controller';
 import { ActivityProxyController } from './controllers/activity-proxy.controller';
+import { WorkspacesModule } from '../workspaces/workspaces.module';
 
 @Module({
-  imports: [EventsCoreModule, RealtimeBroadcastModule],
+  imports: [EventsCoreModule, RealtimeBroadcastModule, WorkspacesModule],
   controllers: [
     AuthCallbackController,
     EgressConfigController,

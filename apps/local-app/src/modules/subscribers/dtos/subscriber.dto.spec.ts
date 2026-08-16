@@ -275,6 +275,15 @@ describe('Subscriber DTO schemas', () => {
       ).toThrow(ZodError);
     });
 
+    it('accepts delayMs at the two-minute boundary', () => {
+      expect(() =>
+        CreateSubscriberSchema.parse({
+          ...minValidData,
+          delayMs: 120_000,
+        }),
+      ).not.toThrow();
+    });
+
     it('rejects delayMs outside range', () => {
       expect(() =>
         CreateSubscriberSchema.parse({
@@ -286,7 +295,7 @@ describe('Subscriber DTO schemas', () => {
       expect(() =>
         CreateSubscriberSchema.parse({
           ...minValidData,
-          delayMs: 30001,
+          delayMs: 120_001,
         }),
       ).toThrow(ZodError);
     });
@@ -408,6 +417,22 @@ describe('Subscriber DTO schemas', () => {
       expect(() =>
         UpdateSubscriberSchema.parse({
           actionType: '',
+        }),
+      ).toThrow(ZodError);
+    });
+
+    it('accepts delayMs at the two-minute boundary', () => {
+      expect(() =>
+        UpdateSubscriberSchema.parse({
+          delayMs: 120_000,
+        }),
+      ).not.toThrow();
+    });
+
+    it('rejects delayMs above the two-minute limit', () => {
+      expect(() =>
+        UpdateSubscriberSchema.parse({
+          delayMs: 120_001,
         }),
       ).toThrow(ZodError);
     });

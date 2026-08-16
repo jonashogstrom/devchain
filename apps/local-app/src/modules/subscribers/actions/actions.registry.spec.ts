@@ -7,6 +7,8 @@ import {
   getActionTypes,
 } from './actions.registry';
 import { sendMessageAction } from './send-message.action';
+import { deleteAgentAction } from './delete-agent.action';
+import { terminateSessionAction } from './terminate-session.action';
 
 describe('ActionsRegistry', () => {
   describe('ACTIONS_REGISTRY', () => {
@@ -16,6 +18,14 @@ describe('ActionsRegistry', () => {
 
     it('should contain sendMessageAction', () => {
       expect(ACTIONS_REGISTRY).toContain(sendMessageAction);
+    });
+
+    it('should contain deleteAgentAction', () => {
+      expect(ACTIONS_REGISTRY).toContain(deleteAgentAction);
+    });
+
+    it('should contain terminateSessionAction', () => {
+      expect(ACTIONS_REGISTRY).toContain(terminateSessionAction);
     });
 
     it('should have at least one action', () => {
@@ -99,6 +109,51 @@ describe('ActionsRegistry', () => {
       expect(submitKeyInput).toBeDefined();
       expect(submitKeyInput?.allowedSources).toEqual(['custom']);
     });
+
+    it('should expose Delete Agent metadata with both optional selectors', () => {
+      const deleteAgent = getAllActions().find((action) => action.type === 'delete_agent');
+
+      expect(deleteAgent).toMatchObject({
+        name: 'Delete Agent',
+        category: 'session',
+        supportsRetry: false,
+      });
+      expect(deleteAgent?.description).toMatch(/permanently delete/i);
+      expect(deleteAgent?.description).toMatch(/Project Owners and Team Leads are protected/i);
+      expect(deleteAgent?.inputs).toEqual([
+        expect.objectContaining({ name: 'agentName', required: false }),
+        expect.objectContaining({ name: 'familySlug', required: false }),
+      ]);
+    });
+
+    it('should expose Terminate Session metadata with ordered optional selectors', () => {
+      const terminateSession = getAllActions().find(
+        (action) => action.type === 'terminate_session',
+      );
+
+      expect(terminateSession).toMatchObject({
+        name: 'Terminate Session',
+        category: 'session',
+      });
+      expect(terminateSession?.supportsRetry).toBeUndefined();
+      expect(terminateSession?.inputs).toEqual([
+        expect.objectContaining({
+          name: 'agentName',
+          label: 'Agent Name (Override)',
+          type: 'string',
+          required: false,
+        }),
+        expect.objectContaining({
+          name: 'familySlug',
+          label: 'Profile Family Slug',
+          type: 'string',
+          required: false,
+        }),
+      ]);
+      expect(terminateSession?.inputs[1].description).toContain(
+        'Family failures are not automatically retried, even when Retry on error is enabled.',
+      );
+    });
   });
 
   describe('getActionMetadata', () => {
@@ -146,6 +201,14 @@ describe('ActionsRegistry', () => {
       const types = getActionTypes();
 
       expect(types).toContain('send_agent_message');
+    });
+
+    it('should include delete_agent type', () => {
+      expect(getActionTypes()).toContain('delete_agent');
+    });
+
+    it('should include terminate_session type', () => {
+      expect(getActionTypes()).toContain('terminate_session');
     });
 
     it('should return strings only', () => {

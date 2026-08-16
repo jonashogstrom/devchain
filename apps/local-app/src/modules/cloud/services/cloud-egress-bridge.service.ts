@@ -12,6 +12,7 @@ import type { EpicUpdatedEventPayload } from '../../events/catalog/epic.updated'
 import type { EpicCommentCreatedEventPayload } from '../../events/catalog/epic.comment.created';
 import type { SessionCrashedEventPayload } from '../../events/catalog/session.crashed';
 import type { SessionStoppedEventPayload } from '../../events/catalog/session.stopped';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const logger = createLogger('CloudEgressBridge');
 
@@ -22,41 +23,47 @@ export class CloudEgressBridgeService {
     private readonly egressQueue: EgressQueueService,
     private readonly eventMapper: EventMapperService,
     private readonly projectConfig: ProjectEgressConfigService,
+    private readonly workspaceMode: WorkspaceModeCoordinatorService,
   ) {}
 
   @OnEvent('epic.created', { async: true })
   async onEpicCreated(payload: EpicCreatedEventPayload): Promise<void> {
-    this.forward({ name: 'epic.created', payload });
+    await this.forward({ name: 'epic.created', payload });
   }
 
   @OnEvent('epic.updated', { async: true })
   async onEpicUpdated(payload: EpicUpdatedEventPayload): Promise<void> {
-    this.forward({ name: 'epic.updated', payload });
+    await this.forward({ name: 'epic.updated', payload });
   }
 
   @OnEvent('epic.deleted', { async: true })
   async onEpicDeleted(payload: EpicDeletedEventPayload): Promise<void> {
-    this.forward({ name: 'epic.deleted', payload });
+    await this.forward({ name: 'epic.deleted', payload });
   }
 
   @OnEvent('epic.comment.created', { async: true })
   async onEpicCommentCreated(payload: EpicCommentCreatedEventPayload): Promise<void> {
-    this.forward({ name: 'epic.comment.created', payload });
+    await this.forward({ name: 'epic.comment.created', payload });
   }
 
   @OnEvent('session.crashed', { async: true })
   async onSessionCrashed(payload: SessionCrashedEventPayload): Promise<void> {
-    this.forward({ name: 'session.crashed', payload });
+    await this.forward({ name: 'session.crashed', payload });
   }
 
   @OnEvent('session.stopped', { async: true })
   async onSessionStopped(payload: SessionStoppedEventPayload): Promise<void> {
-    this.forward({ name: 'session.stopped', payload });
+    await this.forward({ name: 'session.stopped', payload });
   }
 
-  private forward(event: Parameters<EventMapperService['mapToIngestPayload']>[0]): void {
+  private async forward(
+    event: Parameters<EventMapperService['mapToIngestPayload']>[0],
+  ): Promise<void> {
     const status = this.cloudSession.getStatus();
     if (!status.connected || !status.userId) return;
+
+    const mode = await this.workspaceMode.getSnapshot().catch(() => null);
+    if (!mode || mode.multiWorkspaceMode || mode.failClosedPending) return;
 
     const metadata = getEventMetadata(event.payload);
     if (!metadata) {

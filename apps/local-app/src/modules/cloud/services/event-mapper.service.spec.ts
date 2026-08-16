@@ -31,6 +31,24 @@ describe('EventMapperService', () => {
     expect(result.payload).toEqual(payload);
   });
 
+  it('maps a generic AUQ notice without scoped identifiers or content', () => {
+    const result = service.mapToGenericAskUserQuestionNotice(
+      'auq.pending:internal-source-id',
+      'user-1',
+    );
+
+    expect(result).toMatchObject({
+      sourceEventId: 'auq.pending:internal-source-id',
+      sourceEventType: 'claude.hooks.ask_user_question.pending',
+      forwardingUserId: 'user-1',
+      projectId: null,
+      payload: { accountLevel: true },
+    });
+    expect(JSON.stringify(result.payload)).not.toMatch(
+      /project|workspace|agent|session|tool|thread|question|deep.?link/i,
+    );
+  });
+
   it('maps epic.comment.created with projectId for ingest forwarding', () => {
     const payload = {
       commentId: 'comment-1',

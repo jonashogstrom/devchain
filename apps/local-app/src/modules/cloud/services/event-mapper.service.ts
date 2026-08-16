@@ -40,6 +40,24 @@ export interface MapToIngestOptions {
 
 @Injectable()
 export class EventMapperService {
+  mapToGenericAskUserQuestionNotice(
+    sourceEventId: string,
+    forwardingUserId: string,
+  ): IngestPayload {
+    return {
+      source: 'workflow',
+      sourceEventId,
+      sourceEventType: 'claude.hooks.ask_user_question.pending',
+      forwardingUserId,
+      recipientMode: 'self',
+      recipientHints: [],
+      occurredAt: new Date().toISOString(),
+      payload: { accountLevel: true },
+      projectId: null,
+      orgId: null,
+    };
+  }
+
   mapToIngestPayload(
     event: AllowlistedEvent,
     sourceEventId: string,

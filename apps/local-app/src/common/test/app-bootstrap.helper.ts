@@ -107,7 +107,6 @@ function createInMemoryBootstrapDb(): InMemoryBootstrapDb {
 function createBootstrapStorageMock(): Record<string, jest.Mock> {
   const methodCache = new Map<string, jest.Mock>();
   const predefined: Record<string, jest.Mock> = {
-    getFeatureFlags: jest.fn().mockResolvedValue({}),
     getRegistryConfig: jest.fn().mockReturnValue({
       url: '',
       cacheDir: '',

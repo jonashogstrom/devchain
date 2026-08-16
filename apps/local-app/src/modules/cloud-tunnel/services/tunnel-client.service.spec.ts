@@ -6,6 +6,7 @@ import { TunnelKeypairService } from './tunnel-keypair.service';
 import { E2eeKeypairService } from '../../e2ee/services/e2ee-keypair.service';
 import { TunnelHandlerService } from './tunnel-handler.service';
 import { TunnelRpcCryptoService } from './tunnel-rpc-crypto.service';
+import { WorkspaceModeCoordinatorService } from '../../workspaces/services/workspace-mode-coordinator.service';
 
 const mockInstances: any[] = [];
 
@@ -41,6 +42,7 @@ describe('TunnelClientService', () => {
   let handler: Partial<TunnelHandlerService>;
   let e2eeKeypair: Partial<E2eeKeypairService>;
   let rpcCrypto: Partial<TunnelRpcCryptoService>;
+  let workspaceMode: Partial<WorkspaceModeCoordinatorService>;
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -80,6 +82,13 @@ describe('TunnelClientService', () => {
       handle: jest.fn((req, _instanceId, dispatch) => dispatch(req)),
     };
 
+    workspaceMode = {
+      getSnapshot: jest.fn().mockResolvedValue({
+        multiWorkspaceMode: false,
+        failClosedPending: false,
+      }),
+    };
+
     service = new TunnelClientService(
       cloudSession as CloudSessionManagerService,
       refreshGate as RefreshGateService,
@@ -87,6 +96,7 @@ describe('TunnelClientService', () => {
       handler as TunnelHandlerService,
       e2eeKeypair as E2eeKeypairService,
       rpcCrypto as TunnelRpcCryptoService,
+      workspaceMode as WorkspaceModeCoordinatorService,
     );
   });
 
@@ -300,6 +310,27 @@ describe('TunnelClientService', () => {
     expect(typeof e2ee.envelopeVersion).toBe('number');
   });
 
+  it('advertises workspace support and the authoritative live mode independently', async () => {
+    (workspaceMode.getSnapshot as jest.Mock).mockResolvedValueOnce({
+      multiWorkspaceMode: true,
+      failClosedPending: true,
+    });
+    service.handleCloudConnected();
+    const ws = mockInstances[0];
+
+    ws._emit('message', Buffer.from(JSON.stringify({ type: 'challenge', nonce: 'n', ts: 't' })));
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+
+    const attest = ws.send.mock.calls
+      .map((call: any[]) => JSON.parse(call[0]))
+      .find((message: any) => message.type === 'attest');
+    expect(attest).toMatchObject({
+      workspaceSupport: { v: 1 },
+      multiWorkspaceMode: true,
+      workspaceModePending: true,
+    });
+  });
+
   it('still attests (advertising no E2EE) when the E2EE keypair export fails', async () => {
     (e2eeKeypair.exportPublic as jest.Mock).mockRejectedValueOnce(new Error('keystore locked'));
     service.handleCloudConnected();
@@ -384,6 +415,16 @@ describe('TunnelClientService', () => {
     return ws;
   }
 
+  async function flushMicrotasks(count = 8): Promise<void> {
+    for (let i = 0; i < count; i++) await Promise.resolve();
+  }
+
+  function workspaceModeCommands(ws: any): any[] {
+    return ws.send.mock.calls
+      .map((call: any[]) => JSON.parse(call[0]))
+      .filter((message: any) => message.ctrl === 'workspace_mode_command');
+  }
+
   it('exposes the bridge-assigned instanceId after ready', async () => {
     expect(service.getInstanceId()).toBeNull();
     await driveToReady();
@@ -444,6 +485,250 @@ describe('TunnelClientService', () => {
     const promise = service.querySseLiveness();
     ws._emit('close', 1006, 'abnormal');
     await expect(promise).resolves.toEqual({ live: false, lastSeenAt: null });
+  });
+
+  it('ignores workspace-mode events while the cloud session is disconnected', () => {
+    expect(service.handleWorkspaceModeChanged()).toBeUndefined();
+
+    expect(workspaceMode.getSnapshot).not.toHaveBeenCalled();
+    expect(require('ws').default).not.toHaveBeenCalled();
+  });
+
+  it('coalesces connected pre-ready events and flushes only the latest snapshot after ready', async () => {
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    (workspaceMode.getSnapshot as jest.Mock).mockResolvedValue({
+      multiWorkspaceMode: true,
+      failClosedPending: false,
+    });
+    const sendCommand = jest
+      .spyOn(service, 'sendWorkspaceModeCommand')
+      .mockResolvedValue(undefined);
+    service.handleCloudConnected();
+    const ws = mockInstances[0];
+
+    service.handleWorkspaceModeChanged();
+    service.handleWorkspaceModeChanged();
+    expect(workspaceMode.getSnapshot).not.toHaveBeenCalled();
+    expect(sendCommand).not.toHaveBeenCalled();
+
+    ws._emit('message', Buffer.from(JSON.stringify({ type: 'ready', instanceId: 'inst-42' })));
+    await flushMicrotasks();
+
+    expect(workspaceMode.getSnapshot).toHaveBeenCalledTimes(1);
+    expect(sendCommand.mock.calls).toEqual([
+      ['prepare', true],
+      ['commit', true],
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'committed multi-workspace takes precedence over pending',
+      snapshot: { multiWorkspaceMode: true, failClosedPending: true },
+      commands: [
+        ['prepare', true],
+        ['commit', true],
+      ],
+    },
+    {
+      name: 'pending-only mode',
+      snapshot: { multiWorkspaceMode: false, failClosedPending: true },
+      commands: [['prepare', true]],
+    },
+    {
+      name: 'committed single-workspace mode',
+      snapshot: { multiWorkspaceMode: false, failClosedPending: false },
+      commands: [['commit', false]],
+    },
+  ])('maps $name to the existing command contract', async ({ snapshot, commands }) => {
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    await driveToReady();
+    (workspaceMode.getSnapshot as jest.Mock).mockResolvedValue(snapshot);
+    const sendCommand = jest
+      .spyOn(service, 'sendWorkspaceModeCommand')
+      .mockResolvedValue(undefined);
+
+    service.handleWorkspaceModeChanged();
+    await flushMicrotasks();
+
+    expect(workspaceMode.getSnapshot).toHaveBeenCalledTimes(1);
+    expect(sendCommand.mock.calls).toEqual(commands);
+  });
+
+  it('performs one more latest-state pass when an event arrives during a flush', async () => {
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    await driveToReady();
+    (workspaceMode.getSnapshot as jest.Mock)
+      .mockResolvedValueOnce({ multiWorkspaceMode: false, failClosedPending: false })
+      .mockResolvedValueOnce({ multiWorkspaceMode: false, failClosedPending: true });
+    let finishFirstCommand!: () => void;
+    const sendCommand = jest
+      .spyOn(service, 'sendWorkspaceModeCommand')
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishFirstCommand = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+
+    service.handleWorkspaceModeChanged();
+    await flushMicrotasks(2);
+    expect(workspaceMode.getSnapshot).toHaveBeenCalledTimes(1);
+
+    service.handleWorkspaceModeChanged();
+    finishFirstCommand();
+    await flushMicrotasks();
+
+    expect(workspaceMode.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(sendCommand.mock.calls).toEqual([
+      ['commit', false],
+      ['prepare', true],
+    ]);
+  });
+
+  it('contains snapshot-read rejection and closes the current tunnel for retry', async () => {
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    const ws = await driveToReady();
+    (workspaceMode.getSnapshot as jest.Mock).mockRejectedValueOnce(new Error('storage busy'));
+
+    expect(service.handleWorkspaceModeChanged()).toBeUndefined();
+    await flushMicrotasks();
+
+    expect(ws.close).toHaveBeenCalledWith(1012, 'workspace_mode_reconcile_failed');
+    expect(service.canPush()).toBe(false);
+  });
+
+  it('closes the current tunnel when a live workspace command is rejected', async () => {
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    const ws = await driveToReady();
+    (workspaceMode.getSnapshot as jest.Mock).mockResolvedValue({
+      multiWorkspaceMode: false,
+      failClosedPending: true,
+    });
+
+    service.handleWorkspaceModeChanged();
+    await flushMicrotasks(2);
+    const command = workspaceModeCommands(ws)[0];
+    ws._emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'ctrl',
+          v: 1,
+          ctrl: 'workspace_mode_result',
+          id: command.id,
+          operation: command.operation,
+          ok: false,
+          error: 'bridge cleanup failed',
+        }),
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(ws.close).toHaveBeenCalledWith(1012, 'workspace_mode_reconcile_failed');
+    expect(service.canPush()).toBe(false);
+  });
+
+  it('uses command timeout to force normal reconnect and next-attestation convergence', async () => {
+    const WebSocket = require('ws').default;
+    (cloudSession.getStatus as jest.Mock).mockReturnValue({ connected: true });
+    const ws = await driveToReady();
+    (workspaceMode.getSnapshot as jest.Mock).mockResolvedValue({
+      multiWorkspaceMode: false,
+      failClosedPending: true,
+    });
+
+    service.handleWorkspaceModeChanged();
+    await flushMicrotasks(2);
+    expect(workspaceModeCommands(ws)).toHaveLength(1);
+
+    jest.advanceTimersByTime(5_000);
+    await flushMicrotasks();
+    expect(ws.close).toHaveBeenCalledWith(1012, 'workspace_mode_reconcile_failed');
+
+    ws._emit('close', 1012, 'workspace_mode_reconcile_failed');
+    await flushMicrotasks();
+    jest.advanceTimersByTime(2_000);
+    expect(WebSocket).toHaveBeenCalledTimes(2);
+
+    const reconnected = mockInstances[1];
+    reconnected._emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'challenge', nonce: 'next', ts: 'attestation' })),
+    );
+    await flushMicrotasks();
+    const attest = reconnected.send.mock.calls
+      .map((call: any[]) => JSON.parse(call[0]))
+      .find((message: any) => message.type === 'attest');
+    expect(attest).toMatchObject({
+      multiWorkspaceMode: false,
+      workspaceModePending: true,
+    });
+
+    reconnected._emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'ready', instanceId: 'inst-reconnected' })),
+    );
+    await flushMicrotasks();
+    expect(workspaceModeCommands(reconnected)).toHaveLength(0);
+  });
+
+  it('sends workspace-mode control and resolves only its matching acknowledgement', async () => {
+    const ws = await driveToReady();
+    const promise = service.sendWorkspaceModeCommand('prepare', true);
+    const command = ws.send.mock.calls
+      .map((call: any[]) => JSON.parse(call[0]))
+      .find((message: any) => message.ctrl === 'workspace_mode_command');
+
+    expect(command).toMatchObject({
+      type: 'ctrl',
+      v: 1,
+      operation: 'prepare',
+      multiWorkspaceMode: true,
+    });
+    ws._emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'ctrl',
+          v: 1,
+          ctrl: 'workspace_mode_result',
+          id: command.id,
+          operation: 'prepare',
+          ok: true,
+        }),
+      ),
+    );
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('rejects workspace-mode control when the bridge rejects or disconnects', async () => {
+    const ws = await driveToReady();
+    const rejected = service.sendWorkspaceModeCommand('commit', true);
+    const command = ws.send.mock.calls
+      .map((call: any[]) => JSON.parse(call[0]))
+      .find((message: any) => message.ctrl === 'workspace_mode_command');
+    ws._emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'ctrl',
+          v: 1,
+          ctrl: 'workspace_mode_result',
+          id: command.id,
+          operation: 'commit',
+          ok: false,
+          error: 'workspace_mode_control_failed',
+        }),
+      ),
+    );
+    await expect(rejected).rejects.toThrow('workspace_mode_control_failed');
+
+    const disconnected = service.sendWorkspaceModeCommand('abort', false);
+    ws._emit('close', 1006, 'abnormal');
+    await expect(disconnected).rejects.toThrow('Bridge tunnel closed');
   });
 
   it('routes inbound RPC through the crypto seam (instanceId bound) and sends the response', async () => {

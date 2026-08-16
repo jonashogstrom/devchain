@@ -1,7 +1,11 @@
 import type { EpicOperationContext } from '../../../epics/services/epics.service';
 import type { Status, Epic } from '../../../storage/models/domain.models';
 import { createLogger } from '../../../../common/logging/logger';
-import { NotFoundError, ValidationError } from '../../../../common/errors/error-types';
+import {
+  NotFoundError,
+  OptimisticLockError,
+  ValidationError,
+} from '../../../../common/errors/error-types';
 import {
   McpResponse,
   ListEpicsResponse,
@@ -715,7 +719,7 @@ export async function handleUpdateEpic(
         },
       };
     }
-    if (error instanceof Error && error.message.includes('was modified by another operation')) {
+    if (error instanceof OptimisticLockError) {
       const currentEpic = await ctx.storage.getEpic(epicId);
       return {
         success: false,

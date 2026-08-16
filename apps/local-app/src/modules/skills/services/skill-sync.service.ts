@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import * as fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -14,29 +14,12 @@ import { Skill } from '../../storage/models/domain.models';
 import { SkillCategoryService } from './skill-category.service';
 import { SkillSourceRegistryService } from './skill-source-registry.service';
 import { SkillsService } from './skills.service';
+import type { SyncResult } from './skill-sync.types';
 
 const logger = createLogger('SkillSyncService');
 
-export interface SyncError {
-  sourceName: string;
-  skillSlug?: string;
-  message: string;
-}
-
-export interface SyncResult {
-  status: 'completed' | 'already_running';
-  added: number;
-  updated: number;
-  removed: number;
-  failed: number;
-  unchanged: number;
-  errors: SyncError[];
-}
-
 @Injectable()
-export class SkillSyncService implements OnApplicationBootstrap {
-  private syncInProgress = false;
-
+export class SkillSyncService {
   constructor(
     private readonly skillSourceRegistry: SkillSourceRegistryService,
     private readonly skillsService: SkillsService,
@@ -44,59 +27,43 @@ export class SkillSyncService implements OnApplicationBootstrap {
     private readonly settingsService: SettingsService,
   ) {}
 
-  onApplicationBootstrap(): void {
-    if (!this.settingsService.getSkillsSyncOnStartup()) {
-      logger.info('Startup skills sync disabled via settings');
-      return;
+  async syncAll(): Promise<SyncResult> {
+    const adapters = await this.skillSourceRegistry.getAdapters();
+    const sourceSettings = this.settingsService.getSkillSourcesEnabled();
+    const enabledAdapters = adapters.filter((adapter) =>
+      this.isSourceEnabled(adapter.sourceName, sourceSettings),
+    );
+
+    for (const adapter of adapters) {
+      if (!this.isSourceEnabled(adapter.sourceName, sourceSettings)) {
+        logger.info(
+          { sourceName: adapter.sourceName },
+          'Skill sync skipped because source is disabled',
+        );
+      }
     }
 
-    void this.syncAll().catch((error) => {
-      logger.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Startup skills sync failed',
-      );
-    });
-  }
+    if (enabledAdapters.length === 0) {
+      return this.createEmptyResult();
+    }
 
-  async syncAll(): Promise<SyncResult> {
-    return this.withMutex(async () => {
-      const adapters = await this.skillSourceRegistry.getAdapters();
-      const sourceSettings = this.settingsService.getSkillSourcesEnabled();
-      const enabledAdapters = adapters.filter((adapter) =>
-        this.isSourceEnabled(adapter.sourceName, sourceSettings),
-      );
+    const settledResults = await Promise.allSettled(
+      enabledAdapters.map((adapter) => this.syncAdapter(adapter)),
+    );
 
-      for (const adapter of adapters) {
-        if (!this.isSourceEnabled(adapter.sourceName, sourceSettings)) {
-          logger.info(
-            { sourceName: adapter.sourceName },
-            'Skill sync skipped because source is disabled',
-          );
-        }
+    return settledResults.reduce<SyncResult>((acc, result, index) => {
+      if (result.status === 'fulfilled') {
+        return this.mergeSyncResults(acc, result.value);
       }
 
-      if (enabledAdapters.length === 0) {
-        return this.createEmptyResult();
-      }
-
-      const settledResults = await Promise.allSettled(
-        enabledAdapters.map((adapter) => this.syncAdapter(adapter)),
-      );
-
-      return settledResults.reduce<SyncResult>((acc, result, index) => {
-        if (result.status === 'fulfilled') {
-          return this.mergeSyncResults(acc, result.value);
-        }
-
-        const adapterName = enabledAdapters[index]?.sourceName ?? 'unknown';
-        acc.failed += 1;
-        acc.errors.push({
-          sourceName: adapterName,
-          message: result.reason instanceof Error ? result.reason.message : String(result.reason),
-        });
-        return acc;
-      }, this.createEmptyResult());
-    });
+      const adapterName = enabledAdapters[index]?.sourceName ?? 'unknown';
+      acc.failed += 1;
+      acc.errors.push({
+        sourceName: adapterName,
+        message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+      return acc;
+    }, this.createEmptyResult());
   }
 
   async syncSource(sourceName: string): Promise<SyncResult> {
@@ -118,21 +85,7 @@ export class SkillSyncService implements OnApplicationBootstrap {
       return this.createEmptyResult();
     }
 
-    return this.withMutex(() => this.syncAdapter(adapter));
-  }
-
-  private async withMutex(run: () => Promise<SyncResult>): Promise<SyncResult> {
-    if (this.syncInProgress) {
-      logger.info('Skill sync skipped because another sync is already running');
-      return this.createAlreadyRunningResult();
-    }
-
-    this.syncInProgress = true;
-    try {
-      return await run();
-    } finally {
-      this.syncInProgress = false;
-    }
+    return this.syncAdapter(adapter);
   }
 
   private async syncAdapter(adapter: SkillSourceAdapter): Promise<SyncResult> {
@@ -274,12 +227,16 @@ export class SkillSyncService implements OnApplicationBootstrap {
         continue;
       }
 
+      const skillNameFromSlug = this.extractSkillNameFromSlug(existingSkill.slug, sourceName);
       try {
-        const wasDeleted = await this.skillsService.deleteSkillBySlug(existingSkill.slug);
-        if (!wasDeleted) {
-          continue;
+        if (skillNameFromSlug) {
+          await this.deleteSyncedSkillDirectory(sourceName, skillNameFromSlug);
         }
-        result.removed += 1;
+
+        const wasDeleted = await this.skillsService.deleteSkillBySlug(existingSkill.slug);
+        if (wasDeleted) {
+          result.removed += 1;
+        }
       } catch (error) {
         result.failed += 1;
         result.errors.push({
@@ -287,15 +244,7 @@ export class SkillSyncService implements OnApplicationBootstrap {
           skillSlug: existingSkill.slug,
           message: error instanceof Error ? error.message : String(error),
         });
-        continue;
       }
-
-      const skillNameFromSlug = this.extractSkillNameFromSlug(existingSkill.slug, sourceName);
-      if (!skillNameFromSlug) {
-        continue;
-      }
-
-      await this.deleteSyncedSkillDirectory(sourceName, skillNameFromSlug);
     }
   }
 
@@ -377,6 +326,7 @@ export class SkillSyncService implements OnApplicationBootstrap {
         },
         'Failed to cleanup stale synced skill files',
       );
+      throw error;
     }
   }
 
@@ -394,18 +344,6 @@ export class SkillSyncService implements OnApplicationBootstrap {
   private createEmptyResult(): SyncResult {
     return {
       status: 'completed',
-      added: 0,
-      updated: 0,
-      removed: 0,
-      failed: 0,
-      unchanged: 0,
-      errors: [],
-    };
-  }
-
-  private createAlreadyRunningResult(): SyncResult {
-    return {
-      status: 'already_running',
       added: 0,
       updated: 0,
       removed: 0,

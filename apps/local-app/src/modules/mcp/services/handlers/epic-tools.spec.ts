@@ -1,4 +1,3 @@
-import { handleListAgents, handleGetAgentByName, handleListStatuses } from './agent-tools';
 import {
   handleListEpics,
   handleListAssignedEpicsTasks,
@@ -9,17 +8,15 @@ import {
   handleDeleteEpic,
 } from './epic-tools';
 import type { EpicToolContext } from './epic-context';
-import type { AgentToolContext } from './agent-context';
 import type { AgentSessionContext } from '../../dtos/mcp.dto';
-import { NotFoundError, ValidationError } from '../../../../common/errors/error-types';
-import { ServiceUnavailableError } from '../../../../common/errors/service-unavailable.error';
+import {
+  NotFoundError,
+  OptimisticLockError,
+  ValidationError,
+} from '../../../../common/errors/error-types';
 
 jest.mock('../../../../common/logging/logger', () => ({
   createLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() }),
-}));
-
-jest.mock('../../../../common/template/agent-recipient-context', () => ({
-  loadAgentRecipientContext: jest.fn().mockResolvedValue({}),
 }));
 
 jest.mock('../utils/resolve-epic-id', () => ({
@@ -278,414 +275,9 @@ function makeEpicCtx(overrides: Partial<EpicToolContext> = {}): EpicToolContext 
   };
 }
 
-function makeAgentTestCtx(overrides: Partial<AgentToolContext> = {}): AgentToolContext {
-  return {
-    storage: makeStorageMock(),
-    sessionsService: {
-      getAgentPresence: jest.fn().mockResolvedValue(new Map()),
-    } as never,
-    terminalIO: {
-      listAllSessionNames: jest.fn().mockResolvedValue(new Set()),
-    } as never,
-    instructionsResolver: {
-      resolve: jest
-        .fn()
-        .mockResolvedValue({ contentMd: '', bytes: 0, truncated: false, docs: [], prompts: [] }),
-    } as never,
-    teamsService: {
-      listTeamsByAgent: jest.fn().mockResolvedValue([]),
-    } as never,
-    defaultInlineMaxBytes: 64 * 1024,
-    resolveSessionContext: jest.fn().mockResolvedValue({ success: true, data: makeAgentCtx() }),
-    ...overrides,
-  };
-}
-
 describe('epic-tools handlers', () => {
   afterEach(() => {
     jest.clearAllMocks();
-  });
-
-  describe('handleListAgents', () => {
-    it('returns error when no project associated', async () => {
-      const agentCtx = makeAgentCtx();
-      (agentCtx as Record<string, unknown>).project = null;
-      const ctx = makeAgentTestCtx();
-      (ctx.resolveSessionContext as jest.Mock).mockResolvedValue({ success: true, data: agentCtx });
-
-      const result = await handleListAgents(ctx, { sessionId: SESSION_ID });
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('PROJECT_NOT_FOUND');
-    });
-
-    it('returns agents and guests combined, sorted by name', async () => {
-      const ctx = makeAgentTestCtx();
-      (ctx.storage.listAgents as jest.Mock).mockResolvedValue({
-        items: [
-          { id: AGENT_ID, name: 'Zeta', profileId: 'p1', description: null },
-          {
-            id: '00000000-0000-0000-0000-000000000099',
-            name: 'Alpha',
-            profileId: 'p2',
-            description: null,
-          },
-        ],
-        total: 2,
-      });
-      (ctx.storage.listGuests as jest.Mock).mockResolvedValue([
-        {
-          id: '00000000-0000-0000-0000-000000000098',
-          name: 'Beta',
-          description: null,
-          tmuxSessionId: 'tmux-1',
-        },
-      ]);
-
-      const result = await handleListAgents(ctx, { sessionId: SESSION_ID });
-      expect(result.success).toBe(true);
-      expect(result.data.agents.map((a: { name: string }) => a.name)).toEqual([
-        'Alpha',
-        'Beta',
-        'Zeta',
-      ]);
-    });
-
-    it('filters by query parameter', async () => {
-      const ctx = makeAgentTestCtx();
-      const result = await handleListAgents(ctx, { sessionId: SESSION_ID, q: 'agent' });
-      expect(result.success).toBe(true);
-      expect(result.data.agents).toHaveLength(1);
-    });
-  });
-
-  describe('handleGetAgentByName', () => {
-    function useCrossAgentCaller(ctx: AgentToolContext): void {
-      const sessionContext = makeAgentCtx();
-      sessionContext.agent = {
-        id: '00000000-0000-0000-0000-000000000099',
-        name: 'Agent-B',
-        projectId: PROJECT_ID,
-      };
-      (ctx.resolveSessionContext as jest.Mock).mockResolvedValue({
-        success: true,
-        data: sessionContext,
-      });
-    }
-
-    it('returns resolved instructions for a self lookup', async () => {
-      const ctx = makeAgentTestCtx();
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.name).toBe(AGENT_NAME);
-      expect(result.data.agent.profile).toEqual({
-        id: 'p1',
-        name: 'Profile',
-        instructions: '',
-        instructionsResolved: {
-          contentMd: '',
-          bytes: 0,
-          truncated: false,
-          docs: [],
-          prompts: [],
-        },
-      });
-      expect(result.data.agent.assignedEpics).toEqual({ items: [], total: 0 });
-      expect(ctx.instructionsResolver.resolve).toHaveBeenCalledTimes(1);
-    });
-
-    it('returns newest open assigned epics with status and a pre-cap total', async () => {
-      const ctx = makeAgentTestCtx();
-      const openEpics = Array.from({ length: 22 }, (_, index) => {
-        const number = index + 1;
-        return {
-          id: `epic-${number.toString().padStart(2, '0')}`,
-          parentId: number % 2 === 0 ? 'parent-1' : null,
-          title: `Open epic ${number}`,
-          statusId: STATUS_ID,
-          updatedAt: `2026-07-${number.toString().padStart(2, '0')}T10:00:00.000Z`,
-        };
-      });
-      (ctx.storage.listAssignedEpics as jest.Mock).mockResolvedValue({
-        items: [
-          ...openEpics,
-          {
-            id: 'epic-done',
-            parentId: null,
-            title: 'Completed epic',
-            statusId: 'status-done',
-            updatedAt: '2026-07-31T10:00:00.000Z',
-          },
-        ],
-        total: 23,
-        limit: 100,
-        offset: 0,
-      });
-      (ctx.storage.listStatuses as jest.Mock).mockResolvedValue({
-        items: [
-          { id: STATUS_ID, label: 'New' },
-          { id: 'status-done', label: 'Done' },
-        ],
-      });
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.data.agent.assignedEpics.total).toBe(22);
-      expect(result.data.agent.assignedEpics.items).toHaveLength(20);
-      expect(result.data.agent.assignedEpics.items[0]).toEqual({
-        id: 'epic-22',
-        parentId: 'parent-1',
-        title: 'Open epic 22',
-        status: 'New',
-      });
-      expect(result.data.agent.assignedEpics.items[19].id).toBe('epic-03');
-      expect(ctx.storage.listAssignedEpics).toHaveBeenCalledWith(PROJECT_ID, {
-        agentName: AGENT_NAME,
-        excludeMcpHidden: true,
-        limit: 100,
-        offset: 0,
-      });
-    });
-
-    it('returns a cross-agent directory card without instruction keys', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.teamsService.listTeamsByAgent as jest.Mock).mockResolvedValue([
-        {
-          id: 'team-z',
-          projectId: PROJECT_ID,
-          name: 'Zulu',
-          teamLeadAgentId: null,
-        },
-        {
-          id: 'team-a',
-          projectId: PROJECT_ID,
-          name: 'Alpha',
-          teamLeadAgentId: AGENT_ID,
-        },
-        {
-          id: 'team-other',
-          projectId: 'other-project',
-          name: 'Ignored',
-          teamLeadAgentId: AGENT_ID,
-        },
-      ]);
-      (ctx.sessionsService.getAgentPresence as jest.Mock).mockResolvedValue(
-        new Map([
-          [
-            AGENT_ID,
-            {
-              online: true,
-              activityState: 'busy',
-              lastActivityAt: '2026-07-18T10:05:00.000Z',
-              busySince: '2026-07-18T10:00:00.000Z',
-              idleSince: '2026-07-18T09:00:00.000Z',
-              currentActivityTitle: 'Implement directory card',
-            },
-          ],
-        ]),
-      );
-      (ctx.storage.listAssignedEpics as jest.Mock).mockResolvedValue({
-        items: [
-          {
-            id: 'epic-cross',
-            parentId: 'parent-cross',
-            title: 'Cross-agent work',
-            statusId: STATUS_ID,
-            updatedAt: '2026-07-18T10:06:00.000Z',
-          },
-        ],
-        total: 1,
-        limit: 100,
-        offset: 0,
-      });
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent).toMatchObject({
-        providerConfigId: 'config-1',
-        providerConfigName: 'Claude Sonnet',
-        teams: [
-          { teamId: 'team-a', teamName: 'Alpha', isLead: true },
-          { teamId: 'team-z', teamName: 'Zulu', isLead: false },
-        ],
-        presence: {
-          online: true,
-          activityState: 'busy',
-          lastActivityAt: '2026-07-18T10:05:00.000Z',
-          busySince: '2026-07-18T10:00:00.000Z',
-          idleSince: null,
-          currentActivityTitle: 'Implement directory card',
-        },
-        assignedEpics: {
-          items: [
-            {
-              id: 'epic-cross',
-              parentId: 'parent-cross',
-              title: 'Cross-agent work',
-              status: 'New',
-            },
-          ],
-          total: 1,
-        },
-        profile: { id: 'p1', name: 'Profile' },
-      });
-      expect(result.data.agent.profile).not.toHaveProperty('instructions');
-      expect(result.data.agent.profile).not.toHaveProperty('instructionsResolved');
-      expect(ctx.instructionsResolver.resolve).not.toHaveBeenCalled();
-    });
-
-    it('omits instruction keys and skips resolution for a guest caller', async () => {
-      const ctx = makeAgentTestCtx();
-      (ctx.resolveSessionContext as jest.Mock).mockResolvedValue({
-        success: true,
-        data: {
-          type: 'guest',
-          guest: {
-            id: 'guest-1',
-            name: 'Guest',
-            projectId: PROJECT_ID,
-            tmuxSessionId: 'guest-tmux',
-          },
-          project: { id: PROJECT_ID, name: 'Test Project', rootPath: '/tmp/test' },
-        },
-      });
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.profile).toEqual({ id: 'p1', name: 'Profile' });
-      expect(ctx.instructionsResolver.resolve).not.toHaveBeenCalled();
-    });
-
-    it('normalizes idle presence and clears stale busySince', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.sessionsService.getAgentPresence as jest.Mock).mockResolvedValue(
-        new Map([
-          [
-            AGENT_ID,
-            {
-              online: true,
-              activityState: 'idle',
-              busySince: '2026-07-18T09:00:00.000Z',
-              idleSince: '2026-07-18T10:00:00.000Z',
-            },
-          ],
-        ]),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.data.agent.presence).toEqual({
-        online: true,
-        activityState: 'idle',
-        lastActivityAt: null,
-        busySince: null,
-        idleSince: '2026-07-18T10:00:00.000Z',
-        currentActivityTitle: null,
-      });
-    });
-
-    it('normalizes offline presence with all activity fields null', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.sessionsService.getAgentPresence as jest.Mock).mockResolvedValue(
-        new Map([[AGENT_ID, { online: false }]]),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.data.agent.presence).toEqual({
-        online: false,
-        activityState: null,
-        lastActivityAt: null,
-        busySince: null,
-        idleSince: null,
-        currentActivityTitle: null,
-      });
-    });
-
-    it('degrades unavailable presence independently to null', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.sessionsService.getAgentPresence as jest.Mock).mockRejectedValue(
-        new ServiceUnavailableError('SessionsService'),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.presence).toBeNull();
-      expect(result.data.agent.providerConfigName).toBe('Claude Sonnet');
-    });
-
-    it('degrades unavailable teams without discarding presence or config', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.teamsService.listTeamsByAgent as jest.Mock).mockRejectedValue(
-        new ServiceUnavailableError('TeamsService'),
-      );
-      (ctx.sessionsService.getAgentPresence as jest.Mock).mockResolvedValue(
-        new Map([[AGENT_ID, { online: false }]]),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.teams).toEqual([]);
-      expect(result.data.agent.providerConfigName).toBe('Claude Sonnet');
-      expect(result.data.agent.presence.online).toBe(false);
-    });
-
-    it('preserves provider config id when its name lookup fails', async () => {
-      const ctx = makeAgentTestCtx();
-      useCrossAgentCaller(ctx);
-      (ctx.storage.getProfileProviderConfig as jest.Mock).mockRejectedValue(
-        new Error('config unavailable'),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.providerConfigId).toBe('config-1');
-      expect(result.data.agent.providerConfigName).toBeNull();
-    });
-
-    it('degrades assigned epic lookup without changing other card fields', async () => {
-      const ctx = makeAgentTestCtx();
-      (ctx.storage.listAssignedEpics as jest.Mock).mockRejectedValue(
-        new ServiceUnavailableError('EpicStorage'),
-      );
-
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: AGENT_NAME });
-
-      expect(result.success).toBe(true);
-      expect(result.data.agent.assignedEpics).toEqual({ items: [], total: 0 });
-      expect(result.data.agent.providerConfigName).toBe('Claude Sonnet');
-      expect(result.data.agent.teams).toEqual([]);
-      expect(result.data.agent.presence).toBeNull();
-      expect(result.data.agent.profile).toHaveProperty('instructions');
-      expect(ctx.instructionsResolver.resolve).toHaveBeenCalledTimes(1);
-    });
-
-    it('returns AGENT_NOT_FOUND with available names when not found', async () => {
-      const ctx = makeAgentTestCtx();
-      const result = await handleGetAgentByName(ctx, { sessionId: SESSION_ID, name: 'Unknown' });
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('AGENT_NOT_FOUND');
-      expect(result.error?.data?.availableNames).toContain(AGENT_NAME);
-    });
-  });
-
-  describe('handleListStatuses', () => {
-    it('returns statuses for the project', async () => {
-      const ctx = makeAgentTestCtx();
-      const result = await handleListStatuses(ctx, { sessionId: SESSION_ID });
-      expect(result.success).toBe(true);
-      expect(result.data.statuses).toHaveLength(1);
-    });
   });
 
   describe('handleListEpics', () => {
@@ -724,6 +316,26 @@ describe('epic-tools handlers', () => {
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ id: EPIC_ID, version: 1 });
       expect(ctx.epicsService.createEpicForProject).toHaveBeenCalled();
+    });
+
+    it('forwards parent and required skills with the creator context', async () => {
+      const ctx = makeEpicCtx();
+
+      await handleCreateEpic(ctx, {
+        sessionId: SESSION_ID,
+        title: 'Child Epic',
+        parentId: '00000000-0000-0000-0000-000000000099',
+        skillsRequired: ['source/testing'],
+      });
+
+      expect(ctx.epicsService.createEpicForProject).toHaveBeenCalledWith(
+        PROJECT_ID,
+        expect.objectContaining({
+          parentId: '00000000-0000-0000-0000-000000000099',
+          skillsRequired: ['source/testing'],
+        }),
+        { actor: { type: 'agent', id: AGENT_ID }, creatorAgentName: AGENT_NAME },
+      );
     });
 
     it('returns error when status not found', async () => {
@@ -794,6 +406,80 @@ describe('epic-tools handlers', () => {
   });
 
   describe('handleUpdateEpic', () => {
+    it('passes computed tag mutations to the service without expanding the response', async () => {
+      const ctx = makeEpicCtx();
+
+      const result = await handleUpdateEpic(ctx, {
+        sessionId: SESSION_ID,
+        id: EPIC_ID,
+        version: 1,
+        addTags: ['tag2'],
+        removeTags: ['tag1'],
+      });
+
+      expect(ctx.epicsService.updateEpicWithOutcome).toHaveBeenCalledWith(
+        EPIC_ID,
+        { tags: ['tag2'] },
+        1,
+        { actor: { type: 'agent', id: AGENT_ID } },
+      );
+      expect(result).toEqual({ success: true, data: { id: EPIC_ID, version: 2 } });
+    });
+
+    it('passes an explicit empty tag replacement to the service', async () => {
+      const ctx = makeEpicCtx();
+
+      const result = await handleUpdateEpic(ctx, {
+        sessionId: SESSION_ID,
+        id: EPIC_ID,
+        version: 1,
+        setTags: [],
+      });
+
+      expect(ctx.epicsService.updateEpicWithOutcome).toHaveBeenCalledWith(
+        EPIC_ID,
+        { tags: [] },
+        1,
+        { actor: { type: 'agent', id: AGENT_ID } },
+      );
+      expect(result).toEqual({ success: true, data: { id: EPIC_ID, version: 2 } });
+    });
+
+    it('maps OptimisticLockError by class to VERSION_CONFLICT with currentVersion', async () => {
+      const ctx = makeEpicCtx();
+      (ctx.epicsService.updateEpicWithOutcome as jest.Mock).mockRejectedValue(
+        new OptimisticLockError('Epic', EPIC_ID, {
+          expectedVersion: 1,
+          actualVersion: 7,
+        }),
+      );
+      (ctx.storage.getEpic as jest.Mock)
+        .mockResolvedValueOnce({
+          id: EPIC_ID,
+          projectId: PROJECT_ID,
+          title: 'Test Epic',
+          version: 1,
+          tags: [],
+        })
+        .mockResolvedValueOnce({ id: EPIC_ID, projectId: PROJECT_ID, version: 7 });
+
+      const result = await handleUpdateEpic(ctx, {
+        sessionId: SESSION_ID,
+        id: EPIC_ID,
+        version: 1,
+        title: 'Updated',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: {
+          code: 'VERSION_CONFLICT',
+          message: 'Epic version conflict. Expected version 1, but current version is 7.',
+          data: { currentVersion: 7 },
+        },
+      });
+    });
+
     it('returns error when epic not found', async () => {
       const ctx = makeEpicCtx();
       (ctx.storage.getEpic as jest.Mock).mockRejectedValue(new NotFoundError('Epic', EPIC_ID));

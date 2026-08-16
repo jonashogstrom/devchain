@@ -181,7 +181,13 @@ export const TUNNEL_CONTROL_FRAME_TYPE = 'ctrl';
 export const TUNNEL_CONTROL_FRAME_VERSION = 1;
 
 /** Control operations understood by both ends. */
-export type TunnelControlOp = 'sse_liveness_query' | 'sse_liveness_result';
+export type TunnelWorkspaceModeOperation = 'prepare' | 'commit' | 'abort';
+
+export type TunnelControlOp =
+  | 'sse_liveness_query'
+  | 'sse_liveness_result'
+  | 'workspace_mode_command'
+  | 'workspace_mode_result';
 
 /**
  * local-app→bridge: "is my mobile SSE stream live right now?" The bridge derives
@@ -211,7 +217,32 @@ export interface TunnelLivenessResultFrame {
   lastSeenAt: number | null;
 }
 
-export type TunnelControlFrame = TunnelLivenessQueryFrame | TunnelLivenessResultFrame;
+/** Local App→bridge two-phase workspace-mode command. */
+export interface TunnelWorkspaceModeCommandFrame {
+  type: typeof TUNNEL_CONTROL_FRAME_TYPE;
+  v: typeof TUNNEL_CONTROL_FRAME_VERSION;
+  ctrl: 'workspace_mode_command';
+  id: string;
+  operation: TunnelWorkspaceModeOperation;
+  multiWorkspaceMode: boolean;
+}
+
+/** Bridge acknowledgement for a workspace-mode command. */
+export interface TunnelWorkspaceModeResultFrame {
+  type: typeof TUNNEL_CONTROL_FRAME_TYPE;
+  v: typeof TUNNEL_CONTROL_FRAME_VERSION;
+  ctrl: 'workspace_mode_result';
+  id: string;
+  operation: TunnelWorkspaceModeOperation;
+  ok: boolean;
+  error?: string;
+}
+
+export type TunnelControlFrame =
+  | TunnelLivenessQueryFrame
+  | TunnelLivenessResultFrame
+  | TunnelWorkspaceModeCommandFrame
+  | TunnelWorkspaceModeResultFrame;
 
 /** True for any structurally-valid `type:'ctrl'` envelope. Never throws. */
 export function isTunnelControlFrame(value: unknown): value is TunnelControlFrame {
@@ -220,7 +251,10 @@ export function isTunnelControlFrame(value: unknown): value is TunnelControlFram
   return (
     frame.type === TUNNEL_CONTROL_FRAME_TYPE &&
     frame.v === TUNNEL_CONTROL_FRAME_VERSION &&
-    (frame.ctrl === 'sse_liveness_query' || frame.ctrl === 'sse_liveness_result') &&
+    (frame.ctrl === 'sse_liveness_query' ||
+      frame.ctrl === 'sse_liveness_result' ||
+      frame.ctrl === 'workspace_mode_command' ||
+      frame.ctrl === 'workspace_mode_result') &&
     typeof frame.id === 'string' &&
     frame.id.length > 0
   );
@@ -237,6 +271,34 @@ export function isTunnelLivenessResultFrame(value: unknown): value is TunnelLive
     isTunnelControlFrame(value) &&
     value.ctrl === 'sse_liveness_result' &&
     typeof (value as TunnelLivenessResultFrame).live === 'boolean'
+  );
+}
+
+function isWorkspaceModeOperation(value: unknown): value is TunnelWorkspaceModeOperation {
+  return value === 'prepare' || value === 'commit' || value === 'abort';
+}
+
+export function isTunnelWorkspaceModeCommandFrame(
+  value: unknown,
+): value is TunnelWorkspaceModeCommandFrame {
+  return (
+    isTunnelControlFrame(value) &&
+    value.ctrl === 'workspace_mode_command' &&
+    isWorkspaceModeOperation((value as TunnelWorkspaceModeCommandFrame).operation) &&
+    typeof (value as TunnelWorkspaceModeCommandFrame).multiWorkspaceMode === 'boolean'
+  );
+}
+
+export function isTunnelWorkspaceModeResultFrame(
+  value: unknown,
+): value is TunnelWorkspaceModeResultFrame {
+  return (
+    isTunnelControlFrame(value) &&
+    value.ctrl === 'workspace_mode_result' &&
+    isWorkspaceModeOperation((value as TunnelWorkspaceModeResultFrame).operation) &&
+    typeof (value as TunnelWorkspaceModeResultFrame).ok === 'boolean' &&
+    ((value as TunnelWorkspaceModeResultFrame).error === undefined ||
+      typeof (value as TunnelWorkspaceModeResultFrame).error === 'string')
   );
 }
 
@@ -315,8 +377,8 @@ export interface ViewportDiffBody {
 /**
  * Encrypted full-frame body (Phase 4 — E2EE viewport lane). The full {@link ViewportScreen}
  * (the sensitive terminal content) is SEALED into an {@link E2eeEnvelope}; only the `kind`
- * discriminator stays cleartext so the bridge can route/buffer the latest opaque full frame
- * (`{instanceId, sessionId, seq, frameKind}`) WITHOUT reading screen content.
+ * discriminator stays cleartext so the bridge can route/buffer each subscription's latest
+ * opaque full frame WITHOUT reading screen content.
  *
  * v1 is FULL-FRAME-ONLY for encrypted viewport — there is no encrypted `diff` (the existing
  * "fresh full on every (re)connect, next full re-anchors" model makes dropping bridge-side
@@ -457,15 +519,17 @@ export function mobileViewportSsePath(instanceId: string, sessionId: string): st
 
 /**
  * The session-scoped mobile SSE event payload (the SSE `data:` body), re-emitted by the
- * bridge from a {@link TunnelViewportFrame}. The stream is already session-scoped by URL,
- * so `subscriptionId` (a tunnel-internal routing detail) is intentionally dropped here.
+ * bridge from a {@link TunnelViewportFrame}. The stream is already session-scoped by URL;
+ * `subscriptionId` is an opaque recovery-correlation key that lets a recipient select its
+ * lease's anchor. It is not an authorization principal.
  *
- * Contract: the bridge sends a `full` body on every (re)connect (from its latest-only
- * per-session buffer), then `diff` bodies; `seq` is the source-assigned monotonic counter
- * for client-side gap detection. On a gap the client reconnects and the next `full`
- * re-anchors — there is no diff-replay.
+ * Contract: the bridge sends every subscription's latest `full` body on (re)connect, then
+ * fans live bodies out at session scope. `seq` is the source-assigned per-subscription
+ * monotonic counter for client-side gap detection. On a gap the client reconnects and its
+ * next matching `full` re-anchors — there is no diff-replay.
  */
 export interface MobileViewportSseEvent {
+  subscriptionId: string;
   sessionId: string;
   seq: number;
   body: ViewportBody;
@@ -476,6 +540,8 @@ export function isMobileViewportSseEvent(value: unknown): value is MobileViewpor
   if (typeof value !== 'object' || value === null) return false;
   const ev = value as Record<string, unknown>;
   return (
+    typeof ev.subscriptionId === 'string' &&
+    ev.subscriptionId.length > 0 &&
     typeof ev.sessionId === 'string' &&
     ev.sessionId.length > 0 &&
     typeof ev.seq === 'number' &&

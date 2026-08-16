@@ -1,4 +1,4 @@
-import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import type { FormEvent } from 'react';
 import { Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input } from '@/ui/components/ui/input';
@@ -14,25 +14,21 @@ import {
   DialogTitle,
 } from '@/ui/components/ui/dialog';
 import { Alert, AlertDescription } from '@/ui/components/ui/alert';
+import type {
+  EditProjectFormData,
+  ProjectPathValidation,
+} from '@/ui/pages/projects/projects-page-presentation';
 
-export interface EditProjectFormData {
-  name: string;
-  description: string;
-  rootPath: string;
-  isTemplate: boolean;
-}
-
-export interface EditProjectPathValidation {
-  isAbsolute: boolean;
-  exists: boolean;
-  checked: boolean;
-}
+export type { EditProjectFormData };
+export type EditProjectPathValidation = ProjectPathValidation;
 
 interface EditProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   formData: EditProjectFormData;
-  setFormData: Dispatch<SetStateAction<EditProjectFormData>>;
+  onNameChange: (value: string) => void;
+  onDescriptionChange: (value: string) => void;
+  onIsTemplateChange: (value: boolean) => void;
   pathValidation: EditProjectPathValidation;
   onPathChange: (path: string) => Promise<void> | void;
   onSubmit: (event: FormEvent) => void;
@@ -44,7 +40,9 @@ export function EditProjectDialog({
   open,
   onOpenChange,
   formData,
-  setFormData,
+  onNameChange,
+  onDescriptionChange,
+  onIsTemplateChange,
   pathValidation,
   onPathChange,
   onSubmit,
@@ -63,9 +61,11 @@ export function EditProjectDialog({
             <Label htmlFor="name">Name *</Label>
             <Input
               id="name"
+              name="name"
               type="text"
+              autoComplete="off"
               value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              onChange={(e) => onNameChange(e.target.value)}
               required
               placeholder="My Project"
             />
@@ -75,7 +75,9 @@ export function EditProjectDialog({
             <Label htmlFor="rootPath">Root Path *</Label>
             <Input
               id="rootPath"
+              name="rootPath"
               type="text"
+              autoComplete="off"
               value={formData.rootPath}
               onChange={(e) => onPathChange(e.target.value)}
               required
@@ -118,8 +120,9 @@ export function EditProjectDialog({
             <Label htmlFor="description">Description</Label>
             <Textarea
               id="description"
+              name="description"
               value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              onChange={(e) => onDescriptionChange(e.target.value)}
               placeholder="Optional project description"
               rows={3}
             />
@@ -128,10 +131,9 @@ export function EditProjectDialog({
           <div className="flex items-center gap-2">
             <Checkbox
               id="isTemplate"
+              name="isTemplate"
               checked={!!formData.isTemplate}
-              onCheckedChange={(checked) =>
-                setFormData({ ...formData, isTemplate: Boolean(checked) })
-              }
+              onCheckedChange={(checked) => onIsTemplateChange(Boolean(checked))}
             />
             <Label htmlFor="isTemplate">Mark as template</Label>
           </div>

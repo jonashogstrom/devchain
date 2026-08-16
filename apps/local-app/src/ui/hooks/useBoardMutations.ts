@@ -1,7 +1,6 @@
 import { useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  bulkUpdateEpicsApi,
   createEpic,
   deleteEpic,
   type BoardArchivedFilter,
@@ -12,34 +11,17 @@ import { useFetchFactory } from '@/ui/hooks/useFetchFactory';
 
 type ToastFn = (args: { title: string; description: string; variant?: 'destructive' }) => void;
 
-export type BoardBulkEditRow = {
-  epic: Epic;
-  statusId: string;
-  agentId: string | null;
-};
-
-export type BoardBulkBaseline = Record<string, { statusId: string; agentId: string | null }>;
-
 type UpdateEpicMutationVars = {
   id: string;
   data: Partial<Epic>;
   skipSuccessToast?: boolean;
 };
 
-type BulkUpdateMutationVars = {
-  rows: BoardBulkEditRow[];
-  baseline: BoardBulkBaseline;
-  parentId?: string | null;
-};
-
 export interface UseBoardMutationsArgs {
   epicsKey: readonly ['epics', string | null | undefined, BoardArchivedFilter];
   toast: ToastFn;
   onCreateSuccess: () => void;
-  onUpdateSuccess: () => void;
   onDeleteSettled: () => void;
-  onBulkSuccess: () => void;
-  onBulkError: (message: string) => void;
 }
 
 export interface UseBoardMutationsResult {
@@ -52,7 +34,6 @@ export interface UseBoardMutationsResult {
   deleteMutation: ReturnType<
     typeof useMutation<unknown, unknown, string, { previousData: unknown }>
   >;
-  bulkUpdateMutation: ReturnType<typeof useMutation<unknown, unknown, BulkUpdateMutationVars>>;
   mutateDeleteEpic: (epicId: string) => void;
   deleteEpicsByIds: (epicIds: string[]) => Promise<void>;
   mutateUpdateEpicStatus: (
@@ -70,17 +51,13 @@ export interface UseBoardMutationsResult {
     agentId: string | null,
     options?: { skipSuccessToast?: boolean },
   ) => Promise<unknown>;
-  mutateBulkUpdate: (vars: BulkUpdateMutationVars) => void;
 }
 
 export function useBoardMutations({
   epicsKey,
   toast,
   onCreateSuccess,
-  onUpdateSuccess,
   onDeleteSettled,
-  onBulkSuccess,
-  onBulkError,
 }: UseBoardMutationsArgs): UseBoardMutationsResult {
   const queryClient = useQueryClient();
   const apiFetch = useFetchFactory();
@@ -150,7 +127,6 @@ export function useBoardMutations({
           description: 'Epic updated successfully',
         });
       }
-      onUpdateSuccess();
     },
     onError: (error, _variables, context) => {
       if (context?.previousData) {
@@ -193,63 +169,6 @@ export function useBoardMutations({
       toast({
         title: 'Error',
         description: error instanceof Error ? error.message : 'Failed to delete epic',
-        variant: 'destructive',
-      });
-    },
-  });
-
-  const bulkUpdateMutation = useMutation({
-    mutationFn: async ({ rows, baseline, parentId }: BulkUpdateMutationVars) => {
-      const updates = rows
-        .map((row) => {
-          const original = baseline[row.epic.id];
-          if (!original) return null;
-          const payload: {
-            id: string;
-            statusId?: string;
-            agentId?: string | null;
-            version: number;
-          } = { id: row.epic.id, version: row.epic.version };
-          if (row.statusId !== original.statusId) {
-            payload.statusId = row.statusId;
-          }
-          if ((row.agentId ?? null) !== (original.agentId ?? null)) {
-            payload.agentId = row.agentId ?? null;
-          }
-          return Object.keys(payload).length > 2 ? payload : null;
-        })
-        .filter(Boolean) as Array<{
-        id: string;
-        statusId?: string;
-        agentId?: string | null;
-        version: number;
-      }>;
-
-      if (!updates.length) {
-        return { updated: [], parentId };
-      }
-
-      const updated = await bulkUpdateEpicsApi({ parentId: parentId ?? null, updates }, apiFetch);
-      return { updated, parentId };
-    },
-    onSuccess: (_result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['epics'] });
-      if (variables?.parentId) {
-        queryClient.invalidateQueries({ queryKey: ['epics', variables.parentId, 'sub-counts'] });
-        queryClient.invalidateQueries({ queryKey: ['epics', 'parent', variables.parentId] });
-      }
-      toast({
-        title: 'Updates applied',
-        description: 'Bulk changes saved successfully.',
-      });
-      onBulkSuccess();
-    },
-    onError: (error: unknown) => {
-      const message = error instanceof Error ? error.message : 'Failed to apply bulk updates';
-      onBulkError(message);
-      toast({
-        title: 'Error',
-        description: message,
         variant: 'destructive',
       });
     },
@@ -316,23 +235,14 @@ export function useBoardMutations({
     [updateMutation],
   );
 
-  const mutateBulkUpdate = useCallback(
-    (vars: BulkUpdateMutationVars) => {
-      bulkUpdateMutation.mutate(vars);
-    },
-    [bulkUpdateMutation],
-  );
-
   return {
     createMutation,
     updateMutation,
     deleteMutation,
-    bulkUpdateMutation,
     mutateDeleteEpic,
     deleteEpicsByIds,
     mutateUpdateEpicStatus,
     mutateUpdateEpicStatusAsync,
     mutateUpdateEpicAgentAsync,
-    mutateBulkUpdate,
   };
 }

@@ -1,14 +1,23 @@
-import type { ToolBindingEntry } from './types';
+import type { DocumentToolContext } from '../services/handlers/document-context';
 import {
   handleListDocuments,
   handleGetDocument,
   handleCreateDocument,
   handleUpdateDocument,
 } from '../services/handlers/document-tools';
+import { defineToolGroup, type McpBindingRuntime } from './binding-types';
 
-export const documentBindings: ToolBindingEntry[] = [
-  ['devchain_list_documents', handleListDocuments as unknown as ToolBindingEntry[1]],
-  ['devchain_get_document', handleGetDocument as unknown as ToolBindingEntry[1]],
-  ['devchain_create_document', handleCreateDocument as unknown as ToolBindingEntry[1]],
-  ['devchain_update_document', handleUpdateDocument as unknown as ToolBindingEntry[1]],
-];
+function createDocumentContext(runtime: McpBindingRuntime): DocumentToolContext {
+  return {
+    storage: runtime.storage,
+    defaultInlineMaxBytes: runtime.defaultInlineMaxBytes,
+    resolveSessionContext: runtime.resolveSessionContext,
+  };
+}
+
+export const documentBindings = defineToolGroup<DocumentToolContext>(createDocumentContext, [
+  ['devchain_list_documents', handleListDocuments],
+  ['devchain_get_document', handleGetDocument],
+  ['devchain_create_document', handleCreateDocument],
+  ['devchain_update_document', handleUpdateDocument],
+]);

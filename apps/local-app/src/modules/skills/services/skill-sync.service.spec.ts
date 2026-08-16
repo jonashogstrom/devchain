@@ -57,9 +57,9 @@ describe('SkillSyncService', () => {
     deriveCategory: jest.Mock;
   };
   let settingsService: {
-    getSkillsSyncOnStartup: jest.Mock;
     getSkillSourcesEnabled: jest.Mock;
   };
+  let service: SkillSyncService;
 
   beforeEach(() => {
     skillSourceRegistry = {
@@ -76,28 +76,22 @@ describe('SkillSyncService', () => {
       deriveCategory: jest.fn().mockReturnValue('general'),
     };
     settingsService = {
-      getSkillsSyncOnStartup: jest.fn().mockReturnValue(false),
       getSkillSourcesEnabled: jest.fn().mockReturnValue({}),
     };
     jest.mocked(rm).mockReset();
     jest.mocked(rm).mockResolvedValue(undefined);
-  });
-
-  afterEach(() => {
-    jest.resetAllMocks();
+    service = new SkillSyncService(
+      skillSourceRegistry as never,
+      skillsService as never,
+      skillCategoryService as never,
+      settingsService as never,
+    );
   });
 
   it('calls commit lookup and sync context creation once for a source sync run', async () => {
     const context = makeContext(['skill-a', 'skill-b']);
     const adapter = makeAdapter('anthropic', context);
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncSource('anthropic');
 
     expect(adapter.getLatestCommit).toHaveBeenCalledTimes(1);
@@ -126,13 +120,6 @@ describe('SkillSyncService', () => {
     });
     const adapter = makeAdapter('openai', context);
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncSource('openai');
 
     expect(result.added).toBe(1);
@@ -152,6 +139,7 @@ describe('SkillSyncService', () => {
   });
 
   it('removes stale skills that are no longer present in source manifests', async () => {
+    const order: string[] = [];
     const context = makeContext(['skill-a']);
     const adapter = makeAdapter('openai', context);
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
@@ -159,13 +147,13 @@ describe('SkillSyncService', () => {
       { slug: 'openai/skill-a' },
       { slug: 'openai/stale-skill' },
     ]);
-
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
+    jest.mocked(rm).mockImplementation(async () => {
+      order.push('filesystem');
+    });
+    skillsService.deleteSkillBySlug.mockImplementation(async () => {
+      order.push('database');
+      return true;
+    });
 
     const result = await service.syncSource('openai');
 
@@ -176,6 +164,20 @@ describe('SkillSyncService', () => {
       expect.objectContaining({ recursive: true, force: true }),
     );
     expect(result.removed).toBe(1);
+    expect(order).toEqual(['filesystem', 'database']);
+  });
+
+  it('retains database-only cleanup for malformed stale slugs', async () => {
+    const context = makeContext([]);
+    const adapter = makeAdapter('openai', context);
+    skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
+    skillsService.listSkillsBySource.mockResolvedValue([{ slug: 'malformed-stale-skill' }]);
+
+    const result = await service.syncSource('openai');
+
+    expect(rm).not.toHaveBeenCalled();
+    expect(skillsService.deleteSkillBySlug).toHaveBeenCalledWith('malformed-stale-skill');
+    expect(result.removed).toBe(1);
   });
 
   it('does not run stale cleanup when sync context setup fails', async () => {
@@ -183,13 +185,6 @@ describe('SkillSyncService', () => {
     const adapter = makeAdapter('openai', context);
     adapter.createSyncContext.mockRejectedValue(new Error('setup failed'));
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
-
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
 
     const result = await service.syncSource('openai');
 
@@ -200,26 +195,46 @@ describe('SkillSyncService', () => {
     expect(result.failed).toBe(1);
   });
 
-  it('continues successfully when stale skill filesystem cleanup fails', async () => {
+  it('keeps stale skill database state when filesystem cleanup fails', async () => {
     const context = makeContext(['skill-a']);
     const adapter = makeAdapter('openai', context);
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
     skillsService.listSkillsBySource.mockResolvedValue([{ slug: 'openai/stale-skill' }]);
     jest.mocked(rm).mockRejectedValue(new Error('permission denied'));
 
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncSource('openai');
 
-    expect(skillsService.deleteSkillBySlug).toHaveBeenCalledWith('openai/stale-skill');
-    expect(result.removed).toBe(1);
-    expect(result.failed).toBe(0);
-    expect(result.errors).toEqual([]);
+    expect(skillsService.deleteSkillBySlug).not.toHaveBeenCalled();
+    expect(result.removed).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        sourceName: 'openai',
+        skillSlug: 'openai/stale-skill',
+        message: 'permission denied',
+      }),
+    ]);
+  });
+
+  it('reports database deletion failure after filesystem cleanup and remains retryable', async () => {
+    const context = makeContext([]);
+    const adapter = makeAdapter('openai', context);
+    skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
+    skillsService.listSkillsBySource.mockResolvedValue([{ slug: 'openai/stale-skill' }]);
+    skillsService.deleteSkillBySlug.mockRejectedValueOnce(new Error('database failed'));
+
+    const first = await service.syncSource('openai');
+    expect(rm).toHaveBeenCalledTimes(1);
+    expect(first.removed).toBe(0);
+    expect(first.failed).toBe(1);
+    expect(first.errors).toEqual([
+      expect.objectContaining({ skillSlug: 'openai/stale-skill', message: 'database failed' }),
+    ]);
+
+    const second = await service.syncSource('openai');
+    expect(rm).toHaveBeenCalledTimes(2);
+    expect(second.removed).toBe(1);
+    expect(second.failed).toBe(0);
   });
 
   it('bounds source-level sync calls to once per source during syncAll', async () => {
@@ -228,13 +243,6 @@ describe('SkillSyncService', () => {
     const anthropicAdapter = makeAdapter('anthropic', anthropicContext);
     const openaiAdapter = makeAdapter('openai', openaiContext);
     skillSourceRegistry.getAdapters.mockResolvedValue([anthropicAdapter, openaiAdapter]);
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncAll();
 
     expect(anthropicAdapter.getLatestCommit).toHaveBeenCalledTimes(1);
@@ -256,13 +264,6 @@ describe('SkillSyncService', () => {
     settingsService.getSkillSourcesEnabled.mockReturnValue({ openai: false });
     skillSourceRegistry.getAdapters.mockResolvedValue([anthropicAdapter, openaiAdapter]);
 
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncAll();
 
     expect(anthropicAdapter.getLatestCommit).toHaveBeenCalledTimes(1);
@@ -277,13 +278,6 @@ describe('SkillSyncService', () => {
     settingsService.getSkillSourcesEnabled.mockReturnValue({ openai: false });
     skillSourceRegistry.getAdapterBySourceName.mockResolvedValue(adapter);
 
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
     const result = await service.syncSource('openai');
 
     expect(adapter.getLatestCommit).not.toHaveBeenCalled();
@@ -296,43 +290,5 @@ describe('SkillSyncService', () => {
       unchanged: 0,
       errors: [],
     });
-  });
-
-  it('returns explicit already_running result for concurrent sync requests', async () => {
-    const context = makeContext([]);
-    const adapter = makeAdapter('anthropic', context);
-    let releaseCommit: ((value: string) => void) | null = null;
-    adapter.getLatestCommit.mockImplementation(
-      () =>
-        new Promise<string>((resolve) => {
-          releaseCommit = resolve;
-        }),
-    );
-    skillSourceRegistry.getAdapters.mockResolvedValue([adapter]);
-
-    const service = new SkillSyncService(
-      skillSourceRegistry as never,
-      skillsService as never,
-      skillCategoryService as never,
-      settingsService as never,
-    );
-
-    const firstRunPromise = service.syncAll();
-    await Promise.resolve();
-
-    const secondRunResult = await service.syncAll();
-    expect(secondRunResult).toEqual({
-      status: 'already_running',
-      added: 0,
-      updated: 0,
-      removed: 0,
-      failed: 0,
-      unchanged: 0,
-      errors: [],
-    });
-
-    releaseCommit?.('anthropic-sha');
-    const firstRunResult = await firstRunPromise;
-    expect(firstRunResult.status).toBe('completed');
   });
 });

@@ -2,7 +2,12 @@ import { useEffect, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { useImportProjectWizard, useUpgradeProjectWizard } from './useImportProjectWizard';
-import type { SetupPreviewResponse } from '@/ui/pages/projects/lib/project-api';
+import type {
+  ImportDryRunResponse,
+  ImportProjectResponse,
+  SetupPreviewResponse,
+} from '@/ui/pages/projects/lib/project-contracts';
+import { InMemoryProjectsPageApi } from '../../../test/helpers/in-memory-projects-page-api';
 
 (global as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
   observe() {}
@@ -73,59 +78,24 @@ function configuredPreview(): SetupPreviewResponse {
   };
 }
 
-interface FetchLog {
-  setupPreview: number;
-  dryRun: number;
-  commit: number;
-  lastCommitBody: unknown;
-  lastDryRunBody: unknown;
-}
-
-function mockFetch(opts: {
+function mockApi(opts: {
   previewResponse?: SetupPreviewResponse;
-  dryRunResponse?: unknown;
-  commitResponse?: unknown;
-}): FetchLog {
-  const log: FetchLog = {
-    setupPreview: 0,
-    dryRun: 0,
-    commit: 0,
-    lastCommitBody: null,
-    lastDryRunBody: null,
-  };
-  global.fetch = jest.fn(async (url: string, init?: RequestInit) => {
-    const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url === '/api/projects/setup-preview') {
-      log.setupPreview += 1;
-      return { ok: true, json: async () => opts.previewResponse ?? preview() };
-    }
-    if (url.includes('/import?dryRun=true')) {
-      log.dryRun += 1;
-      log.lastDryRunBody = body;
-      return {
-        ok: true,
-        json: async () =>
-          opts.dryRunResponse ?? {
-            dryRun: true,
-            missingProviders: [],
-            counts: { toImport: { agents: 1 }, toDelete: {} },
-          },
-      };
-    }
-    // Commit (no query string).
-    log.commit += 1;
-    log.lastCommitBody = body;
-    return {
-      ok: true,
-      json: async () =>
-        opts.commitResponse ?? {
-          success: true,
-          counts: { imported: {}, deleted: {} },
-          mappings: {},
-        },
-    };
-  }) as unknown as typeof fetch;
-  return log;
+  dryRunResponse?: ImportDryRunResponse;
+  commitResponse?: ImportProjectResponse;
+}): InMemoryProjectsPageApi {
+  return new InMemoryProjectsPageApi({
+    setupPreview: opts.previewResponse ?? preview(),
+    importDryRunResult: opts.dryRunResponse ?? {
+      dryRun: true,
+      missingProviders: [],
+      counts: { toImport: { agents: 1 }, toDelete: {} },
+    },
+    importResult: opts.commitResponse ?? {
+      success: true,
+      counts: { imported: {}, deleted: {} },
+      mappings: {},
+    },
+  });
 }
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -147,15 +117,18 @@ const PROMPT_PREFLIGHT_FAILURE = {
 
 describe('useImportProjectWizard', () => {
   it('loads the setup-preview, runs the dry-run on Review, and commits on submit', async () => {
-    const log = mockFetch({});
+    const api = mockApi({});
     const onImported = jest.fn();
-    const { result } = renderHook(() => useImportProjectWizard({ onImported, toast: jest.fn() }), {
-      wrapper,
-    });
+    const { result } = renderHook(
+      () => useImportProjectWizard({ onImported, toast: jest.fn(), api }),
+      {
+        wrapper,
+      },
+    );
 
     act(() => result.current.openImportWizard(TARGET, { slug: 'demo' }));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(log.setupPreview).toBe(1);
+    expect(api.calls.loadSetupPreview).toHaveLength(1);
 
     // Providers → Agents (Teams skipped: no configurable team) → Review.
     act(() => result.current.controller.goNext());
@@ -163,7 +136,7 @@ describe('useImportProjectWizard', () => {
     await waitFor(() => expect(result.current.controller.currentStep?.id).toBe('review'));
 
     // Dry-run fires on entering Review; the final step then becomes proceedable.
-    await waitFor(() => expect(log.dryRun).toBe(1));
+    await waitFor(() => expect(api.calls.runImportDryRun).toHaveLength(1));
     await waitFor(() => expect(result.current.controller.canProceed).toBe(true));
     expect(result.current.controller.isLastStep).toBe(true);
 
@@ -171,13 +144,13 @@ describe('useImportProjectWizard', () => {
     await act(async () => {
       result.current.controller.submit();
     });
-    await waitFor(() => expect(log.commit).toBe(1));
+    await waitFor(() => expect(api.calls.commitImport).toHaveLength(1));
     expect(onImported).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     await waitFor(() => expect(result.current.isOpen).toBe(false));
   });
 
   it('blocks the final Import until every unmatched status is mapped', async () => {
-    mockFetch({
+    const api = mockApi({
       dryRunResponse: {
         dryRun: true,
         missingProviders: [],
@@ -187,7 +160,7 @@ describe('useImportProjectWizard', () => {
       },
     });
     const { result } = renderHook(
-      () => useImportProjectWizard({ onImported: jest.fn(), toast: jest.fn() }),
+      () => useImportProjectWizard({ onImported: jest.fn(), toast: jest.fn(), api }),
       { wrapper },
     );
 
@@ -202,7 +175,7 @@ describe('useImportProjectWizard', () => {
   });
 
   it('keeps dry-run failures out of the counts review and displays their details', async () => {
-    const log = mockFetch({
+    const api = mockApi({
       dryRunResponse: {
         ...PROMPT_PREFLIGHT_FAILURE,
         dryRun: true,
@@ -224,7 +197,7 @@ describe('useImportProjectWizard', () => {
     let wizard: ReturnType<typeof useImportProjectWizard> | null = null;
 
     function Harness() {
-      const hook = useImportProjectWizard({ onImported: jest.fn(), toast });
+      const hook = useImportProjectWizard({ onImported: jest.fn(), toast, api });
       wizard = hook;
       useEffect(() => hook.openImportWizard(TARGET, { slug: 'demo' }), []);
       return <>{hook.controller.currentStep?.render()}</>;
@@ -240,16 +213,16 @@ describe('useImportProjectWizard', () => {
     );
     expect(screen.getByRole('alert')).toHaveTextContent('"Private SOP" (profiles: Coder)');
     expect(screen.getByTestId('wizard-review-import-counts')).toHaveTextContent('agents1');
-    expect(log.dryRun).toBe(1);
+    expect(api.calls.runImportDryRun).toHaveLength(1);
     expect(wizard!.controller.canProceed).toBe(false);
     expect(wizard!.isOpen).toBe(true);
   });
 
   it('keeps the wizard open and skips completion when commit returns a structured failure', async () => {
-    const log = mockFetch({ commitResponse: PROMPT_PREFLIGHT_FAILURE });
+    const api = mockApi({ commitResponse: PROMPT_PREFLIGHT_FAILURE });
     const onImported = jest.fn();
     const toast = jest.fn();
-    const { result } = renderHook(() => useImportProjectWizard({ onImported, toast }), {
+    const { result } = renderHook(() => useImportProjectWizard({ onImported, toast, api }), {
       wrapper,
     });
 
@@ -260,7 +233,7 @@ describe('useImportProjectWizard', () => {
     await waitFor(() => expect(result.current.controller.canProceed).toBe(true));
 
     await act(async () => result.current.controller.submit());
-    await waitFor(() => expect(log.commit).toBe(1));
+    await waitFor(() => expect(api.calls.commitImport).toHaveLength(1));
 
     expect(result.current.isOpen).toBe(true);
     expect(result.current.preflightFailure).toEqual(PROMPT_PREFLIGHT_FAILURE);
@@ -276,48 +249,31 @@ describe('useImportProjectWizard', () => {
   });
 
   it('includes selectedProviderNames + status mappings in the request bodies', async () => {
-    const log = mockFetch({
-      previewResponse: preview({
-        // one available provider so the selection is non-empty
-      }),
-    });
-    // Re-mock preview with an available provider summary.
+    // Preview with an available provider summary.
     const previewWithProvider: SetupPreviewResponse = {
       ...preview(),
       providerSummary: [{ name: 'claude', available: true, families: [], agentCount: 0 }],
     };
-    (global.fetch as jest.Mock).mockImplementation(async (url: string, init?: RequestInit) => {
-      const body = init?.body ? JSON.parse(String(init.body)) : null;
-      if (url === '/api/projects/setup-preview') {
-        return { ok: true, json: async () => previewWithProvider };
-      }
-      if (url.includes('/import?dryRun=true')) {
-        log.dryRun += 1;
-        log.lastDryRunBody = body;
-        return {
-          ok: true,
-          json: async () => ({
-            dryRun: true,
-            missingProviders: [],
-            counts: { toImport: {}, toDelete: { statuses: 1 } },
-            unmatchedStatuses: [{ id: 'status-1', label: 'Backlog', color: '#111', epicCount: 2 }],
-            templateStatuses: [{ label: 'Todo', color: '#222' }],
-          }),
-        };
-      }
-      log.commit += 1;
-      log.lastCommitBody = body;
-      return {
-        ok: true,
-        json: async () => ({ success: true, counts: { imported: {}, deleted: {} }, mappings: {} }),
-      };
+    const api = mockApi({
+      previewResponse: previewWithProvider,
+      dryRunResponse: {
+        dryRun: true,
+        missingProviders: [],
+        counts: { toImport: {}, toDelete: { statuses: 1 } },
+        unmatchedStatuses: [{ id: 'status-1', label: 'Backlog', color: '#111', epicCount: 2 }],
+        templateStatuses: [{ label: 'Todo', color: '#222' }],
+      },
     });
 
     // Render the Providers step body so the (no longer preselected) provider can be clicked;
     // later steps are driven purely through the captured controller.
     let wiz: ReturnType<typeof useImportProjectWizard> | null = null;
     function Harness() {
-      const hook = useImportProjectWizard({ onImported: jest.fn(), toast: jest.fn() });
+      const hook = useImportProjectWizard({
+        onImported: jest.fn(),
+        toast: jest.fn(),
+        api,
+      });
       wiz = hook;
       useEffect(() => {
         hook.openImportWizard(TARGET, { slug: 'demo' });
@@ -338,7 +294,7 @@ describe('useImportProjectWizard', () => {
     act(() => wiz!.controller.goNext());
     act(() => wiz!.controller.goNext());
     await waitFor(() => expect(wiz!.controller.currentStep?.id).toBe('review'));
-    await waitFor(() => expect(log.dryRun).toBeGreaterThanOrEqual(1));
+    await waitFor(() => expect(api.calls.runImportDryRun.length).toBeGreaterThanOrEqual(1));
     fireEvent.click(await screen.findByTestId('wizard-status-map-status-1'));
     fireEvent.click(await screen.findByRole('option', { name: /Todo/ }));
     await waitFor(() => expect(wiz!.controller.canProceed).toBe(true));
@@ -346,41 +302,29 @@ describe('useImportProjectWizard', () => {
     await act(async () => {
       wiz!.controller.submit();
     });
-    await waitFor(() => expect(log.commit).toBe(1));
-    expect(
-      (log.lastCommitBody as { selectedProviderNames?: string[] }).selectedProviderNames,
-    ).toEqual(['claude']);
-    expect(
-      (log.lastCommitBody as { statusMappings?: Record<string, string> }).statusMappings,
-    ).toEqual({ 'status-1': 'Todo' });
+    await waitFor(() => expect(api.calls.commitImport).toHaveLength(1));
+    const commitBody = api.calls.commitImport.at(-1)?.[1];
+    expect((commitBody as { selectedProviderNames?: string[] }).selectedProviderNames).toEqual([
+      'claude',
+    ]);
+    expect((commitBody as { statusMappings?: Record<string, string> }).statusMappings).toEqual({
+      'status-1': 'Todo',
+    });
   });
 });
 
 describe('useUpgradeProjectWizard', () => {
   it('uses target preview, replace dry-run, and source-aligned configured commit adapters', async () => {
-    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    global.fetch = jest.fn(async (url: string, init?: RequestInit) => {
-      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
-      calls.push({ url, body });
-      if (url.endsWith('/upgrade-template/preview')) {
-        return {
-          ok: true,
-          json: async () => configuredPreview(),
-        };
-      }
-      if (url.endsWith('/import?dryRun=true')) {
-        return {
-          ok: true,
-          json: async () => ({
-            dryRun: true,
-            readiness: { ready: true, issues: [] },
-            missingProviders: [],
-            counts: { toImport: { agents: 0 }, toDelete: { statuses: 0 } },
-          }),
-        };
-      }
-      return { ok: true, json: async () => ({ success: true, newVersion: '2.0.0' }) };
-    }) as unknown as typeof fetch;
+    const api = new InMemoryProjectsPageApi({
+      upgradePreview: configuredPreview(),
+      importDryRunResult: {
+        dryRun: true,
+        readiness: { ready: true, issues: [] },
+        missingProviders: [],
+        counts: { toImport: { agents: 0 }, toDelete: { statuses: 0 } },
+      },
+      upgradeResult: { success: true, newVersion: '2.0.0' },
+    });
     const onFinished = jest.fn();
     const onClosed = jest.fn();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -395,6 +339,7 @@ describe('useUpgradeProjectWizard', () => {
           onFinished,
           onClosed,
           toast: jest.fn(),
+          api,
         }),
       { wrapper: upgradeWrapper },
     );
@@ -407,25 +352,23 @@ describe('useUpgradeProjectWizard', () => {
       }),
     );
     await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(calls[0]).toEqual({
-      url: '/api/projects/proj-1/upgrade-template/preview',
-      body: { targetVersion: '2.0.0' },
-    });
+    expect(api.calls.loadUpgradePreview).toEqual([['proj-1', '2.0.0']]);
 
     act(() => result.current.controller.goNext());
     act(() => result.current.controller.goNext());
     act(() => result.current.controller.goNext());
     await waitFor(() => expect(result.current.controller.currentStep?.id).toBe('review'));
     await waitFor(() => expect(result.current.controller.canProceed).toBe(true));
-    const dryRunCall = calls.find((call) => call.url.endsWith('/import?dryRun=true'))!;
-    expect(dryRunCall.body).toEqual(expect.objectContaining({ description: 'target-only marker' }));
+    expect(api.calls.runImportDryRun[0]?.[1]).toEqual(
+      expect.objectContaining({ description: 'target-only marker' }),
+    );
 
     await act(async () => result.current.controller.submit());
     await waitFor(() =>
       expect(onFinished).toHaveBeenCalledWith({ success: true, newVersion: '2.0.0' }),
     );
-    const commitCall = calls.find((call) => call.url === '/api/projects/proj-1/upgrade-template')!;
-    expect(commitCall.body).toEqual(
+    const commitBody = api.calls.commitUpgrade[0]?.[1];
+    expect(commitBody).toEqual(
       expect.objectContaining({
         targetVersion: '2.0.0',
         selectedProviderNames: ['claude'],
@@ -435,39 +378,34 @@ describe('useUpgradeProjectWizard', () => {
         ],
       }),
     );
-    expect(commitCall.body).not.toHaveProperty('agentOverrides');
-    expect(commitCall.body).not.toHaveProperty('description');
+    expect(commitBody).not.toHaveProperty('agentOverrides');
+    expect(commitBody).not.toHaveProperty('description');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['projects'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['templates-for-upgrade'] });
   });
 
   it('shows readiness issues with counts and blocks final confirmation', async () => {
-    global.fetch = jest.fn(async (url: string) => {
-      if (url.endsWith('/upgrade-template/preview')) {
-        return { ok: true, json: async () => preview() };
-      }
-      return {
-        ok: true,
-        json: async () => ({
-          dryRun: true,
-          success: false,
-          mutationStarted: false,
-          error: 'Active sessions block replacement',
-          readiness: {
-            ready: false,
-            issues: [
-              {
-                code: 'active_sessions',
-                message: 'Stop active sessions before replacing this project.',
-                details: { activeSessions: [{ id: 'session-1', agentId: null }] },
-              },
-            ],
-          },
-          missingProviders: [],
-          counts: { toImport: { agents: 2 }, toDelete: { statuses: 1 } },
-        }),
-      };
-    }) as unknown as typeof fetch;
+    const api = new InMemoryProjectsPageApi({
+      upgradePreview: preview(),
+      importDryRunResult: {
+        dryRun: true,
+        success: false,
+        mutationStarted: false,
+        error: 'Active sessions block replacement',
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: 'active_sessions',
+              message: 'Stop active sessions before replacing this project.',
+              details: { activeSessions: [{ id: 'session-1', agentId: null }] },
+            },
+          ],
+        },
+        missingProviders: [],
+        counts: { toImport: { agents: 2 }, toDelete: { statuses: 1 } },
+      },
+    });
     let wizard: ReturnType<typeof useUpgradeProjectWizard> | null = null;
     function Harness() {
       const hook = useUpgradeProjectWizard({
@@ -475,6 +413,7 @@ describe('useUpgradeProjectWizard', () => {
         onFinished: jest.fn(),
         onClosed: jest.fn(),
         toast: jest.fn(),
+        api,
       });
       wizard = hook;
       useEffect(() => {
@@ -493,10 +432,7 @@ describe('useUpgradeProjectWizard', () => {
   });
 
   it('invalidates upgrade discovery queries when canceled', async () => {
-    global.fetch = jest.fn(async () => ({
-      ok: true,
-      json: async () => preview(),
-    })) as unknown as typeof fetch;
+    const api = new InMemoryProjectsPageApi({ upgradePreview: preview() });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const invalidate = jest.spyOn(queryClient, 'invalidateQueries');
     const onClosed = jest.fn();
@@ -510,6 +446,7 @@ describe('useUpgradeProjectWizard', () => {
           onFinished: jest.fn(),
           onClosed,
           toast: jest.fn(),
+          api,
         }),
       { wrapper: upgradeWrapper },
     );

@@ -40,25 +40,9 @@ jest.mock('../../utils/tmux-naming.util', () => ({
   buildTmuxSessionName: (...args: string[]) => `tmux-${args.join('-')}`,
 }));
 
-jest.mock('../provider-launch-config', () => ({
-  resolve: jest.fn().mockReturnValue({
-    argv: ['test-provider', '--session', 'new'],
-    commandArgs: ['test-provider', '--session', 'new'],
-    env: null,
-    promptHandshake: undefined,
-  }),
-  ProfileOptionsError: class ProfileOptionsError extends Error {},
-}));
-
 // ── Imports ────────────────────────────────────────────────────────────
 
-import {
-  createLaunchPipelineHarness,
-  fakeAgent,
-  fakeProvider,
-  fakeProfileProviderConfig,
-} from './__test-utils__/pipeline-harness';
-import { resolve as resolveLaunchConfig } from '../provider-launch-config';
+import { createLaunchPipelineHarness } from './__test-utils__/pipeline-harness';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -186,9 +170,8 @@ describe('SessionLaunchPipeline', () => {
       );
     });
 
-    it('threads the generated sessionId into resolveLaunchConfig for mode:new', async () => {
+    it('threads the generated sessionId into provider runtime planning for mode:new', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
 
       mocks.sqliteMock.prepare.mockImplementation((sql: string) => {
         if (sql.includes('SELECT') && sql.includes("status = 'running'")) {
@@ -203,12 +186,53 @@ describe('SessionLaunchPipeline', () => {
 
       const result = await runWithTimers(() => pipeline.launch(launchDto));
 
-      // sessionId (devchain sessions.id) is threaded so a binding adapter can
-      // emit `--session-id <sessions.id>`; it must equal the persisted row id.
-      // Match by value across all calls (the shared resolve mock accumulates
-      // calls across tests, so don't index a fixed call position).
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'new', sessionId: result.id }),
+      );
+    });
+
+    it('plans before insert and materializes after insert but before tmux creation', async () => {
+      const { pipeline, mocks } = createLaunchPipelineHarness();
+      const insertRun = jest.fn().mockReturnValue({ changes: 1 });
+      mocks.sqliteMock.prepare.mockImplementation((sql: string) => {
+        if (sql.includes('SELECT') && sql.includes("status = 'running'")) {
+          return { run: jest.fn(), get: jest.fn(), all: jest.fn().mockReturnValue([]) };
+        }
+        if (sql.includes('INSERT INTO sessions')) {
+          return { run: insertRun, get: jest.fn(), all: jest.fn() };
+        }
+        return { run: jest.fn(), get: jest.fn(), all: jest.fn() };
+      });
+
+      await runWithTimers(() => pipeline.launch(launchDto));
+
+      expect(mocks.providerRuntimePreparation.createPlan.mock.invocationCallOrder[0]).toBeLessThan(
+        insertRun.mock.invocationCallOrder[0],
+      );
+      expect(insertRun.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.providerRuntimePreparation.materialize.mock.invocationCallOrder[0],
+      );
+      expect(mocks.providerRuntimePreparation.materialize.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.terminalIO.createEmptySession.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('runs provider readiness after typeCommand and before output wait and success publication', async () => {
+      const { pipeline, mocks } = createLaunchPipelineHarness();
+
+      await runWithTimers(() => pipeline.launch(launchDto));
+
+      const startedCall = mocks.eventsService.publish.mock.calls.findIndex(
+        ([event]: [string]) => event === 'session.started',
+      );
+      expect(mocks.terminalIO.typeCommand.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.preparedProviderRuntime.afterCommand.mock.invocationCallOrder[0],
+      );
+      expect(mocks.preparedProviderRuntime.afterCommand.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.terminalIO.waitForOutput.mock.invocationCallOrder[0],
+      );
+      expect(mocks.preparedProviderRuntime.afterCommand.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.eventsService.publish.mock.invocationCallOrder[startedCall],
       );
     });
 
@@ -233,93 +257,6 @@ describe('SessionLaunchPipeline', () => {
         expect.any(String),
         { normalizeCapturedLineEndings: true },
       );
-    });
-
-    it('rotates live context state before launching a fresh process', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-
-      const result = await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(mocks.runtimeContextCapture.rotateEpoch).toHaveBeenCalledWith(result.id, null);
-      expect(mocks.runtimeContextCapture.rotateEpoch.mock.invocationCallOrder[0]).toBeLessThan(
-        mocks.terminalIO.typeCommand.mock.invocationCallOrder[0],
-      );
-    });
-
-    it('binds the resolved model-specific configured window to the new session', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockReturnValueOnce({
-        argv: ['test-provider', '--session', 'new'],
-        commandArgs: ['test-provider', '--session', 'new'],
-        env: null,
-        contextWindowOverride: {
-          modelId: 'custom/model',
-          contextWindowTokens: 640_000,
-        },
-      });
-
-      const result = await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(mocks.runtimeContextCapture.rotateEpoch).toHaveBeenCalledWith(result.id, {
-        modelId: 'custom/model',
-        contextWindowTokens: 640_000,
-      });
-    });
-
-    it('prepares Claude settings after epoch rotation and re-resolves the fresh launch overlay', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getProvider.mockResolvedValue(
-        fakeProvider({ name: 'claude', claudeLaunchSettingsJson: '{"tui":"default"}' }),
-      );
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ options: '--model sonnet' }),
-      ]);
-      mocks.claudeLaunchSettings.prepare.mockResolvedValue({
-        optionArgs: ['--settings', '/private/revision.json'],
-        runtimeEnv: { DEVCHAIN_STATUSLINE_LOCATOR: '/private/locator.json' },
-        captureEnabled: true,
-      });
-
-      const result = await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(mocks.claudeLaunchSettings.prepare).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerName: 'claude',
-          settingsJson: '{"tui":"default"}',
-          profileOptionArgs: ['--model', 'sonnet'],
-          sessionId: result.id,
-          epoch: 'capture-epoch',
-          projectRootPath: '/tmp/project',
-        }),
-      );
-      expect(resolveMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          mode: 'new',
-          providerOptionArgs: ['--settings', '/private/revision.json'],
-          runtimeEnv: { DEVCHAIN_STATUSLINE_LOCATOR: '/private/locator.json' },
-        }),
-      );
-      expect(mocks.runtimeContextCapture.rotateEpoch.mock.invocationCallOrder[0]).toBeLessThan(
-        mocks.claudeLaunchSettings.prepare.mock.invocationCallOrder[0],
-      );
-    });
-
-    it('uses the original fresh-launch command unchanged when preparation is inactive', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledTimes(1);
-      expect(mocks.terminalIO.typeCommand).toHaveBeenCalledWith(expect.any(Object), [
-        'test-provider',
-        '--session',
-        'new',
-      ]);
     });
 
     it('keeps captured normalization enabled for live raw-line-ending adapters', async () => {
@@ -355,7 +292,8 @@ describe('SessionLaunchPipeline', () => {
   // The pipeline reads `adapter.terminalOutputBehavior?.usesAlternateScreen` and
   // forwards it to tmux via `setAlternateScreen(target, <bool>)`. This is GATE 1
   // of the two-gate invariant; GATE 2 (the PTY strip) reads the SAME adapter
-  // field via sessionsService.usesAlternateScreenFor (see sessions.service.spec.ts).
+  // field via SessionTerminalRuntimeService.getDescriptor (see
+  // session-terminal-runtime.service.spec.ts).
   // Layer: pipeline unit test with the shared harness — cheapest layer that
   // proves the pipeline honors the adapter flag end-to-end through to tmux.
   describe('per-provider alternate-screen policy (launch matrix)', () => {
@@ -428,77 +366,6 @@ describe('SessionLaunchPipeline', () => {
     });
   });
 
-  describe('managed provider plugin policy', () => {
-    it('re-resolves Codex args, launches one helper command, and validates acknowledgement', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'codex' }));
-      mocks.providerPluginPolicy.resolveAll.mockResolvedValue([
-        { providerId: 'provider-1', pluginId: 'plugin@market', enabled: true, source: 'default' },
-      ]);
-      mocks.codexPluginProfiles.prepare.mockImplementation(async (input) => ({
-        profileName: 'devchain-profile',
-        projectDigest: 'a'.repeat(64),
-        policyHash: 'b'.repeat(64),
-        sourceRevisionPath: '/private/source.toml',
-        helperPath: '/private/helper',
-        sessionId: input.sessionId,
-        attemptNonce: input.attemptNonce,
-        referencePath: '/private/reference.json',
-        locatorPath: '/private/locator.json',
-        acknowledgementPath: '/private/ack.json',
-        providerOptionArgs: ['--profile', 'devchain-profile'],
-      }));
-      mocks.codexPluginProfiles.buildHelperArgv.mockReturnValue([
-        '/private/helper',
-        '--',
-        '/usr/bin/test-provider',
-      ]);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          providerOptionArgs: ['--profile', 'devchain-profile'],
-        }),
-      );
-      expect(mocks.terminalIO.typeCommand).toHaveBeenCalledWith(expect.anything(), [
-        'env',
-        '-u',
-        'DEVCHAIN_CONTEXT_WINDOW_TOKENS',
-        '/private/helper',
-        '--',
-        '/usr/bin/test-provider',
-      ]);
-      expect(mocks.codexPluginProfiles.awaitAcknowledgement).toHaveBeenCalled();
-      expect(
-        mocks.codexPluginProfiles.awaitAcknowledgement.mock.invocationCallOrder[0],
-      ).toBeLessThan(mocks.eventsService.publish.mock.invocationCallOrder.at(-2));
-    });
-
-    it.each(['-pmanaged', '-p', '--profile', '--profile='])(
-      'rejects explicit Codex selector %s before launch argv resolution',
-      async (selector) => {
-        const { pipeline, mocks } = createLaunchPipelineHarness();
-        const resolveMock = resolveLaunchConfig as jest.Mock;
-        resolveMock.mockClear();
-        mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'codex' }));
-        mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-          fakeProfileProviderConfig({ options: selector }),
-        ]);
-        mocks.providerPluginPolicy.resolveAll.mockResolvedValue([
-          { providerId: 'provider-1', pluginId: 'plugin@market', enabled: true, source: 'default' },
-        ]);
-
-        await expect(pipeline.launch(launchDto)).rejects.toThrow('conflicts');
-
-        expect(resolveMock).not.toHaveBeenCalled();
-        expect(mocks.codexPluginProfiles.prepare).not.toHaveBeenCalled();
-      },
-    );
-  });
-
   // Scenario 2: Provider verify fails
   describe('Scenario 2: preflight fails — no DB insert, no tmux create', () => {
     it('throws, never inserts a DB row, never creates tmux', async () => {
@@ -533,6 +400,27 @@ describe('SessionLaunchPipeline', () => {
       expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
 
       // No session.started event
+      expect(mocks.eventsService.publish).not.toHaveBeenCalledWith(
+        'session.started',
+        expect.anything(),
+      );
+    });
+
+    it('creates no durable row, tmux session, or success event when planning fails', async () => {
+      const { pipeline, mocks } = createLaunchPipelineHarness();
+      mocks.providerRuntimePreparation.createPlan.mockRejectedValue(new Error('planning failed'));
+
+      await expect(runWithTimers(() => pipeline.launch(launchDto))).rejects.toThrow(
+        'planning failed',
+      );
+
+      expect(
+        mocks.sqliteMock.prepare.mock.calls.some(([sql]: [string]) =>
+          sql.includes('INSERT INTO sessions'),
+        ),
+      ).toBe(false);
+      expect(mocks.providerRuntimePreparation.materialize).not.toHaveBeenCalled();
+      expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
       expect(mocks.eventsService.publish).not.toHaveBeenCalledWith(
         'session.started',
         expect.anything(),
@@ -583,18 +471,45 @@ describe('SessionLaunchPipeline', () => {
       );
     });
 
-    it('clears a rotated Claude capture epoch during rollback', async () => {
+    it('runs the prepared provider-runtime rollback when tmux creation fails', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      mocks.storage.getProvider.mockResolvedValue(fakeProvider({ name: 'claude' }));
       mocks.terminalIO.createEmptySession.mockRejectedValue(new Error('tmux failed'));
 
       await expect(runWithTimers(() => pipeline.launch(launchDto))).rejects.toThrow('tmux failed');
 
-      expect(mocks.runtimeContextCapture.rotateEpoch).toHaveBeenCalledWith(
-        expect.any(String),
-        null,
+      expect(mocks.preparedProviderRuntime.rollback).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks the row failed without creating tmux when materialization fails', async () => {
+      const { pipeline, mocks } = createLaunchPipelineHarness();
+      const runCalls: { sql: string; args: unknown[] }[] = [];
+      mocks.sqliteMock.prepare.mockImplementation((sql: string) => ({
+        run: jest.fn((...args: unknown[]) => {
+          runCalls.push({ sql, args });
+          return { changes: 1 };
+        }),
+        get: jest.fn(),
+        all: jest.fn().mockReturnValue([]),
+      }));
+      mocks.providerRuntimePreparation.materialize.mockRejectedValue(
+        new Error('materialization failed'),
       );
-      expect(mocks.runtimeContextCapture.clear).toHaveBeenCalledWith(expect.any(String));
+
+      await expect(runWithTimers(() => pipeline.launch(launchDto))).rejects.toThrow(
+        'materialization failed',
+      );
+
+      expect(runCalls.some(({ sql }) => sql.includes('INSERT INTO sessions'))).toBe(true);
+      expect(
+        runCalls.some(
+          ({ sql, args }) => sql.includes('UPDATE sessions') && args.includes('failed'),
+        ),
+      ).toBe(true);
+      expect(mocks.terminalIO.createEmptySession).not.toHaveBeenCalled();
+      expect(mocks.eventsService.publish).not.toHaveBeenCalledWith(
+        'session.started',
+        expect.anything(),
+      );
     });
   });
 
@@ -640,11 +555,7 @@ describe('SessionLaunchPipeline', () => {
     });
   });
 
-  // Scenario 4 (R1 regression): deliver (initial prompt paste) fails after flipToRunning
-  // NOTE: This scenario should FAIL until R1 lands — R1 fixes the swallowed
-  // deliver failure in renderAndPasteInitialPrompt. Currently the pipeline
-  // catches the deliver error inside a try/catch and continues, so
-  // session.started IS emitted even when paste fails.
+  // Scenario 4: deliver (initial prompt paste) fails after flipToRunning
   describe('Scenario 4: deliver (paste) fails after flipToRunning — R1 regression', () => {
     it('tmux destroyed, registry disposed, DB failed, no session.started', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
@@ -799,7 +710,7 @@ describe('SessionLaunchPipeline', () => {
 
   // ── Opt-in initial-prompt seeding (initialPromptSeedMode) ────────────────
   // For adapters that declare `initialPromptSeedMode`, the prompt is rendered
-  // BEFORE resolveLaunchConfig and threaded into buildLaunchArgs (argv) or piped
+  // BEFORE provider runtime planning and threaded into buildLaunchArgs (argv) or piped
   // post-launch (stdin) — and the fragile post-launch paste is SKIPPED. Default
   // adapters (no seed mode) keep the existing paste path unchanged.
   describe('initial-prompt seeding (opt-in initialPromptSeedMode)', () => {
@@ -814,9 +725,8 @@ describe('SessionLaunchPipeline', () => {
       return { run: jest.fn().mockReturnValue({ changes: 1 }), get: jest.fn(), all: jest.fn() };
     };
 
-    it('argv mode: renders prompt before resolveLaunchConfig, passes it as initialPrompt, and SKIPS paste', async () => {
+    it('argv mode: renders prompt before planning, passes it as initialPrompt, and SKIPS paste', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
       (mocks.adapter as { initialPromptSeedMode?: 'argv' | 'stdin' }).initialPromptSeedMode =
         'argv';
       mocks.storage.getInitialSessionPrompt.mockResolvedValue({ content: 'Seed {{agent_name}}' });
@@ -824,8 +734,7 @@ describe('SessionLaunchPipeline', () => {
 
       await runWithTimers(() => pipeline.launch(launchDto));
 
-      // initialPrompt threaded into resolveLaunchConfig (→ buildLaunchArgs)
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ initialPrompt: expect.stringContaining('Seed test-agent') }),
       );
       // Post-launch paste skipped entirely; argv mode pipes nothing
@@ -835,7 +744,6 @@ describe('SessionLaunchPipeline', () => {
 
     it('stdin mode: pipes the rendered prompt as literal input (no bracketed paste) and SKIPS paste', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
       (mocks.adapter as { initialPromptSeedMode?: 'argv' | 'stdin' }).initialPromptSeedMode =
         'stdin';
       mocks.storage.getInitialSessionPrompt.mockResolvedValue({ content: 'Seed {{agent_name}}' });
@@ -843,7 +751,7 @@ describe('SessionLaunchPipeline', () => {
 
       await runWithTimers(() => pipeline.launch(launchDto));
 
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ initialPrompt: expect.stringContaining('Seed test-agent') }),
       );
       // Piped to the process after start, without bracketed-paste markers
@@ -858,7 +766,6 @@ describe('SessionLaunchPipeline', () => {
 
     it('seed adapter with NO configured prompt: initialPrompt undefined, no paste, no pipe', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
       (mocks.adapter as { initialPromptSeedMode?: 'argv' | 'stdin' }).initialPromptSeedMode =
         'stdin';
       mocks.storage.getInitialSessionPrompt.mockResolvedValue(null);
@@ -866,7 +773,7 @@ describe('SessionLaunchPipeline', () => {
 
       await runWithTimers(() => pipeline.launch(launchDto));
 
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ initialPrompt: undefined }),
       );
       expect(mocks.terminalIO.deliver).not.toHaveBeenCalled();
@@ -875,7 +782,6 @@ describe('SessionLaunchPipeline', () => {
 
     it('default adapter (no seed mode): paste path preserved, initialPrompt stays undefined (regression)', async () => {
       const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
       // mocks.adapter.initialPromptSeedMode is undefined by default
       mocks.storage.getInitialSessionPrompt.mockResolvedValue({ content: 'Hello {{agent_name}}' });
       mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
@@ -883,173 +789,12 @@ describe('SessionLaunchPipeline', () => {
       await runWithTimers(() => pipeline.launch(launchDto));
 
       // No launch-time seeding for default providers
-      expect(resolveMock).toHaveBeenCalledWith(
+      expect(mocks.providerRuntimePreparation.createPlan).toHaveBeenCalledWith(
         expect.objectContaining({ initialPrompt: undefined }),
       );
       // Existing out-of-band paste still happens
       expect(mocks.terminalIO.deliver).toHaveBeenCalled();
       expect(mocks.terminalIO.deliverImmediate).not.toHaveBeenCalled();
-    });
-  });
-
-  // ── Effective model/effort resolution (Phase-1 effort levels) ────────────
-  // The pipeline folds agent overrides + config structured defaults + raw options
-  // into the effective model/effort passed to resolveLaunchConfig. Layer: pipeline
-  // unit test with the shared harness (resolve is mocked) — cheapest layer that
-  // proves the pipeline computes precedence and passes both values; the actual
-  // argv strip/inject is proven at the resolver layer (provider-launch-config.spec).
-  describe('effective model/effort resolution', () => {
-    const noRunningSelect = (sql: string) => {
-      if (sql.includes('SELECT') && sql.includes("status = 'running'")) {
-        return {
-          run: jest.fn(),
-          get: jest.fn().mockReturnValue(undefined),
-          all: jest.fn().mockReturnValue([]),
-        };
-      }
-      return { run: jest.fn().mockReturnValue({ changes: 1 }), get: jest.fn(), all: jest.fn() };
-    };
-
-    it('passes agent.effortOverride when set (highest precedence, beats config.effort)', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ effortOverride: 'high' }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ effort: 'low' }),
-      ]);
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ effortOverride: 'high' }));
-    });
-
-    it('falls back to config.effort when the agent effort override is null', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ effortOverride: null }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ effort: 'medium' }),
-      ]);
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ effortOverride: 'medium' }),
-      );
-    });
-
-    it('passes effortOverride null when neither agent nor config sets an effort', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ effortOverride: null }));
-    });
-
-    it('BEHAVIOR CHANGE: config.model set + raw --model in options → structured model wins', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ modelOverride: null }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ model: 'opus', options: '--model sonnet' }),
-      ]);
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      // Effective model is the structured config.model, not the raw --model text.
-      // (The resolver then strips the raw --model — proven in the resolver spec.)
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ modelOverride: 'opus' }));
-    });
-
-    it('agent.modelOverride wins over config.model', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.getAgent.mockResolvedValue(fakeAgent({ modelOverride: 'haiku' }));
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ model: 'opus' }),
-      ]);
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(expect.objectContaining({ modelOverride: 'haiku' }));
-    });
-
-    it('folds a raw --model into the effective model when no structured override exists', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-      resolveMock.mockClear();
-      mocks.storage.listProfileProviderConfigsByProfile.mockResolvedValue([
-        fakeProfileProviderConfig({ options: '--model sonnet' }),
-      ]);
-      mocks.sqliteMock.prepare.mockImplementation(noRunningSelect);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ modelOverride: 'sonnet' }),
-      );
-    });
-  });
-
-  describe('provider env scope filtering', () => {
-    it('calls getProviderEnvForProject with provider.id and projectId', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-
-      mocks.sqliteMock.prepare.mockImplementation((sql: string) => {
-        if (sql.includes('SELECT') && sql.includes("status = 'running'")) {
-          return {
-            run: jest.fn(),
-            get: jest.fn().mockReturnValue(undefined),
-            all: jest.fn().mockReturnValue([]),
-          };
-        }
-        return { run: jest.fn().mockReturnValue({ changes: 1 }), get: jest.fn(), all: jest.fn() };
-      });
-
-      mocks.storage.getProviderEnvForProject.mockReturnValue({ FILTERED_KEY: 'filtered-value' });
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(mocks.storage.getProviderEnvForProject).toHaveBeenCalledWith(
-        'provider-1',
-        'project-1',
-      );
-    });
-
-    it('passes filtered env to resolveLaunchConfig instead of raw provider.env', async () => {
-      const { pipeline, mocks } = createLaunchPipelineHarness();
-      const resolveMock = resolveLaunchConfig as jest.Mock;
-
-      mocks.sqliteMock.prepare.mockImplementation((sql: string) => {
-        if (sql.includes('SELECT') && sql.includes("status = 'running'")) {
-          return {
-            run: jest.fn(),
-            get: jest.fn().mockReturnValue(undefined),
-            all: jest.fn().mockReturnValue([]),
-          };
-        }
-        return { run: jest.fn().mockReturnValue({ changes: 1 }), get: jest.fn(), all: jest.fn() };
-      });
-
-      const filteredEnv = { SCOPED_KEY: 'scoped-value' };
-      mocks.storage.getProviderEnvForProject.mockReturnValue(filteredEnv);
-
-      await runWithTimers(() => pipeline.launch(launchDto));
-
-      expect(resolveMock).toHaveBeenCalledWith(
-        expect.objectContaining({ providerEnv: filteredEnv }),
-      );
     });
   });
 });

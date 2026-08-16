@@ -1,3 +1,13 @@
+import type { CreateSkillSourceOptions } from '../../interfaces/storage.interface';
+import { randomUUID } from 'node:crypto';
+import { and, asc, eq } from 'drizzle-orm';
+import {
+  communitySkillSources,
+  localSkillSources,
+  projects,
+  skills,
+  sourceProjectEnabled,
+} from '../../db/schema';
 import type {
   CommunitySkillSource,
   CreateCommunitySkillSource,
@@ -16,7 +26,6 @@ import {
   normalizeCommunityBranch,
   normalizeCommunityRepoPart,
   normalizeCommunitySourceName,
-  normalizeCommunitySourceNameForLookup,
   normalizeLocalSkillSourceFolderPath,
   normalizeProjectIdForSourceEnablement,
   normalizeSourceNameForSourceEnablement,
@@ -25,17 +34,8 @@ import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage
 
 const logger = createLogger('SkillSourceStorageDelegate');
 
-export interface SkillSourceStorageDelegateDependencies {
-  assertLocalSourceNameAvailableAcrossTypes: (sourceName: string) => Promise<void>;
-  getCommunitySkillSource: (id: string) => Promise<CommunitySkillSource>;
-  getLocalSkillSource: (id: string) => Promise<LocalSkillSource | null>;
-}
-
 export class SkillSourceStorageDelegate extends BaseStorageDelegate {
-  constructor(
-    context: StorageDelegateContext,
-    private readonly dependencies: SkillSourceStorageDelegateDependencies,
-  ) {
+  constructor(context: StorageDelegateContext) {
     super(context);
   }
 
@@ -43,8 +43,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
     const normalizedProjectId = normalizeProjectIdForSourceEnablement(projectId);
     const normalizedSourceName = normalizeSourceNameForSourceEnablement(sourceName);
 
-    const { sourceProjectEnabled } = await import('../../db/schema');
-    const { and, eq } = await import('drizzle-orm');
     const rows = await this.db
       .select({ enabled: sourceProjectEnabled.enabled })
       .from(sourceProjectEnabled)
@@ -67,8 +65,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
     const normalizedProjectId = normalizeProjectIdForSourceEnablement(projectId);
     const normalizedSourceName = normalizeSourceNameForSourceEnablement(sourceName);
 
-    const { sourceProjectEnabled } = await import('../../db/schema');
-    const { and, eq } = await import('drizzle-orm');
     const existing = await this.db
       .select({ id: sourceProjectEnabled.id })
       .from(sourceProjectEnabled)
@@ -88,7 +84,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       return;
     }
 
-    const { randomUUID } = await import('crypto');
     await this.db.insert(sourceProjectEnabled).values({
       id: randomUUID(),
       projectId: normalizedProjectId,
@@ -103,8 +98,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
   ): Promise<Array<{ sourceName: string; enabled: boolean }>> {
     const normalizedProjectId = normalizeProjectIdForSourceEnablement(projectId);
 
-    const { sourceProjectEnabled } = await import('../../db/schema');
-    const { asc, eq } = await import('drizzle-orm');
     const rows = await this.db
       .select({
         sourceName: sourceProjectEnabled.sourceName,
@@ -120,62 +113,7 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
     }));
   }
 
-  async seedSourceProjectDisabled(projectId: string, sourceNames: string[]): Promise<void> {
-    const normalizedProjectId = normalizeProjectIdForSourceEnablement(projectId);
-    const normalizedSourceNames = [
-      ...new Set(sourceNames.map((name) => name.trim().toLowerCase())),
-    ].filter((name) => name.length > 0);
-
-    if (normalizedSourceNames.length === 0) {
-      return;
-    }
-
-    await this.txRunner.runImmediateAsync(async () => {
-      const { sourceProjectEnabled } = await import('../../db/schema');
-      const { and, eq, inArray } = await import('drizzle-orm');
-      const existingRows = await this.db
-        .select({ sourceName: sourceProjectEnabled.sourceName })
-        .from(sourceProjectEnabled)
-        .where(
-          and(
-            eq(sourceProjectEnabled.projectId, normalizedProjectId),
-            inArray(sourceProjectEnabled.sourceName, normalizedSourceNames),
-          ),
-        );
-
-      const existingSourceNames = new Set(existingRows.map((row) => row.sourceName));
-      const sourceNamesToInsert = normalizedSourceNames.filter(
-        (sourceName) => !existingSourceNames.has(sourceName),
-      );
-
-      if (sourceNamesToInsert.length > 0) {
-        const { randomUUID } = await import('crypto');
-        const now = new Date().toISOString();
-        await this.db.insert(sourceProjectEnabled).values(
-          sourceNamesToInsert.map((sourceName) => ({
-            id: randomUUID(),
-            projectId: normalizedProjectId,
-            sourceName,
-            enabled: false,
-            createdAt: now,
-          })),
-        );
-      }
-    });
-  }
-
-  async deleteSourceProjectEnabledBySource(sourceName: string): Promise<void> {
-    const normalizedSourceName = normalizeSourceNameForSourceEnablement(sourceName);
-    const { sourceProjectEnabled } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    await this.db
-      .delete(sourceProjectEnabled)
-      .where(eq(sourceProjectEnabled.sourceName, normalizedSourceName));
-  }
-
   async listCommunitySkillSources(): Promise<CommunitySkillSource[]> {
-    const { communitySkillSources } = await import('../../db/schema');
-    const { asc } = await import('drizzle-orm');
     const rows = await this.db
       .select()
       .from(communitySkillSources)
@@ -189,8 +127,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       throw new ValidationError('id is required.', { fieldName: 'id' });
     }
 
-    const { communitySkillSources } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
     const rows = await this.db
       .select()
       .from(communitySkillSources)
@@ -205,9 +141,7 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
   }
 
   async getCommunitySkillSourceByName(name: string): Promise<CommunitySkillSource | null> {
-    const normalizedName = normalizeCommunitySourceNameForLookup(name);
-    const { communitySkillSources } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    const normalizedName = normalizeCommunitySourceName(name);
     const rows = await this.db
       .select()
       .from(communitySkillSources)
@@ -219,13 +153,13 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
 
   async createCommunitySkillSource(
     data: CreateCommunitySkillSource,
+    options?: CreateSkillSourceOptions,
   ): Promise<CommunitySkillSource> {
     const normalizedName = normalizeCommunitySourceName(data.name);
     const normalizedRepoOwner = normalizeCommunityRepoPart(data.repoOwner, 'repoOwner');
     const normalizedRepoName = normalizeCommunityRepoPart(data.repoName, 'repoName');
     const normalizedBranch = normalizeCommunityBranch(data.branch);
 
-    const { randomUUID } = await import('crypto');
     const now = new Date().toISOString();
     const record: CommunitySkillSource = {
       id: randomUUID(),
@@ -237,18 +171,39 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       updatedAt: now,
     };
 
-    const { communitySkillSources } = await import('../../db/schema');
     try {
-      await this.db.insert(communitySkillSources).values({
-        id: record.id,
-        name: record.name,
-        repoOwner: record.repoOwner,
-        repoName: record.repoName,
-        branch: record.branch,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
+      await this.txRunner.runImmediateQueued(() => {
+        const oppositeKind = this.db
+          .select({ id: localSkillSources.id })
+          .from(localSkillSources)
+          .where(eq(localSkillSources.name, normalizedName))
+          .limit(1)
+          .get();
+        if (oppositeKind) {
+          throw this.crossKindNameConflict(normalizedName);
+        }
+
+        this.db
+          .insert(communitySkillSources)
+          .values({
+            id: record.id,
+            name: record.name,
+            repoOwner: record.repoOwner,
+            repoName: record.repoName,
+            branch: record.branch,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+          })
+          .run();
+
+        if (options?.seedExistingProjectsDisabled) {
+          this.seedExistingProjectsDisabledInCurrentTransaction(record.name, now);
+        }
       });
     } catch (error) {
+      if (error instanceof ConflictError) {
+        throw error;
+      }
       if (isSqliteUniqueConstraint(error)) {
         const rawMessage =
           typeof error === 'object' && error !== null && 'message' in error
@@ -285,10 +240,7 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       throw new ValidationError('id is required.', { fieldName: 'id' });
     }
 
-    const { communitySkillSources, skills, sourceProjectEnabled } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-
-    const source = this.txRunner.runImmediate(() => {
+    const source = await this.txRunner.runImmediateQueued(() => {
       const existingSource = this.db
         .select()
         .from(communitySkillSources)
@@ -319,8 +271,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
   }
 
   async listLocalSkillSources(): Promise<LocalSkillSource[]> {
-    const { localSkillSources } = await import('../../db/schema');
-    const { asc } = await import('drizzle-orm');
     const rows = await this.db
       .select()
       .from(localSkillSources)
@@ -334,8 +284,6 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       throw new ValidationError('id is required.', { fieldName: 'id' });
     }
 
-    const { localSkillSources } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
     const rows = await this.db
       .select()
       .from(localSkillSources)
@@ -345,12 +293,24 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
     return (rows[0] as LocalSkillSource | undefined) ?? null;
   }
 
-  async createLocalSkillSource(data: CreateLocalSkillSource): Promise<LocalSkillSource> {
-    const normalizedName = normalizeCommunitySourceNameForLookup(data.name);
-    const normalizedFolderPath = normalizeLocalSkillSourceFolderPath(data.folderPath);
-    await this.dependencies.assertLocalSourceNameAvailableAcrossTypes(normalizedName);
+  async getLocalSkillSourceByName(name: string): Promise<LocalSkillSource | null> {
+    const normalizedName = normalizeCommunitySourceName(name);
+    const row = await this.db
+      .select()
+      .from(localSkillSources)
+      .where(eq(localSkillSources.name, normalizedName))
+      .limit(1);
 
-    const { randomUUID } = await import('crypto');
+    return (row[0] as LocalSkillSource | undefined) ?? null;
+  }
+
+  async createLocalSkillSource(
+    data: CreateLocalSkillSource,
+    options?: CreateSkillSourceOptions,
+  ): Promise<LocalSkillSource> {
+    const normalizedName = normalizeCommunitySourceName(data.name);
+    const normalizedFolderPath = normalizeLocalSkillSourceFolderPath(data.folderPath);
+
     const now = new Date().toISOString();
     const record: LocalSkillSource = {
       id: randomUUID(),
@@ -360,16 +320,37 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       updatedAt: now,
     };
 
-    const { localSkillSources } = await import('../../db/schema');
     try {
-      await this.db.insert(localSkillSources).values({
-        id: record.id,
-        name: record.name,
-        folderPath: record.folderPath,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
+      await this.txRunner.runImmediateQueued(() => {
+        const oppositeKind = this.db
+          .select({ id: communitySkillSources.id })
+          .from(communitySkillSources)
+          .where(eq(communitySkillSources.name, normalizedName))
+          .limit(1)
+          .get();
+        if (oppositeKind) {
+          throw this.crossKindNameConflict(normalizedName);
+        }
+
+        this.db
+          .insert(localSkillSources)
+          .values({
+            id: record.id,
+            name: record.name,
+            folderPath: record.folderPath,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+          })
+          .run();
+
+        if (options?.seedExistingProjectsDisabled) {
+          this.seedExistingProjectsDisabledInCurrentTransaction(record.name, now);
+        }
       });
     } catch (error) {
+      if (error instanceof ConflictError) {
+        throw error;
+      }
       if (isSqliteUniqueConstraint(error)) {
         const rawMessage =
           typeof error === 'object' && error !== null && 'message' in error
@@ -407,10 +388,7 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       throw new ValidationError('id is required.', { fieldName: 'id' });
     }
 
-    const { localSkillSources, skills, sourceProjectEnabled } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-
-    const source = this.txRunner.runImmediate(() => {
+    const source = await this.txRunner.runImmediateQueued(() => {
       const existingSource = this.db
         .select()
         .from(localSkillSources)
@@ -435,5 +413,35 @@ export class SkillSourceStorageDelegate extends BaseStorageDelegate {
       { localSkillSourceId: source.id, sourceName: source.name },
       'Deleted local skill source and related skills',
     );
+  }
+
+  private seedExistingProjectsDisabledInCurrentTransaction(
+    sourceName: string,
+    createdAt: string,
+  ): void {
+    const projectRows = this.db.select({ id: projects.id }).from(projects).all();
+    if (projectRows.length === 0) {
+      return;
+    }
+
+    this.db
+      .insert(sourceProjectEnabled)
+      .values(
+        projectRows.map((project) => ({
+          id: randomUUID(),
+          projectId: project.id,
+          sourceName,
+          enabled: false,
+          createdAt,
+        })),
+      )
+      .onConflictDoNothing()
+      .run();
+  }
+
+  private crossKindNameConflict(name: string): ConflictError {
+    return new ConflictError('Skill source name already exists for another managed source kind.', {
+      name,
+    });
   }
 }

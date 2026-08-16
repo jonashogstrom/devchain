@@ -16,6 +16,7 @@ import type { SessionRuntime } from '../../sessions/services/session-runtime';
 import type { SessionCoordinatorService } from '../../sessions/services/session-coordinator.service';
 import type { AgentMessageDeliveryService } from '../../agent-message-delivery/agent-message-delivery.service';
 import type { StorageService } from '../../storage/interfaces/storage.interface';
+import type { TeamsService } from '../../teams/services/teams.service';
 
 // ============================================
 // EVENT ENVELOPE
@@ -137,6 +138,9 @@ export interface ActionContext {
   /** Storage service for data access (e.g., agent resolution) */
   storage: StorageService;
 
+  /** Teams facade for team-aware operations */
+  teamsService: TeamsService;
+
   /** ID of the session that triggered the event */
   sessionId: string;
 
@@ -175,6 +179,9 @@ export interface ActionResult {
 
   /** Additional data returned by the action */
   data?: unknown;
+
+  /** Whether subscriber-level automatic retry may run after a failure */
+  retryable?: boolean;
 }
 
 // ============================================
@@ -205,6 +212,9 @@ export interface ActionDefinition {
 
   /** Category for UI organization */
   category: ActionCategory;
+
+  /** Whether subscriber configuration may enable automatic retry (defaults to true) */
+  supportsRetry?: boolean;
 
   /** Input fields this action accepts */
   inputs: ActionInputDefinition[];

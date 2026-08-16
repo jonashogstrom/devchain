@@ -7,12 +7,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/ui/components/ui/dialog';
-import type { ImportResult } from '@/ui/hooks/useProjectImport';
+import type { ImportProjectSuccess } from '@/ui/pages/projects/lib/project-contracts';
 
 interface ImportResultDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  importResult: ImportResult | null;
+  importResult: ImportProjectSuccess | null;
 }
 
 export function ImportResultDialog({ open, onOpenChange, importResult }: ImportResultDialogProps) {

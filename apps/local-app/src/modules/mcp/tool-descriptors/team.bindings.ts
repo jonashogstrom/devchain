@@ -1,4 +1,5 @@
-import type { ToolBindingEntry } from './types';
+import type { TeamsService } from '../../teams/services/teams.service';
+import type { TeamsToolContext } from '../services/handlers/teams-context';
 import {
   handleTeamsList,
   handleTeamsMembersList,
@@ -7,12 +8,22 @@ import {
   handleTeamsDeleteAgent,
   handleDevchainTeam,
 } from '../services/handlers/teams-tools';
+import { createNullAdapter } from '../services/handlers/null-adapter';
+import { defineToolGroup, type McpBindingRuntime } from './binding-types';
 
-export const teamBindings: ToolBindingEntry[] = [
-  ['devchain_teams_list', handleTeamsList as unknown as ToolBindingEntry[1]],
-  ['devchain_teams_members_list', handleTeamsMembersList as unknown as ToolBindingEntry[1]],
-  ['devchain_teams_configs_list', handleTeamsConfigsList as unknown as ToolBindingEntry[1]],
-  ['devchain_teams_create_agent', handleTeamsCreateAgent as unknown as ToolBindingEntry[1]],
-  ['devchain_teams_delete_agent', handleTeamsDeleteAgent as unknown as ToolBindingEntry[1]],
-  ['devchain_team', handleDevchainTeam as unknown as ToolBindingEntry[1]],
-];
+function createTeamsContext(runtime: McpBindingRuntime): TeamsToolContext {
+  return {
+    storage: runtime.storage,
+    teamsService: runtime.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
+    resolveSessionContext: runtime.resolveSessionContext,
+  };
+}
+
+export const teamBindings = defineToolGroup<TeamsToolContext>(createTeamsContext, [
+  ['devchain_teams_list', handleTeamsList],
+  ['devchain_teams_members_list', handleTeamsMembersList],
+  ['devchain_teams_configs_list', handleTeamsConfigsList],
+  ['devchain_teams_create_agent', handleTeamsCreateAgent],
+  ['devchain_teams_delete_agent', handleTeamsDeleteAgent],
+  ['devchain_team', handleDevchainTeam],
+]);

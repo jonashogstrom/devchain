@@ -7,18 +7,18 @@ import {
   LocalSourceResponseSchema,
   type LocalSourceResponseDto,
 } from '../dtos/local-sources.dto';
-import { LocalSourcesService } from '../services/local-sources.service';
+import { SkillSourceLifecycleService } from '../services/skill-source-lifecycle.service';
 
 const logger = createLogger('LocalSourcesController');
 
 @Controller('api/skills/local-sources')
 export class LocalSourcesController {
-  constructor(private readonly localSourcesService: LocalSourcesService) {}
+  constructor(private readonly skillSourceLifecycle: SkillSourceLifecycleService) {}
 
   @Get()
   async listLocalSources(): Promise<LocalSourceResponseDto[]> {
     logger.info('GET /api/skills/local-sources');
-    const sources = await this.localSourcesService.listLocalSources();
+    const sources = await this.skillSourceLifecycle.listLocalSources();
     return sources.map((source) => this.toResponse(source));
   }
 
@@ -26,7 +26,7 @@ export class LocalSourcesController {
   async createLocalSource(@Body() body: unknown): Promise<LocalSourceResponseDto> {
     logger.info('POST /api/skills/local-sources');
     const parsed = CreateLocalSourceSchema.parse(body);
-    const created = await this.localSourcesService.createLocalSource(parsed);
+    const created = await this.skillSourceLifecycle.createLocalSource(parsed);
     return this.toResponse(created);
   }
 
@@ -34,7 +34,7 @@ export class LocalSourcesController {
   async deleteLocalSource(@Param() params: unknown): Promise<{ success: true }> {
     logger.info('DELETE /api/skills/local-sources/:id');
     const parsed = LocalSourceDeleteParamsSchema.parse(params);
-    await this.localSourcesService.deleteLocalSource(parsed.id);
+    await this.skillSourceLifecycle.deleteLocalSource(parsed.id);
     return { success: true };
   }
 

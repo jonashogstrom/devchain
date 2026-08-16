@@ -1,3 +1,7 @@
+/**
+ * Layer: backend unit. Direct collaborators and fake timers are the cheapest reliable
+ * boundary for lane mutation order, exact-session fencing, and flush isolation.
+ */
 const mockLogger = {
   error: jest.fn(),
   warn: jest.fn(),
@@ -23,7 +27,9 @@ import { DeliveryFailureNotifierService } from './delivery-failure-notifier.serv
 
 describe('SessionsMessagePoolService', () => {
   let service: SessionsMessagePoolService;
-  let mockSessionsService: jest.Mocked<Pick<SessionsService, 'listActiveSessions'>>;
+  let mockSessionsService: jest.Mocked<
+    Pick<SessionsService, 'listActiveSessions' | 'getActiveSessionForAgent' | 'getSession'>
+  >;
   let mockCoordinator: jest.Mocked<Pick<SessionCoordinatorService, 'withAgentLock'>>;
   let mockTerminalIO: jest.Mocked<
     Pick<TerminalIOService, 'deliver' | 'deliverImmediate' | 'sendControl'>
@@ -55,6 +61,11 @@ describe('SessionsMessagePoolService', () => {
     epicId: null,
     startedAt: new Date().toISOString(),
     endedAt: null,
+    lastActivityAt: null,
+    activityState: 'busy' as const,
+    busySince: new Date().toISOString(),
+    transcriptPath: null,
+    name: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
@@ -62,8 +73,13 @@ describe('SessionsMessagePoolService', () => {
   beforeEach(() => {
     jest.useFakeTimers();
 
+    const activeSession = createActiveSession('agent-1');
     mockSessionsService = {
-      listActiveSessions: jest.fn().mockResolvedValue([createActiveSession('agent-1')]),
+      listActiveSessions: jest.fn().mockResolvedValue([activeSession]),
+      getActiveSessionForAgent: jest.fn().mockReturnValue(activeSession),
+      getSession: jest
+        .fn()
+        .mockImplementation((sessionId) => (sessionId === activeSession.id ? activeSession : null)),
     };
 
     mockCoordinator = {
@@ -299,6 +315,349 @@ describe('SessionsMessagePoolService', () => {
       const [target, calledText] = mockTerminalIO.deliver.mock.calls[0];
       expect(target).toEqual({ name: 'tmux-1' });
       expect(calledText).toContain('Pooled message');
+    });
+  });
+
+  describe('Delivery modes and exact-session idle lanes', () => {
+    it('resolves valid explicit modes before the legacy immediate flag', async () => {
+      const queued = await service.enqueue('agent-1', 'Explicit default', {
+        source: 'test',
+        deliveryMode: 'default',
+        immediate: true,
+      });
+
+      expect(queued.status).toBe('queued');
+      expect(mockTerminalIO.deliverImmediate).not.toHaveBeenCalled();
+
+      const delivered = await service.enqueue('agent-1', 'Explicit immediate', {
+        source: 'test',
+        deliveryMode: 'immediate',
+        immediate: false,
+      });
+
+      expect(delivered.status).toBe('delivered');
+      expect(mockTerminalIO.deliverImmediate).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back from an invalid explicit mode to legacy immediate behavior', async () => {
+      const result = await service.enqueue('agent-1', 'Legacy immediate', {
+        source: 'test',
+        deliveryMode: 'invalid' as 'default',
+        immediate: true,
+      });
+
+      expect(result.status).toBe('delivered');
+      expect(mockTerminalIO.deliverImmediate).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a busy-session idle lane isolated until its exact session becomes idle', async () => {
+      const result = await service.enqueue('agent-1', 'Wait for idle', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+      });
+
+      expect(result).toMatchObject({ status: 'queued', poolSize: 1 });
+      expect(mockActivityStream.broadcastPoolsUpdated.mock.calls[0][0]).toEqual([
+        expect.objectContaining({
+          agentId: 'agent-1',
+          messageCount: 1,
+          messages: [expect.objectContaining({ preview: 'Wait for idle' })],
+        }),
+      ]);
+
+      await jest.advanceTimersByTimeAsync(60000);
+      await service.flushNow('agent-1');
+      await service.flushAll();
+      service.reloadConfig();
+      expect(mockTerminalIO.deliver).not.toHaveBeenCalled();
+
+      const idleSession = {
+        ...createActiveSession('agent-1'),
+        activityState: 'idle' as const,
+        busySince: null,
+      };
+      mockSessionsService.getSession.mockReturnValue(idleSession);
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(idleSession);
+      mockSessionsService.listActiveSessions.mockResolvedValue([idleSession]);
+
+      await service.handleSessionActivityChanged({
+        sessionId: idleSession.id,
+        state: 'idle',
+        lastActivityAt: new Date().toISOString(),
+        busySince: null,
+      });
+
+      expect(mockTerminalIO.deliver).toHaveBeenCalledTimes(1);
+      expect(service.getPoolStats()).toEqual([]);
+    });
+
+    it('starts exact-session delivery during enqueue when the persisted session is idle', async () => {
+      const idleSession = {
+        ...createActiveSession('agent-1'),
+        activityState: 'idle' as const,
+        busySince: null,
+      };
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(idleSession);
+      mockSessionsService.getSession.mockReturnValue(idleSession);
+      mockSessionsService.listActiveSessions.mockResolvedValue([idleSession]);
+      const flushNow = jest.spyOn(service, 'flushNow');
+
+      const result = await service.enqueue('agent-1', 'Already idle', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+      });
+
+      expect(result.status).toBe('delivered');
+      expect(mockCoordinator.withAgentLock).toHaveBeenCalledTimes(1);
+      expect(flushNow).not.toHaveBeenCalled();
+      expect(mockTerminalIO.deliver).toHaveBeenCalledTimes(1);
+    });
+
+    it('replaces and fails an old-session lane without exposing it to delayed old events', async () => {
+      const oldSession = createActiveSession('agent-1', 'tmux-old');
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(oldSession);
+      mockSessionsService.getSession.mockReturnValue(oldSession);
+
+      await service.enqueue('agent-1', 'Old session message', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+      });
+
+      const newSession = {
+        ...createActiveSession('agent-1', 'tmux-new'),
+        id: 'session-new',
+      };
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(newSession);
+      mockSessionsService.getSession.mockImplementation((sessionId) =>
+        sessionId === oldSession.id ? oldSession : newSession,
+      );
+
+      await service.enqueue('agent-1', 'New session message', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+      });
+
+      expect(
+        service.getMessageLog().find((entry) => entry.text === 'Old session message'),
+      ).toMatchObject({ status: 'failed', failureCode: 'no_active_session' });
+      expect(
+        service.getMessageLog().find((entry) => entry.text === 'New session message'),
+      ).toMatchObject({ status: 'queued' });
+
+      await service.handleSessionActivityChanged({
+        sessionId: oldSession.id,
+        state: 'idle',
+        lastActivityAt: new Date().toISOString(),
+        busySince: null,
+      });
+      await service.handleSessionStopped({
+        sessionId: oldSession.id,
+        source: 'subscriber',
+        reason: 'restart',
+      });
+      await service.handleSessionCrashed({ sessionId: oldSession.id, sessionName: 'old' });
+
+      expect(mockTerminalIO.deliver).not.toHaveBeenCalled();
+      expect(service.getPoolStats()).toEqual([
+        expect.objectContaining({ agentId: 'agent-1', messageCount: 1 }),
+      ]);
+
+      const idleNewSession = { ...newSession, activityState: 'idle' as const, busySince: null };
+      mockSessionsService.getSession.mockReturnValue(idleNewSession);
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(idleNewSession);
+      mockSessionsService.listActiveSessions.mockResolvedValue([idleNewSession]);
+      await service.handleSessionActivityChanged({
+        sessionId: idleNewSession.id,
+        state: 'idle',
+        lastActivityAt: new Date().toISOString(),
+        busySince: null,
+      });
+
+      expect(mockTerminalIO.deliver).toHaveBeenCalledWith(
+        { name: 'tmux-new' },
+        'New session message',
+        expect.objectContaining({ agentId: 'agent-1' }),
+      );
+    });
+
+    it('checks idempotency before current capacity and refreshes capacity on each enqueue', async () => {
+      mockSettings.getMessagePoolConfigForProject.mockReturnValue({
+        enabled: false,
+        delayMs: 10000,
+        maxWaitMs: 30000,
+        maxMessages: 1,
+        separator: '\n---\n',
+      });
+
+      const first = await service.enqueue('agent-1', 'First', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+        clientMessageId: 'client-1',
+      });
+      const duplicate = await service.enqueue('agent-1', 'Duplicate', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+        clientMessageId: 'client-1',
+      });
+      const full = await service.enqueue('agent-1', 'Full', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+        clientMessageId: 'client-2',
+        failureDisclosure: 'project-safe',
+      });
+
+      expect(duplicate).toEqual({ status: 'queued', logEntryId: first.logEntryId });
+      expect(full).toEqual({ status: 'failed', error: 'DELIVERY_FAILED' });
+      expect(service.getMessageLog()).toHaveLength(1);
+
+      mockSettings.getMessagePoolConfigForProject.mockReturnValue({
+        enabled: false,
+        delayMs: 10000,
+        maxWaitMs: 30000,
+        maxMessages: 2,
+        separator: '\n+++\n',
+      });
+      await expect(
+        service.enqueue('agent-1', 'Now accepted', {
+          source: 'test',
+          deliveryMode: 'on_idle',
+          clientMessageId: 'client-2',
+        }),
+      ).resolves.toMatchObject({ status: 'queued', poolSize: 2 });
+      expect(mockSettings.getMessagePoolConfigForProject).toHaveBeenCalledTimes(3);
+
+      const idleSession = {
+        ...createActiveSession('agent-1'),
+        activityState: 'idle' as const,
+        busySince: null,
+      };
+      mockSessionsService.getSession.mockReturnValue(idleSession);
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(idleSession);
+      mockSessionsService.listActiveSessions.mockResolvedValue([idleSession]);
+      await service.handleSessionActivityChanged({
+        sessionId: idleSession.id,
+        state: 'idle',
+        lastActivityAt: new Date().toISOString(),
+        busySince: null,
+      });
+      expect(mockTerminalIO.deliver).toHaveBeenCalledWith(
+        { name: 'tmux-1' },
+        'First\n+++\nNow accepted',
+        expect.any(Object),
+      );
+    });
+
+    it('fails only a matching stopped lane', async () => {
+      const session = createActiveSession('agent-1');
+      await service.enqueue('agent-1', 'Stop me', { source: 'test', deliveryMode: 'on_idle' });
+
+      mockSessionsService.getSession.mockReturnValue({ ...session, id: 'unrelated-session' });
+      await service.handleSessionStopped({
+        sessionId: 'unrelated-session',
+        source: 'subscriber',
+        reason: 'user-requested',
+      });
+      expect(service.getPoolStats()).toHaveLength(1);
+
+      mockSessionsService.getSession.mockReturnValue(session);
+      await service.handleSessionStopped({
+        sessionId: session.id,
+        source: 'subscriber',
+        reason: 'user-requested',
+      });
+
+      expect(service.getPoolStats()).toEqual([]);
+      expect(service.getMessageLog()[0]).toMatchObject({ status: 'failed' });
+    });
+
+    it('fails a matching crashed lane', async () => {
+      const session = createActiveSession('agent-1');
+      await service.enqueue('agent-1', 'Crash me', { source: 'test', deliveryMode: 'on_idle' });
+      mockSessionsService.getSession.mockReturnValue(session);
+
+      await service.handleSessionCrashed({ sessionId: session.id, sessionName: 'crashed' });
+
+      expect(service.getPoolStats()).toEqual([]);
+      expect(service.getMessageLog()[0]).toMatchObject({ status: 'failed' });
+    });
+
+    it('aggregates default and idle messages into one timestamp-ordered agent record', async () => {
+      await service.enqueue('agent-1', 'Default first', {
+        source: 'default-source',
+        deliveryMode: 'default',
+      });
+      await jest.advanceTimersByTimeAsync(1);
+      await service.enqueue('agent-1', 'Idle second', {
+        source: 'idle-source',
+        deliveryMode: 'on_idle',
+      });
+
+      expect(service.getPoolStats()).toEqual([
+        expect.objectContaining({ agentId: 'agent-1', messageCount: 2 }),
+      ]);
+      expect(service.getPoolDetails()).toEqual([
+        expect.objectContaining({
+          agentId: 'agent-1',
+          messageCount: 2,
+          messages: [
+            expect.objectContaining({ preview: 'Default first' }),
+            expect.objectContaining({ preview: 'Idle second' }),
+          ],
+        }),
+      ]);
+
+      const idleSession = {
+        ...createActiveSession('agent-1'),
+        activityState: 'idle' as const,
+        busySince: null,
+      };
+      mockSessionsService.getSession.mockReturnValue(idleSession);
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(idleSession);
+      mockSessionsService.listActiveSessions.mockResolvedValue([idleSession]);
+      await service.handleSessionActivityChanged({
+        sessionId: idleSession.id,
+        state: 'idle',
+        lastActivityAt: new Date().toISOString(),
+        busySince: null,
+      });
+
+      expect(mockTerminalIO.deliver).toHaveBeenCalledWith(
+        { name: 'tmux-1' },
+        'Idle second',
+        expect.any(Object),
+      );
+      expect(service.getPoolDetails()).toEqual([
+        expect.objectContaining({
+          messageCount: 1,
+          messages: [expect.objectContaining({ preview: 'Default first' })],
+        }),
+      ]);
+    });
+
+    it('classifies a missing-session idle failure before returning it', async () => {
+      mockSessionsService.getActiveSessionForAgent.mockReturnValue(null);
+
+      await expect(
+        service.enqueue('agent-1', 'No session', {
+          source: 'test',
+          deliveryMode: 'on_idle',
+          failureDisclosure: 'project-safe',
+        }),
+      ).resolves.toEqual({ status: 'failed', error: 'DELIVERY_FAILED' });
+      expect(service.getMessageLog()).toEqual([]);
+    });
+
+    it('clears idle lanes on shutdown without terminal delivery', async () => {
+      await service.enqueue('agent-1', 'Do not deliver', {
+        source: 'test',
+        deliveryMode: 'on_idle',
+      });
+
+      await service.onModuleDestroy();
+
+      expect(mockTerminalIO.deliver).not.toHaveBeenCalled();
+      expect(service.getPoolStats()).toEqual([]);
+      expect(service.getMessageLog()[0]).toMatchObject({ status: 'failed' });
     });
   });
 

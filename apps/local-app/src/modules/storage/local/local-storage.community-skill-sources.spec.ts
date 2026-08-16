@@ -59,14 +59,29 @@ describe('LocalStorageService - CommunitySkillSources integration', () => {
     ).rejects.toThrow(ValidationError);
   });
 
-  it('rejects community source names that conflict with built-in names', async () => {
+  it('does not treat live built-in names as storage policy', async () => {
     await expect(
       service.createCommunitySkillSource({
         name: 'openai',
         repoOwner: 'someone',
+        repoName: 'raw-storage-source',
+      }),
+    ).resolves.toMatchObject({ name: 'openai' });
+  });
+
+  it('rejects community source names that collide with local source names', async () => {
+    await service.createLocalSkillSource({
+      name: 'shared-source',
+      folderPath: '/tmp/shared-source',
+    });
+
+    await expect(
+      service.createCommunitySkillSource({
+        name: 'shared-source',
+        repoOwner: 'someone',
         repoName: 'repo',
       }),
-    ).rejects.toThrow(ValidationError);
+    ).rejects.toThrow(ConflictError);
   });
 
   it('enforces unique repo pair regardless of input casing', async () => {
@@ -85,7 +100,7 @@ describe('LocalStorageService - CommunitySkillSources integration', () => {
     ).rejects.toThrow(ConflictError);
   });
 
-  it('deletes related skills when deleting a community skill source', async () => {
+  it('deletes related skills and enablement when deleting a community skill source', async () => {
     const source = await service.createCommunitySkillSource({
       name: 'jeffallan',
       repoOwner: 'JeffAllan',
@@ -107,6 +122,27 @@ describe('LocalStorageService - CommunitySkillSources integration', () => {
       )
       .run('skill-2', 'openai/other', 'Other', 'Other', 'openai', now, now);
 
+    sqlite
+      .prepare(
+        `INSERT INTO projects (id, name, description, root_path, is_template, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('project-1', 'Project 1', null, '/tmp/project-1', 0, now, now);
+
+    sqlite
+      .prepare(
+        `INSERT INTO source_project_enabled (id, project_id, source_name, enabled, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('spe-community', 'project-1', 'jeffallan', 0, now);
+
+    sqlite
+      .prepare(
+        `INSERT INTO source_project_enabled (id, project_id, source_name, enabled, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('spe-openai', 'project-1', 'openai', 0, now);
+
     await service.deleteCommunitySkillSource(source.id);
 
     const sourceCount = sqlite
@@ -123,5 +159,15 @@ describe('LocalStorageService - CommunitySkillSources integration', () => {
       .prepare('SELECT COUNT(*) as count FROM skills WHERE source = ?')
       .get('openai') as { count: number };
     expect(remainingSkillCount.count).toBe(1);
+
+    const deletedEnablementCount = sqlite
+      .prepare('SELECT COUNT(*) as count FROM source_project_enabled WHERE source_name = ?')
+      .get('jeffallan') as { count: number };
+    expect(deletedEnablementCount.count).toBe(0);
+
+    const remainingEnablementCount = sqlite
+      .prepare('SELECT COUNT(*) as count FROM source_project_enabled WHERE source_name = ?')
+      .get('openai') as { count: number };
+    expect(remainingEnablementCount.count).toBe(1);
   });
 });

@@ -1,7 +1,11 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+const mockSetSelectedWorkspaceId = jest.fn();
+let mockProjectSelection: Record<string, unknown> = {};
 
 // Polyfill window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
@@ -61,6 +65,10 @@ jest.mock('./terminal-dock', () => ({
 
 jest.mock('../hooks/useProjectSelection', () => ({
   useSelectedProject: () => ({
+    workspaces: [],
+    selectedWorkspaceId: undefined,
+    setSelectedWorkspaceId: mockSetSelectedWorkspaceId,
+    isWorkspaceSelectionLocked: false,
     selectedProjectId: null,
     selectedProject: null,
     projects: [],
@@ -68,6 +76,7 @@ jest.mock('../hooks/useProjectSelection', () => ({
     projectsError: null,
     refetchProjects: jest.fn(),
     setSelectedProjectId: jest.fn(),
+    ...mockProjectSelection,
   }),
 }));
 
@@ -145,6 +154,11 @@ function renderLayout(initialPath: string) {
 }
 
 describe('Layout nav-item active state', () => {
+  beforeEach(() => {
+    mockProjectSelection = {};
+    mockSetSelectedWorkspaceId.mockReset();
+  });
+
   afterEach(() => {
     jest.clearAllMocks();
   });
@@ -225,6 +239,52 @@ describe('Layout nav-item active state', () => {
       const projectsLink = screen.getByRole('link', { name: 'Projects' });
       expect(projectsLink).toHaveAttribute('aria-current', 'page');
     });
+  });
+});
+
+describe('Layout workspace switcher', () => {
+  beforeEach(() => {
+    mockSetSelectedWorkspaceId.mockReset();
+    mockProjectSelection = {
+      workspaces: [
+        {
+          id: 'workspace-alpha',
+          name: 'Alpha',
+          isDefault: true,
+          position: 0,
+          projectCount: 1,
+          deviceGrantCount: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          id: 'workspace-archive',
+          name: 'Archive',
+          isDefault: false,
+          position: 1,
+          projectCount: 1,
+          deviceGrantCount: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      selectedWorkspaceId: 'workspace-alpha',
+    };
+  });
+
+  afterEach(() => {
+    mockProjectSelection = {};
+    jest.clearAllMocks();
+  });
+
+  it('selects a workspace while preserving the current route', async () => {
+    const user = userEvent.setup();
+    renderLayout('/board');
+
+    await user.click(screen.getByRole('button', { name: 'Switch to workspace Archive' }));
+
+    expect(mockSetSelectedWorkspaceId).toHaveBeenCalledWith('workspace-archive');
+    expect(screen.getByRole('link', { name: /board/i })).toHaveAttribute('aria-current', 'page');
   });
 });
 

@@ -7,7 +7,7 @@ import {
   MAX_TERMINAL_SEED_MAX_BYTES,
 } from '../../settings/services/settings.service';
 import { TerminalIOService } from './terminal-io/terminal-io.service';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import {
   createEnvelope,
   TerminalSeedPayload,
@@ -65,8 +65,7 @@ export class TerminalSeedService {
     private readonly terminalSessionRegistry: TerminalSessionRegistry,
     @Inject(forwardRef(() => TerminalIOService))
     private readonly terminalIO: TerminalIOService,
-    @Inject(forwardRef(() => SessionsService))
-    private readonly sessionsService: SessionsService,
+    private readonly sessionTerminalRuntime: SessionTerminalRuntimeService,
   ) {}
 
   /**
@@ -327,15 +326,15 @@ export class TerminalSeedService {
     let wasTruncated = false;
     let recoveryWatermark: TerminalRecoverySeedWatermark | undefined;
     let emptyCompletionSequence: number | undefined;
+    const runtimeDescriptor = this.sessionTerminalRuntime.getDescriptor(sessionId);
 
     try {
-      const session = this.sessionsService.getSession(sessionId);
-      if (session?.tmuxSessionId) {
+      if (runtimeDescriptor.tmuxSessionName) {
         const scrollbackLines = this.settingsService.getScrollbackLines();
         logger.info(
           {
             sessionId,
-            tmuxSessionId: session.tmuxSessionId,
+            tmuxSessionId: runtimeDescriptor.tmuxSessionName,
             scrollbackLines,
             source: 'tmux-ansi',
           },
@@ -343,7 +342,11 @@ export class TerminalSeedService {
         );
 
         // Use cached capture if available (2s TTL)
-        snapshot = await this.getCachedCapture(sessionId, session.tmuxSessionId, scrollbackLines);
+        snapshot = await this.getCachedCapture(
+          sessionId,
+          runtimeDescriptor.tmuxSessionName,
+          scrollbackLines,
+        );
         captureSucceeded = snapshot !== null;
         // Sample the sequence AFTER capture completes: frames stamped while capture-pane
         // ran are already inside the snapshot, so the baseline must sit at or below them.
@@ -367,7 +370,7 @@ export class TerminalSeedService {
           wasTruncated = truncateResult.wasTruncated;
 
           const cursorPos = await this.terminalIO.getCursorPosition({
-            name: session.tmuxSessionId,
+            name: runtimeDescriptor.tmuxSessionName,
           });
           if (cursorPos) {
             tmuxCursorX = cursorPos.x;
@@ -397,7 +400,7 @@ export class TerminalSeedService {
     // Get actual terminal dimensions to include in seed
     let actualCols: number | undefined;
     let actualRows: number | undefined;
-    let usesAlternateScreen = false;
+    const usesAlternateScreen = runtimeDescriptor.usesAlternateScreen;
     try {
       const dims = this.terminalSessionRegistry.get(sessionId)?.getDimensions() ?? null;
       if (dims) {
@@ -407,12 +410,6 @@ export class TerminalSeedService {
     } catch (error) {
       logger.warn({ sessionId, error }, 'Failed to get terminal dimensions for seed');
     }
-    try {
-      usesAlternateScreen = this.sessionsService.usesAlternateScreenFor(sessionId);
-    } catch (error) {
-      logger.warn({ sessionId, error }, 'Failed to resolve terminal output behavior for seed');
-    }
-
     // Successful empty capture, no recovery: complete the client's seed attempt without
     // writing. Recovery instead emits an empty `seed_ansi` (below) to clear stale output.
     if ((!snapshot || snapshot.length === 0) && !recovery) {

@@ -45,6 +45,7 @@ import { ProjectRegistryImportService } from '../services/project-registry-impor
 import { ProjectTemplateUpgradeService } from '../services/project-template-upgrade.service';
 
 const logger = createLogger('ProjectsController');
+const WorkspaceIdSchema = z.string().uuid();
 
 /** Template metadata included in project responses */
 interface ProjectTemplateMetadata {
@@ -66,6 +67,7 @@ const CreateProjectSchema = z.object({
   description: z.string().nullable().optional(),
   rootPath: z.string().min(1),
   isTemplate: z.boolean().optional(),
+  workspaceId: WorkspaceIdSchema.optional(),
 });
 
 const UpdateProjectSchema = CreateProjectSchema.partial();
@@ -86,6 +88,7 @@ const CreateProjectFromRegistryRequestSchema = z.object({
   projectName: z.string().min(1, 'Project name is required'),
   projectDescription: z.preprocess(normalizeOptionalStringField, z.string().min(1).optional()),
   rootPath: z.string().min(1, 'Root path is required'),
+  workspaceId: WorkspaceIdSchema.optional(),
 });
 
 /**
@@ -245,8 +248,14 @@ export class ProjectsController {
   }
 
   @Get()
-  async listProjects(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+  async listProjects(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('workspaceId') workspaceId?: string,
+  ) {
     logger.info('GET /api/projects');
+    const resolvedWorkspaceId =
+      workspaceId === undefined ? undefined : WorkspaceIdSchema.parse(workspaceId);
     const scopedProjectId = getContainerScopedProjectId();
     let projects: Project[];
     let total: number;
@@ -263,7 +272,10 @@ export class ProjectsController {
         }
       }
 
-      projects = scopedProject ? [scopedProject] : [];
+      projects =
+        scopedProject && (!resolvedWorkspaceId || scopedProject.workspaceId === resolvedWorkspaceId)
+          ? [scopedProject]
+          : [];
       total = projects.length;
       resolvedLimit = 1;
       resolvedOffset = 0;
@@ -271,6 +283,7 @@ export class ProjectsController {
       const result = await this.storage.listProjects({
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
+        ...(resolvedWorkspaceId ? { workspaceId: resolvedWorkspaceId } : {}),
       });
       projects = result.items;
       total = result.total;
@@ -422,6 +435,7 @@ export class ProjectsController {
       projectName: parsed.projectName,
       ...(projectDescription ? { projectDescription } : {}),
       rootPath: parsed.rootPath,
+      ...(parsed.workspaceId ? { workspaceId: parsed.workspaceId } : {}),
     });
   }
 
@@ -607,6 +621,7 @@ export class ProjectsController {
         description: z.string().nullable().optional(),
         rootPath: z.string().min(1, 'Root path is required'),
         projectId: z.string().uuid().optional(),
+        workspaceId: WorkspaceIdSchema.optional(),
         slug: z.preprocess(
           normalizeOptionalStringField,
           z.string().min(1).regex(SLUG_PATTERN, VALIDATION_MESSAGES.INVALID_SLUG).optional(),
@@ -668,6 +683,7 @@ export class ProjectsController {
           description: parsed.description,
           rootPath: parsed.rootPath,
           ...(parsed.projectId ? { projectId: parsed.projectId } : {}),
+          ...(parsed.workspaceId ? { workspaceId: parsed.workspaceId } : {}),
           templatePath: parsed.templatePath,
           familyProviderMappings: normalizeFamilyProviderMappings(parsed.familyProviderMappings),
           presetName: parsed.presetName,
@@ -684,6 +700,7 @@ export class ProjectsController {
           description: parsed.description,
           rootPath: parsed.rootPath,
           ...(parsed.projectId ? { projectId: parsed.projectId } : {}),
+          ...(parsed.workspaceId ? { workspaceId: parsed.workspaceId } : {}),
           slug: parsed.slug ?? parsed.templateId!,
           version: parsed.version ?? null,
           familyProviderMappings: normalizeFamilyProviderMappings(parsed.familyProviderMappings),

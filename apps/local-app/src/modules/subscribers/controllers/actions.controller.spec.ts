@@ -15,6 +15,19 @@ describe('ActionsController', () => {
   });
 
   describe('listActions', () => {
+    it('should expose Delete Agent metadata through the actions API', () => {
+      const result = controller.listActions();
+      const deleteAgent = result.find((action) => action.type === 'delete_agent');
+
+      expect(deleteAgent).toMatchObject({
+        name: 'Delete Agent',
+        category: 'session',
+        supportsRetry: false,
+      });
+      expect(deleteAgent?.inputs.map((input) => input.name)).toEqual(['agentName', 'familySlug']);
+      expect(deleteAgent).not.toHaveProperty('execute');
+    });
+
     it('should return all actions without execute function', () => {
       const mockActions = [
         {

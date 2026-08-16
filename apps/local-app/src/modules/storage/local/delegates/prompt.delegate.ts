@@ -10,7 +10,8 @@ import type {
   Tag,
   UpdatePrompt,
 } from '../../models/domain.models';
-import { NotFoundError, OptimisticLockError } from '../../../../common/errors/error-types';
+import { and as andSync, eq as eqSync, isNull as isNullSync, or as orSync } from 'drizzle-orm';
+import { NotFoundError } from '../../../../common/errors/error-types';
 import { createLogger } from '../../../../common/logging/logger';
 import {
   canonicalizePromptTypeTags,
@@ -18,14 +19,18 @@ import {
   PROMPT_TYPE,
 } from '../../../../common/prompt-type';
 import { getRawSqliteClient } from '../../db/sqlite-raw';
+import {
+  promptTags as promptTagsTable,
+  prompts as promptsTable,
+  tags as tagsTable,
+} from '../../db/schema';
 import { extractPromptId, extractPromptIdFromMap } from '../helpers/storage-helpers';
 import { BaseStorageDelegate, type StorageDelegateContext } from './base-storage.delegate';
 
 const logger = createLogger('PromptStorageDelegate');
 
 export interface PromptStorageDelegateDependencies {
-  createTag: (data: CreateTag) => Promise<Tag>;
-  getPrompt: (id: string) => Promise<Prompt>;
+  createTag: (data: CreateTag) => Tag;
 }
 
 export class PromptStorageDelegate extends BaseStorageDelegate {
@@ -105,22 +110,29 @@ export class PromptStorageDelegate extends BaseStorageDelegate {
   }
 
   async getPrompt(id: string): Promise<Prompt> {
-    const { prompts, promptTags, tags } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
+    return this.getPromptSync(id);
+  }
 
-    const result = await this.db.select().from(prompts).where(eq(prompts.id, id)).limit(1);
-    if (!result[0]) {
+  private getPromptSync(id: string): Prompt {
+    const row = this.db
+      .select()
+      .from(promptsTable)
+      .where(eqSync(promptsTable.id, id))
+      .limit(1)
+      .get();
+    if (!row) {
       throw new NotFoundError('Prompt', id);
     }
 
-    const promptTagsResult = await this.db
-      .select({ tag: tags })
-      .from(promptTags)
-      .innerJoin(tags, eq(promptTags.tagId, tags.id))
-      .where(eq(promptTags.promptId, id));
+    const promptTagsResult = this.db
+      .select({ tag: tagsTable })
+      .from(promptTagsTable)
+      .innerJoin(tagsTable, eqSync(promptTagsTable.tagId, tagsTable.id))
+      .where(eqSync(promptTagsTable.promptId, id))
+      .all();
 
     return {
-      ...result[0],
+      ...row,
       tags: promptTagsResult.map((pt) => pt.tag.name),
     } as Prompt;
   }
@@ -219,88 +231,78 @@ export class PromptStorageDelegate extends BaseStorageDelegate {
   }
 
   async updatePrompt(id: string, data: UpdatePrompt, expectedVersion: number): Promise<Prompt> {
-    const { prompts, promptTags, tags } = await import('../../db/schema');
-    const { eq } = await import('drizzle-orm');
-    const now = new Date().toISOString();
-
     logger.info({ id, data, expectedVersion }, 'updatePrompt called with data');
-
-    const current = await this.dependencies.getPrompt(id);
-    if (current.version !== expectedVersion) {
-      throw new OptimisticLockError('Prompt', id, {
-        expectedVersion,
-        actualVersion: current.version,
-      });
-    }
-
-    // Separate tags from other data
-    const { tags: requestedTags, ...updateData } = data;
-    const newTags =
-      requestedTags === undefined
-        ? undefined
-        : canonicalizePromptTypeTags(
-            requestedTags,
-            getPromptType(requestedTags, getPromptType(current.tags, PROMPT_TYPE.Custom)),
-          );
-
-    logger.info({ newTags, updateData }, 'Separated tags from updateData');
-
-    // Update prompt fields (excluding tags)
-    await this.db
-      .update(prompts)
-      .set({ ...updateData, version: expectedVersion + 1, updatedAt: now })
-      .where(eq(prompts.id, id));
-
-    logger.info('Updated prompt fields in database');
-
-    // Update tags if provided
-    if (newTags !== undefined) {
-      logger.info({ newTags, newTagsLength: newTags.length }, 'Updating tags');
-
-      // Delete existing tags
-      await this.db.delete(promptTags).where(eq(promptTags.promptId, id));
-      logger.info('Deleted existing prompt tags');
-
-      // Add new tags
-      if (newTags.length > 0) {
-        for (const tagName of newTags) {
-          logger.info({ tagName }, 'Processing tag');
-          const { and, or, isNull } = await import('drizzle-orm');
-          let tag = await this.db
-            .select()
-            .from(tags)
-            .where(
-              and(
-                eq(tags.name, tagName),
-                or(eq(tags.projectId, current.projectId || ''), isNull(tags.projectId)),
-              ),
-            )
-            .limit(1);
-
-          if (!tag[0]) {
-            logger.info({ tagName }, 'Tag not found, creating new tag');
-            const newTag = await this.dependencies.createTag({
-              projectId: current.projectId,
-              name: tagName,
-            });
-            tag = [newTag];
-          } else {
-            logger.info({ tagName, tagId: tag[0].id }, 'Found existing tag');
-          }
-
-          await this.db.insert(promptTags).values({
-            promptId: id,
-            tagId: tag[0].id,
-            createdAt: now,
-          });
-          logger.info({ tagName, tagId: tag[0].id }, 'Inserted prompt tag');
+    const result = await this.versionedMutationExecutor.execute({
+      resource: 'Prompt',
+      id,
+      expectedVersion,
+      loadCurrent: () => this.getPromptSync(id),
+      versionOf: (current) => current.version,
+      prepare: ({ current }) => {
+        const { tags: requestedTags, ...updateData } = data;
+        const newTags =
+          requestedTags === undefined
+            ? undefined
+            : canonicalizePromptTypeTags(
+                requestedTags,
+                getPromptType(requestedTags, getPromptType(current.tags, PROMPT_TYPE.Custom)),
+              );
+        return {
+          kind: 'write',
+          state: { updateData, newTags, now: new Date().toISOString() },
+        };
+      },
+      write: (context, state) =>
+        this.db
+          .update(promptsTable)
+          .set({
+            ...state.updateData,
+            version: context.nextVersion,
+            updatedAt: state.now,
+          })
+          .where(
+            andSync(
+              eqSync(promptsTable.id, id),
+              eqSync(promptsTable.version, context.actualVersion),
+            ),
+          )
+          .run().changes,
+      afterWrite: ({ current }, state) => {
+        if (state.newTags !== undefined) {
+          this.setPromptTagsSync(id, state.newTags, current.projectId, state.now);
         }
-      }
-    } else {
-      logger.info('No tags provided in update data');
-    }
+      },
+      loadResult: () => this.getPromptSync(id),
+    });
 
-    return this.dependencies.getPrompt(id);
+    logger.info({ promptId: id }, 'Updated prompt');
+    return result;
+  }
+
+  private setPromptTagsSync(
+    promptId: string,
+    tagNames: string[],
+    projectId: string | null,
+    now: string,
+  ): void {
+    this.db.delete(promptTagsTable).where(eqSync(promptTagsTable.promptId, promptId)).run();
+
+    for (const tagName of tagNames) {
+      const existing = this.db
+        .select()
+        .from(tagsTable)
+        .where(
+          andSync(
+            eqSync(tagsTable.name, tagName),
+            orSync(eqSync(tagsTable.projectId, projectId || ''), isNullSync(tagsTable.projectId)),
+          ),
+        )
+        .limit(1)
+        .get();
+      const tag = existing ?? this.dependencies.createTag({ projectId, name: tagName });
+
+      this.db.insert(promptTagsTable).values({ promptId, tagId: tag.id, createdAt: now }).run();
+    }
   }
 
   async deletePrompt(id: string): Promise<void> {
@@ -369,7 +371,7 @@ export class PromptStorageDelegate extends BaseStorageDelegate {
     }
 
     try {
-      return await this.dependencies.getPrompt(promptId);
+      return await this.getPrompt(promptId);
     } catch (error) {
       if (error instanceof NotFoundError) {
         logger.warn({ promptId }, 'Initial session prompt not found');

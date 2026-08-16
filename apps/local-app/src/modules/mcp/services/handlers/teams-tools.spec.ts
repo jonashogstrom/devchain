@@ -163,6 +163,21 @@ describe('handleTeamsList', () => {
     expect(team.memberCount).toBe(2);
   });
 
+  it('returns session resolution failures before listing teams', async () => {
+    const ctx = makeCtx({
+      resolveSessionContext: jest.fn().mockResolvedValue({
+        success: false,
+        error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' },
+      }),
+    });
+
+    await expect(handleTeamsList(ctx, { sessionId: 'missing' })).resolves.toMatchObject({
+      success: false,
+      error: { code: 'SESSION_NOT_FOUND' },
+    });
+    expect((ctx.teamsService as { listTeams: jest.Mock }).listTeams).not.toHaveBeenCalled();
+  });
+
   it('passes q parameter to service for server-side filtering', async () => {
     const ctx = makeCtx();
     await handleTeamsList(ctx, { sessionId: 'abcd1234', q: 'backend' });

@@ -54,6 +54,10 @@ describe('E2eeTrustService (Task:8 — safety-number + TOFU + verify)', () => {
       CREATE TABLE IF NOT EXISTS settings (
         id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE paired_device_workspace_grants (
+        device_kid TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        PRIMARY KEY (device_kid, workspace_id)
       )
     `);
     const db = drizzle(sqlite);
@@ -131,6 +135,64 @@ describe('E2eeTrustService (Task:8 — safety-number + TOFU + verify)', () => {
     it('returns an empty list when nothing is paired', () => {
       expect(service.listDevices()).toEqual([]);
     });
+
+    it('returns a local alias but never exposes key or install metadata', () => {
+      deviceStore.add({
+        kid: deviceKid,
+        publicKeyB64: devicePubB64,
+        installId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      });
+      service.setLocalAlias(deviceKid, 'My phone');
+
+      const summary = service.listDevices()[0];
+      expect(summary).toMatchObject({ kid: deviceKid, localAlias: 'My phone' });
+      expect(summary).not.toHaveProperty('publicKeyB64');
+      expect(summary).not.toHaveProperty('installId');
+    });
+  });
+
+  describe('resolveEffectiveDeviceName', () => {
+    it('prefers the PC-local alias over the device-reported label', () => {
+      deviceStore.add({ kid: deviceKid, publicKeyB64: devicePubB64, label: 'Pixel' });
+      service.setLocalAlias(deviceKid, 'Desk Phone');
+
+      expect(service.resolveEffectiveDeviceName(deviceKid)).toBe('Desk Phone');
+    });
+
+    it.each(['unverified', 'verified'] as const)(
+      'uses reported labels for %s devices without treating trust as an attribution gate',
+      (trust) => {
+        deviceStore.add({ kid: deviceKid, publicKeyB64: devicePubB64, label: 'Pixel', trust });
+
+        expect(service.resolveEffectiveDeviceName(deviceKid)).toBe('Pixel');
+      },
+    );
+
+    it('uses the generic device name for known unnamed devices and omits unknown kids', () => {
+      deviceStore.add({ kid: deviceKid, publicKeyB64: devicePubB64 });
+
+      expect(service.resolveEffectiveDeviceName(deviceKid)).toBe('Mobile device');
+      expect(service.resolveEffectiveDeviceName('unknown-kid')).toBeUndefined();
+    });
+  });
+
+  describe('setLocalAlias', () => {
+    it('sets and clears an alias while returning a sanitized summary', () => {
+      deviceStore.add({ kid: deviceKid, publicKeyB64: devicePubB64, label: 'Pixel' });
+
+      expect(service.setLocalAlias(deviceKid, 'Personal')).toMatchObject({
+        kid: deviceKid,
+        label: 'Pixel',
+        localAlias: 'Personal',
+      });
+      const cleared = service.setLocalAlias(deviceKid, null);
+      expect(cleared).not.toHaveProperty('localAlias');
+      expect(cleared).not.toHaveProperty('publicKeyB64');
+    });
+
+    it('throws NotFound for an unknown kid', () => {
+      expect(() => service.setLocalAlias('missing', 'Alias')).toThrow(NotFoundError);
+    });
   });
 
   describe('revokeDevice', () => {
@@ -173,6 +235,23 @@ describe('E2eeTrustService (Task:8 — safety-number + TOFU + verify)', () => {
       const result = service.adoptPeerKeyTofu({ kid: deviceKid, publicKeyB64: devicePubB64 });
       expect(result.trust).toBe('unverified');
       expect(deviceStore.get(deviceKid)?.adoptedVia).toBe('email-tofu');
+    });
+
+    it('trims a reported label and rejects labels over 120 characters', () => {
+      service.adoptPeerKeyTofu({
+        kid: deviceKid,
+        publicKeyB64: devicePubB64,
+        label: '  Pixel  ',
+      });
+      expect(deviceStore.get(deviceKid)?.label).toBe('Pixel');
+
+      expect(() =>
+        service.adoptPeerKeyTofu({
+          kid: deviceKid,
+          publicKeyB64: devicePubB64,
+          label: 'x'.repeat(121),
+        }),
+      ).toThrow(ValidationError);
     });
 
     it('rejects a non-32-byte key', () => {

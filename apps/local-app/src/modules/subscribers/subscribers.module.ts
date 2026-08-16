@@ -9,6 +9,7 @@ import { AgentMessageDeliveryModule } from '../agent-message-delivery/agent-mess
 import { SubscribersService } from './services/subscribers.service';
 import { SubscriberExecutorService } from './services/subscriber-executor.service';
 import { AutomationSchedulerService } from './services/automation-scheduler.service';
+import { TeamsModule } from '../teams/teams.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { AutomationSchedulerService } from './services/automation-scheduler.serv
     TerminalDeliveryModule,
     EventsCoreModule,
     AgentMessageDeliveryModule,
+    TeamsModule,
   ],
   controllers: [SubscribersController, ActionsController],
   providers: [SubscribersService, SubscriberExecutorService, AutomationSchedulerService],

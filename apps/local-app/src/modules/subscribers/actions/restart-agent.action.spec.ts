@@ -63,6 +63,7 @@ describe('RestartAgentAction', () => {
       sessionCoordinator: mockSessionCoordinator as unknown as ActionContext['sessionCoordinator'],
       amd: {} as ActionContext['amd'],
       storage: mockStorage as unknown as ActionContext['storage'],
+      teamsService: {} as ActionContext['teamsService'],
       sessionId: 'session-123',
       agentId: 'agent-456',
       projectId: 'project-789',

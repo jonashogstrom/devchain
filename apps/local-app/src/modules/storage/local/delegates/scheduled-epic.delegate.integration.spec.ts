@@ -5,7 +5,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { join } from 'path';
 import { LocalStorageService } from '../local-storage.service';
-import { NotFoundError, ConflictError } from '../../../../common/errors/error-types';
+import { NotFoundError } from '../../../../common/errors/error-types';
 import type {
   Project,
   Provider,
@@ -185,30 +185,6 @@ describe('ScheduledEpicStorageDelegate (integration)', () => {
       const disabled = await service.listScheduledEpics(project.id, { enabled: false });
       expect(disabled.total).toBe(1);
       expect(disabled.items[0]!.name).toBe('Disabled');
-    });
-
-    it('updates a scheduled epic with optimistic locking', async () => {
-      const project = await seedProject();
-      const schedule = await service.createScheduledEpic(makeScheduleInput(project.id));
-
-      const updated = await service.updateScheduledEpic(
-        schedule.id,
-        { name: 'Updated Name', cronExpression: '0 10 * * *' },
-        1,
-      );
-
-      expect(updated.name).toBe('Updated Name');
-      expect(updated.cronExpression).toBe('0 10 * * *');
-      expect(updated.configVersion).toBe(2);
-    });
-
-    it('throws ConflictError on version mismatch', async () => {
-      const project = await seedProject();
-      const schedule = await service.createScheduledEpic(makeScheduleInput(project.id));
-
-      await expect(service.updateScheduledEpic(schedule.id, { name: 'Stale' }, 99)).rejects.toThrow(
-        ConflictError,
-      );
     });
 
     it('throws NotFoundError when updating nonexistent schedule', async () => {

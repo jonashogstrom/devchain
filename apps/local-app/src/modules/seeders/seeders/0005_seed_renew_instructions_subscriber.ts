@@ -26,9 +26,9 @@ const RENEW_INSTRUCTIONS_SUBSCRIBER_CONFIG: Omit<CreateSubscriber, 'projectId'> 
         'Your agent name: {{agentName}}\n' +
         '! Important: Re-load your agent profile by using devchain_get_agent_by_name to refresh SOP instructions and continue working !',
     },
-    immediate: {
+    deliveryMode: {
       source: 'custom',
-      customValue: 'false',
+      customValue: 'default',
     },
     submitKey: {
       source: 'custom',

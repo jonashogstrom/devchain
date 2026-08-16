@@ -1,4 +1,5 @@
 import { Injectable, Inject, Optional } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ExportSchema, type ExportData, type ManifestData } from '@devchain/shared';
 import { ValidationError } from '../../../common/errors/error-types';
 import type { PromptTransferPolicy } from '../../../common/prompt-transfer';
@@ -60,6 +61,10 @@ import {
   slugify,
 } from '../helpers/template-file.helpers';
 import type { SetupPreviewInput, SetupPreviewResponse } from '../dtos/setup-preview.dto';
+import {
+  PROJECT_WORKSPACE_CHANGED_EVENT,
+  type ProjectWorkspaceChangedEvent,
+} from '../events/project-workspace-changed.events';
 
 export interface TemplateInfo {
   id: string;
@@ -70,6 +75,7 @@ export interface CreateFromTemplateInput {
   name: string;
   description?: string | null;
   rootPath: string;
+  workspaceId?: string;
   projectId?: string;
   slug?: string;
   version?: string | null;
@@ -130,6 +136,7 @@ export class ProjectsService {
     private readonly unifiedTemplateService: UnifiedTemplateService,
     private readonly teamsService: TeamsService,
     private readonly provisioning: ProjectProviderProvisioningService,
+    @Optional() private readonly eventEmitter?: EventEmitter2,
     @Optional()
     private readonly templatePipeline?: TemplatePipeline,
     @Optional()
@@ -290,6 +297,15 @@ export class ProjectsService {
   ): Promise<{ project: Project; provisioningWarnings: ProvisioningWarning[] }> {
     const before = await this.storage.getProject(id);
     const project = await this.storage.updateProject(id, data);
+
+    if (before && before.workspaceId !== project.workspaceId) {
+      const event: ProjectWorkspaceChangedEvent = {
+        projectId: id,
+        previousWorkspaceId: before.workspaceId,
+        workspaceId: project.workspaceId,
+      };
+      this.eventEmitter?.emit(PROJECT_WORKSPACE_CHANGED_EVENT, event);
+    }
 
     let provisioningWarnings: ProvisioningWarning[] = [];
     if (before && before.rootPath !== project.rootPath) {

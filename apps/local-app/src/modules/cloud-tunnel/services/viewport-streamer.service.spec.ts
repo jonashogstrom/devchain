@@ -13,7 +13,9 @@ import type { E2eeEnvelope, TunnelViewportFrame, ViewportScreen } from '@devchai
 
 const SESSION_ID = 'sess-1';
 const PROJECT_ID = 'proj-1';
+const WORKSPACE_ID = 'workspace-1';
 const INSTANCE_ID = 'inst-vp-1';
+const OWNER_KID = 'device-kid';
 
 /** A sentinel sealed-envelope the sealScreen mock wraps the screen in. */
 const sealedEnvelope = (screen: ViewportScreen): E2eeEnvelope & { __screen: ViewportScreen } => ({
@@ -39,6 +41,8 @@ function build(
     canSend?: boolean;
     channelMode?: ViewportChannelMode;
     instanceId?: string | null;
+    multiWorkspaceMode?: boolean;
+    allowedWorkspaceIds?: string[];
   } = {},
 ) {
   const dataListeners: Array<() => void> = [];
@@ -95,11 +99,37 @@ function build(
     getInstanceId: jest.fn(() => (opts.instanceId === undefined ? INSTANCE_ID : opts.instanceId)),
   } as unknown as ViewportFrameSink;
 
+  const storage = {
+    getProject: jest.fn().mockResolvedValue({ id: PROJECT_ID, workspaceId: WORKSPACE_ID }),
+  };
+  const deviceAccess = {
+    getAccess: jest.fn((kid: string) => ({
+      kid,
+      explicit: true,
+      workspaceIds: opts.allowedWorkspaceIds ?? [WORKSPACE_ID],
+    })),
+  };
+  let modeCleanup: (() => void | Promise<void>) | null = null;
+  const modeSnapshot = {
+    multiWorkspaceMode: opts.multiWorkspaceMode ?? false,
+    failClosedPending: false,
+  };
+  const workspaceMode = {
+    getSnapshot: jest.fn(async () => ({ ...modeSnapshot })),
+    registerCleanupHook: jest.fn((_name: string, hook: () => void | Promise<void>) => {
+      modeCleanup = hook;
+      return jest.fn();
+    }),
+  };
+
   const service = new ViewportStreamerService(
     activeSessions,
     terminalViewport,
     sink,
     viewportCrypto,
+    storage as never,
+    deviceAccess as never,
+    workspaceMode as never,
   );
   service.onModuleInit();
 
@@ -112,9 +142,13 @@ function build(
     sealScreen,
     capture,
     detachData,
+    storage,
+    deviceAccess,
+    modeSnapshot,
     sent,
     fireData: () => dataListeners.forEach((l) => l()),
     fireReady: () => readyListeners.forEach((l) => l()),
+    runModeCleanup: async () => modeCleanup?.(),
   };
 }
 
@@ -193,6 +227,7 @@ describe('ViewportStreamerService', () => {
       const result = await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
 
       expect(result).toEqual({ subscriptionId: 'vp-1' });
+      expect(h.service.resolveSubscriptionProjectId(result.subscriptionId)).toBe(PROJECT_ID);
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({
         type: 'viewport',
@@ -299,6 +334,42 @@ describe('ViewportStreamerService', () => {
       expect(h.service.unsubscribe({ subscriptionId: 'nope' })).toEqual({ ok: false });
     });
 
+    it('makes unsubscribe by another kid a non-enumerating no-op', async () => {
+      const h = build({ channelMode: 'encrypted' });
+      h.capture.mockResolvedValueOnce(SCREEN_A);
+      const { subscriptionId } = await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+
+      expect(h.service.unsubscribe({ subscriptionId }, { senderKid: 'other-kid' })).toEqual({
+        ok: false,
+      });
+      expect(h.detachData).not.toHaveBeenCalled();
+      expect(h.service.unsubscribe({ subscriptionId }, { senderKid: OWNER_KID })).toEqual({
+        ok: true,
+      });
+    });
+
+    it('keeps same-session leases independently bound across two-kid reconnects', async () => {
+      const h = build({ channelMode: 'encrypted' });
+      h.capture.mockResolvedValue(SCREEN_A);
+      const first = await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: 'kid-one' },
+      );
+      const second = await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: 'kid-two' },
+      );
+
+      expect(h.viewportCrypto.resolveViewportChannel).toHaveBeenCalledWith(INSTANCE_ID, 'kid-one');
+      expect(h.viewportCrypto.resolveViewportChannel).toHaveBeenCalledWith(INSTANCE_ID, 'kid-two');
+      expect(h.service.unsubscribe(first, { senderKid: 'kid-two' })).toEqual({ ok: false });
+      expect(h.service.unsubscribe(second, { senderKid: 'kid-two' })).toEqual({ ok: true });
+      expect(h.service.unsubscribe(first, { senderKid: 'kid-one' })).toEqual({ ok: true });
+    });
+
     it('tears down a subscription when the session ends mid-stream', async () => {
       const h = build();
       h.capture.mockResolvedValueOnce(SCREEN_A);
@@ -344,7 +415,10 @@ describe('ViewportStreamerService', () => {
       const h = build({ channelMode: 'encrypted' });
       h.capture.mockResolvedValueOnce(SCREEN_A);
 
-      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
 
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({ type: 'viewport', v: 1, seq: 0 });
@@ -359,7 +433,10 @@ describe('ViewportStreamerService', () => {
     it('sends a fresh `enc-full` (NOT a diff) on a changed screen — full-frame-only', async () => {
       const h = build({ channelMode: 'encrypted' });
       h.capture.mockResolvedValueOnce(SCREEN_A);
-      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
 
       h.capture.mockResolvedValueOnce({
         lines: ['row-0', 'CHANGED', 'row-2'],
@@ -378,7 +455,10 @@ describe('ViewportStreamerService', () => {
     it('still skips an unchanged screen when encrypted (no seq bump, no re-seal)', async () => {
       const h = build({ channelMode: 'encrypted' });
       h.capture.mockResolvedValueOnce(SCREEN_A);
-      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
       h.sealScreen.mockClear();
 
       h.capture.mockResolvedValueOnce(SCREEN_A); // identical
@@ -393,11 +473,122 @@ describe('ViewportStreamerService', () => {
       const h = build({ channelMode: 'blocked' });
       h.capture.mockResolvedValueOnce(SCREEN_A);
 
-      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+      await expect(
+        h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID }),
+      ).rejects.toMatchObject({ code: 'VIEWPORT_E2EE_UNAVAILABLE' });
 
       // Terminal content must never ship plaintext when E2EE is required.
       expect(h.sink.sendViewport).not.toHaveBeenCalled();
       expect(h.sent).toHaveLength(0);
+    });
+
+    it('requires a sender kid before subscribing in multi-workspace mode', async () => {
+      const h = build({ multiWorkspaceMode: true });
+      await expect(
+        h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID }),
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({ code: 'WORKSPACE_DEVICE_PAIRING_REQUIRED' }),
+      });
+      expect(h.terminalViewport.capture).not.toHaveBeenCalled();
+    });
+
+    it('tears down an ownerless lease before workspace-mode prepare can acknowledge', async () => {
+      const h = build();
+      h.capture.mockResolvedValueOnce(SCREEN_A);
+      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+
+      h.modeSnapshot.failClosedPending = true;
+      await h.runModeCleanup();
+      expect(h.detachData).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks the current project workspace before a later emission', async () => {
+      const h = build({ channelMode: 'encrypted' });
+      h.capture.mockResolvedValueOnce(SCREEN_A);
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+
+      h.storage.getProject.mockResolvedValue({ id: PROJECT_ID, workspaceId: 'moved-workspace' });
+      h.capture.mockResolvedValueOnce({ ...SCREEN_A, lines: ['changed'] });
+      h.fireData();
+      await jest.advanceTimersByTimeAsync(400);
+
+      expect(h.sent).toHaveLength(1);
+      expect(h.detachData).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks global mode on capture even if the transition cleanup hook did not run', async () => {
+      const h = build();
+      h.capture.mockResolvedValueOnce(SCREEN_A);
+      await h.service.subscribe({ sessionId: SESSION_ID, projectId: PROJECT_ID });
+
+      h.modeSnapshot.multiWorkspaceMode = true;
+      h.capture.mockResolvedValueOnce({ ...SCREEN_A, lines: ['changed'] });
+      h.fireData();
+      await jest.advanceTimersByTimeAsync(400);
+
+      expect(h.sent).toHaveLength(1);
+      expect(h.detachData).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks the exact owner grant before every later emission', async () => {
+      const allowedWorkspaceIds = [WORKSPACE_ID];
+      const h = build({ channelMode: 'encrypted', allowedWorkspaceIds });
+      h.capture.mockResolvedValueOnce(SCREEN_A);
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+
+      allowedWorkspaceIds.splice(0);
+      h.capture.mockResolvedValueOnce({ ...SCREEN_A, lines: ['changed'] });
+      h.fireData();
+      await jest.advanceTimersByTimeAsync(400);
+
+      expect(h.sent).toHaveLength(1);
+      expect(h.detachData).toHaveBeenCalledTimes(1);
+    });
+
+    it('immediately ends idle leases on grant removal, revoke, and project move events', async () => {
+      const h = build({ channelMode: 'encrypted' });
+      h.capture.mockResolvedValue(SCREEN_A);
+      await h.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+      h.service.handleDeviceAccessRevoked({
+        deviceKid: OWNER_KID,
+        reason: 'workspace-access-updated',
+        workspaceIds: [WORKSPACE_ID],
+      });
+      expect(h.detachData).toHaveBeenCalledTimes(1);
+
+      const h2 = build({ channelMode: 'encrypted' });
+      h2.capture.mockResolvedValue(SCREEN_A);
+      await h2.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+      h2.service.handleProjectWorkspaceChanged({
+        projectId: PROJECT_ID,
+        previousWorkspaceId: WORKSPACE_ID,
+        workspaceId: 'moved-workspace',
+      });
+      expect(h2.detachData).toHaveBeenCalledTimes(1);
+
+      const h3 = build({ channelMode: 'encrypted' });
+      h3.capture.mockResolvedValue(SCREEN_A);
+      await h3.service.subscribe(
+        { sessionId: SESSION_ID, projectId: PROJECT_ID },
+        { senderKid: OWNER_KID },
+      );
+      h3.service.handleDeviceAccessRevoked({
+        deviceKid: OWNER_KID,
+        reason: 'device-revoked',
+      });
+      expect(h3.detachData).toHaveBeenCalledTimes(1);
     });
 
     it('streams plaintext full/diff (back-compat) when no peer is paired', async () => {

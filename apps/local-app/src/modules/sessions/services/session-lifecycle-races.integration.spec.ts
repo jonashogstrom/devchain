@@ -231,7 +231,21 @@ describe('session lifecycle race serialization', () => {
       cancelScheduledClear: jest.fn().mockReturnValue(null),
       scheduleClear: jest.fn(),
     };
-    const providerPluginPolicy = { resolveAll: jest.fn().mockResolvedValue([]) };
+    const providerRuntimePreparation = {
+      createPlan: jest.fn().mockImplementation(async (input) => input),
+      materialize: jest.fn().mockImplementation(async (plan) => ({
+        config: {
+          argv:
+            plan.mode === 'restore' ? ['--resume', plan.providerSessionId] : ['--session', 'new'],
+          commandArgs:
+            plan.mode === 'restore' ? ['--resume', plan.providerSessionId] : ['--session', 'new'],
+          env: null,
+          contextWindowOverride: null,
+        },
+        afterCommand: jest.fn().mockResolvedValue(undefined),
+        rollback: jest.fn().mockResolvedValue(undefined),
+      })),
+    };
 
     const launchPipeline = new SessionLaunchPipeline(
       db,
@@ -248,9 +262,8 @@ describe('session lifecycle race serialization', () => {
       eventsService as never,
       teamsStore as never,
       runtimeContextCapture as never,
-      claudeLaunchSettings as never,
       codexPluginProfiles as never,
-      providerPluginPolicy as never,
+      providerRuntimePreparation as never,
     );
     const restorePipeline = new SessionRestorePipeline(
       db,
@@ -262,10 +275,7 @@ describe('session lifecycle race serialization', () => {
       terminalSessionRegistry as never,
       eventsService as never,
       streamService as never,
-      runtimeContextCapture as never,
-      claudeLaunchSettings as never,
-      codexPluginProfiles as never,
-      providerPluginPolicy as never,
+      providerRuntimePreparation as never,
     );
     sessionRuntime = new SessionRuntime(launchPipeline, restorePipeline);
     sessionsService = new SessionsService(

@@ -66,6 +66,12 @@ describe('BoardPage realtime subscription', () => {
   const originalFetch = global.fetch;
 
   beforeEach(() => {
+    Object.keys(handlers).forEach((event) => delete handlers[event]);
+    on.mockClear();
+    off.mockClear();
+    disconnect.mockClear();
+    mockSocket.emit.mockClear();
+
     // Basic fetch stubs for statuses/epics/agents
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

@@ -24,7 +24,7 @@ More worked examples in [`examples/before-after.md`](examples/before-after.md).
 1. Reads the input English text for meaning.
 2. Flags every rule violation sentence-by-sentence: ambiguous word choice, present-perfect/complex tense, passive voice with an unclear actor, multi-instruction sentences, oversized noun clusters, dropped words, sentences over length.
 3. Rewrites each flagged sentence — without dropping any fact, condition, or scope qualifier from the original. If a shorter phrasing would lose required precision, it keeps the longer phrasing and flags the trade-off instead of silently simplifying.
-4. Outputs a before/after table plus a short note on anything deliberately left unsimplified.
+4. Outputs the rewritten text and nothing else — no change table, no rule-by-rule list, no edit summary. The one exception is a trade-off it could not resolve: if a sentence cannot be simplified without the loss of a fact, a condition, or a hedge, it names that sentence in a single line.
 
 It does **not** reproduce ASD's official ~900-word approved dictionary — that is ASD's own free-to-download standard. This skill applies the underlying *principle* (plainest available word, used the same way every time) rather than checking against a fixed word list. For certified STE-compliant documentation, use the real standard.
 

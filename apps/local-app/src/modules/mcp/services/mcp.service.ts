@@ -1,274 +1,25 @@
-import { Injectable, Inject, Optional, forwardRef } from '@nestjs/common';
-import { StorageService, STORAGE_SERVICE } from '../../storage/interfaces/storage.interface';
-import { SessionsService } from '../../sessions/services/sessions.service';
-import {
-  REALTIME_BROADCASTER,
-  type RealtimeBroadcaster,
-} from '../../realtime/ports/realtime-broadcaster.port';
-import { TerminalIOService } from '../../terminal/services/terminal-io/terminal-io.service';
-import { EpicsService } from '../../epics/services/epics.service';
-import { SettingsService } from '../../settings/services/settings.service';
-import { GuestsService } from '../../guests/services/guests.service';
-import { ReviewsService } from '../../reviews/services/reviews.service';
-import { ReviewSuggestionApplier } from '../../reviews/services/review-suggestion-applier.service';
-import { SkillsService } from '../../skills/services/skills.service';
-import { TeamsService } from '../../teams/services/teams.service';
-import { AgentMessageDeliveryService } from '../../agent-message-delivery/agent-message-delivery.service';
+import { Inject, Injectable } from '@nestjs/common';
+import { ZodError } from 'zod';
 import { createLogger } from '../../../common/logging/logger';
+import { STORAGE_SERVICE, type StorageService } from '../../storage/interfaces/storage.interface';
 import type { McpResponse } from '../dtos/mcp.dto';
-import { InstructionsResolver } from './instructions-resolver';
-import type { FeatureFlagConfig } from '../../../common/config/feature-flags';
-import { ZodError, ZodIssue } from 'zod';
-import { buildInlineResolution } from './utils/document-link-resolver';
-import type { McpToolHandler } from './handlers/types';
-import type { ChatToolContext } from './handlers/chat-context';
-import type { EpicToolContext } from './handlers/epic-context';
-import type { ReviewToolContext } from './handlers/review-context';
-import type { TeamsToolContext } from './handlers/teams-context';
-import type { RecordToolContext } from './handlers/record-context';
-import type { DocumentToolContext } from './handlers/document-context';
-import type { PromptToolContext } from './handlers/prompt-context';
-import type { SkillToolContext } from './handlers/skill-context';
-import type { SessionToolContext } from './handlers/session-context';
-import type { AgentToolContext } from './handlers/agent-context';
-import type { ProjectToolContext } from './handlers/project-context';
-import { allBindings, allMetadata, type ToolMetadataEntry } from '../tool-descriptors';
 import { suggestNestedPath } from '../utils/param-suggestion';
-import { SessionContextResolver } from './utils/session-context-resolver';
-import { ResourceResolver } from './utils/resource-resolver';
+import { McpToolBindingRegistry } from './mcp-tool-binding.registry';
 import { redactParams } from './utils/redact';
-import { createNullAdapter } from './handlers/null-adapter';
-import { ProjectCommunicationService } from '../../project-communication/project-communication.service';
+import { ResourceResolver } from './utils/resource-resolver';
 
 const logger = createLogger('McpService');
 
-const CHAT_TOOLS = new Set(['devchain_send_message']);
-
-const PROJECT_TOOLS = new Set(['devchain_projects_list']);
-
-const EPIC_TOOLS = new Set([
-  'devchain_list_epics',
-  'devchain_list_assigned_epics_tasks',
-  'devchain_create_epic',
-  'devchain_get_epic_by_id',
-  'devchain_add_epic_comment',
-  'devchain_update_epic',
-  'devchain_delete_epic',
-]);
-
-const REVIEW_TOOLS = new Set([
-  'devchain_list_reviews',
-  'devchain_get_review',
-  'devchain_get_review_comments',
-  'devchain_reply_comment',
-  'devchain_resolve_comment',
-  'devchain_apply_suggestion',
-]);
-
-const TEAMS_TOOLS = new Set([
-  'devchain_teams_list',
-  'devchain_teams_members_list',
-  'devchain_teams_configs_list',
-  'devchain_teams_create_agent',
-  'devchain_teams_delete_agent',
-  'devchain_team',
-]);
-
-const RECORD_TOOLS = new Set([
-  'devchain_create_record',
-  'devchain_update_record',
-  'devchain_get_record',
-  'devchain_list_records',
-  'devchain_add_tags',
-  'devchain_remove_tags',
-]);
-
-const DOCUMENT_TOOLS = new Set([
-  'devchain_list_documents',
-  'devchain_get_document',
-  'devchain_create_document',
-  'devchain_update_document',
-]);
-
-const PROMPT_TOOLS = new Set(['devchain_list_prompts', 'devchain_get_prompt']);
-
-const SKILL_TOOLS = new Set(['devchain_list_skills', 'devchain_get_skill']);
-
-const SESSION_TOOLS = new Set(['devchain_list_sessions', 'devchain_register_guest']);
-
-const AGENT_TOOLS = new Set([
-  'devchain_list_agents',
-  'devchain_get_agent_by_name',
-  'devchain_list_statuses',
-]);
-
 @Injectable()
 export class McpService {
-  private readonly instructionsResolver: InstructionsResolver;
-  private readonly featureFlags: FeatureFlagConfig;
-  private readonly sessionContextResolver: SessionContextResolver;
   private readonly resourceResolver: ResourceResolver;
-  private readonly toolHandlers: Map<string, McpToolHandler>;
-  private readonly toolMetadata: Map<string, ToolMetadataEntry>;
-  private readonly DEFAULT_INLINE_MAX_BYTES = 64 * 1024;
 
   constructor(
-    @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
-    @Optional()
-    @Inject(forwardRef(() => SessionsService))
-    private readonly sessionsService?: SessionsService,
-    @Optional() @Inject(REALTIME_BROADCASTER) private readonly broadcaster?: RealtimeBroadcaster,
-    @Optional()
-    @Inject(forwardRef(() => EpicsService))
-    private readonly epicsService?: EpicsService,
-    @Optional()
-    @Inject(forwardRef(() => SettingsService))
-    private readonly settingsService?: SettingsService,
-    @Optional()
-    @Inject(forwardRef(() => GuestsService))
-    private readonly guestsService?: GuestsService,
-    @Optional()
-    @Inject(forwardRef(() => SkillsService))
-    private readonly skillsService?: SkillsService,
-    @Optional()
-    @Inject(forwardRef(() => ReviewsService))
-    private readonly reviewsService?: ReviewsService,
-    @Optional()
-    @Inject(forwardRef(() => ReviewSuggestionApplier))
-    private readonly reviewSuggestionApplier?: ReviewSuggestionApplier,
-    @Optional()
-    @Inject(forwardRef(() => TeamsService))
-    private readonly teamsService?: TeamsService,
-    @Optional() private readonly terminalIO?: TerminalIOService,
-    @Optional()
-    @Inject(forwardRef(() => AgentMessageDeliveryService))
-    private readonly agentMessageDelivery?: AgentMessageDeliveryService,
-    @Optional()
-    private readonly projectCommunicationService?: ProjectCommunicationService,
+    @Inject(STORAGE_SERVICE) storage: StorageService,
+    private readonly bindingRegistry: McpToolBindingRegistry,
   ) {
     logger.info('McpService initialized');
-    this.featureFlags = this.storage.getFeatureFlags();
-    this.instructionsResolver = new InstructionsResolver(
-      this.storage,
-      (document, cache, maxDepth, maxBytes) =>
-        buildInlineResolution(this.storage, document, cache, maxDepth, maxBytes),
-    );
-    this.sessionContextResolver = new SessionContextResolver(
-      this.storage,
-      this.sessionsService,
-      this.guestsService,
-      this.terminalIO,
-    );
-    this.resourceResolver = new ResourceResolver(this.storage);
-    this.toolHandlers = new Map<string, McpToolHandler>(allBindings);
-    this.toolMetadata = new Map(allMetadata.map((m) => [m.name, m]));
-  }
-
-  private buildChatToolContext(): ChatToolContext {
-    return {
-      storage: this.storage,
-      teamsService: this.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
-      agentMessageDelivery:
-        this.agentMessageDelivery ??
-        createNullAdapter<AgentMessageDeliveryService>('AgentMessageDeliveryService'),
-      settingsService:
-        this.settingsService ?? createNullAdapter<SettingsService>('SettingsService'),
-      projectCommunicationService:
-        this.projectCommunicationService ??
-        createNullAdapter<ProjectCommunicationService>('ProjectCommunicationService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildProjectToolContext(): ProjectToolContext {
-    return {
-      projectCommunicationService:
-        this.projectCommunicationService ??
-        createNullAdapter<ProjectCommunicationService>('ProjectCommunicationService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildEpicToolContext(): EpicToolContext {
-    return {
-      storage: this.storage,
-      epicsService: this.epicsService ?? createNullAdapter<EpicsService>('EpicsService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildReviewToolContext(): ReviewToolContext {
-    return {
-      storage: this.storage,
-      reviewsService: this.reviewsService ?? createNullAdapter<ReviewsService>('ReviewsService'),
-      reviewSuggestionApplier:
-        this.reviewSuggestionApplier ??
-        createNullAdapter<ReviewSuggestionApplier>('ReviewSuggestionApplier'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildTeamsToolContext(): TeamsToolContext {
-    return {
-      storage: this.storage,
-      teamsService: this.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildRecordToolContext(): RecordToolContext {
-    return {
-      storage: this.storage,
-    };
-  }
-
-  private buildDocumentToolContext(): DocumentToolContext {
-    return {
-      storage: this.storage,
-      defaultInlineMaxBytes: this.DEFAULT_INLINE_MAX_BYTES,
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildPromptToolContext(): PromptToolContext {
-    return {
-      storage: this.storage,
-      teamsService: this.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildSkillToolContext(): SkillToolContext {
-    return {
-      skillsService: this.skillsService ?? createNullAdapter<SkillsService>('SkillsService'),
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
-  }
-
-  private buildSessionToolContext(): SessionToolContext {
-    return {
-      storage: this.storage,
-      sessionsService:
-        this.sessionsService ?? createNullAdapter<SessionsService>('SessionsService'),
-      guestsService: this.guestsService ?? createNullAdapter<GuestsService>('GuestsService'),
-    };
-  }
-
-  private buildAgentToolContext(): AgentToolContext {
-    return {
-      storage: this.storage,
-      sessionsService:
-        this.sessionsService ?? createNullAdapter<SessionsService>('SessionsService'),
-      terminalIO: this.terminalIO ?? createNullAdapter<TerminalIOService>('TerminalIOService'),
-      instructionsResolver:
-        this.instructionsResolver ??
-        (createNullAdapter<InstructionsResolver>(
-          'InstructionsResolver',
-        ) as unknown as InstructionsResolver),
-      teamsService: this.teamsService ?? createNullAdapter<TeamsService>('TeamsService'),
-      defaultInlineMaxBytes: this.DEFAULT_INLINE_MAX_BYTES,
-      resolveSessionContext: (sessionId: string) => this.resolveSessionContext(sessionId),
-    };
+    this.resourceResolver = new ResourceResolver(storage);
   }
 
   async handleToolCall(tool: string, params: unknown): Promise<McpResponse> {
@@ -285,8 +36,8 @@ export class McpService {
         return { success: true, data: { acknowledged: true } };
       }
 
-      const handler = this.toolHandlers.get(normalizedTool);
-      if (!handler) {
+      const binding = this.bindingRegistry.resolve(normalizedTool);
+      if (!binding) {
         logger.warn({ tool: normalizedTool }, 'Unknown MCP tool');
         return {
           success: false,
@@ -297,51 +48,17 @@ export class McpService {
         };
       }
 
-      const metadata = this.toolMetadata.get(normalizedTool);
-      const parsed = metadata?.paramsSchema
-        ? metadata.paramsSchema.parse(normalizedParams)
+      const parsed = binding.paramsSchema
+        ? binding.paramsSchema.parse(normalizedParams)
         : normalizedParams;
-
-      return await handler(
-        CHAT_TOOLS.has(normalizedTool)
-          ? this.buildChatToolContext()
-          : PROJECT_TOOLS.has(normalizedTool)
-            ? this.buildProjectToolContext()
-            : EPIC_TOOLS.has(normalizedTool)
-              ? this.buildEpicToolContext()
-              : REVIEW_TOOLS.has(normalizedTool)
-                ? this.buildReviewToolContext()
-                : TEAMS_TOOLS.has(normalizedTool)
-                  ? this.buildTeamsToolContext()
-                  : RECORD_TOOLS.has(normalizedTool)
-                    ? this.buildRecordToolContext()
-                    : DOCUMENT_TOOLS.has(normalizedTool)
-                      ? this.buildDocumentToolContext()
-                      : PROMPT_TOOLS.has(normalizedTool)
-                        ? this.buildPromptToolContext()
-                        : SKILL_TOOLS.has(normalizedTool)
-                          ? this.buildSkillToolContext()
-                          : SESSION_TOOLS.has(normalizedTool)
-                            ? this.buildSessionToolContext()
-                            : AGENT_TOOLS.has(normalizedTool)
-                              ? this.buildAgentToolContext()
-                              : {
-                                  success: false,
-                                  error: {
-                                    code: 'UNKNOWN_TOOL',
-                                    message: `Unknown tool: ${tool}`,
-                                  },
-                                },
-        parsed,
-      );
+      return await binding.invoke(parsed);
     } catch (error) {
       logger.error({ tool, error }, 'MCP tool call failed');
       if (error instanceof ZodError) {
         const suggestions: string[] = [];
         for (const issue of error.issues) {
           if (issue.code !== 'unrecognized_keys') continue;
-          const unknownKeys = (issue as ZodIssue & { keys: string[] }).keys;
-          for (const key of unknownKeys) {
+          for (const key of issue.keys) {
             const suggestion = suggestNestedPath(key, normalizedTool);
             if (suggestion) suggestions.push(suggestion);
           }
@@ -384,9 +101,5 @@ export class McpService {
         },
       };
     }
-  }
-
-  async resolveSessionContext(sessionId: string): Promise<McpResponse> {
-    return this.sessionContextResolver.resolve(sessionId);
   }
 }

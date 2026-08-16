@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PricingServiceInterface } from './pricing.interface';
 
-// Import bundled pricing data (generated at build time by scripts/fetch-pricing-data.ts)
+// Import the bundled, committed pricing snapshot refreshed by the pricing:update script.
 import * as pricingData from '../data/pricing.json';
 
 const logger = new Logger('PricingService');
@@ -43,8 +43,8 @@ function calculateTieredCost(tokens: number, baseRate: number, tieredRate?: numb
  * PricingService — loads bundled LiteLLM pricing data at construction time
  * and provides O(1) per-model cost calculation.
  *
- * Pricing data is fetched at build time by scripts/fetch-pricing-data.ts
- * and committed as data/pricing.json.
+ * Maintainers refresh pricing data with the pricing:update script and commit it
+ * as data/pricing.json. Normal builds bundle that committed snapshot.
  */
 @Injectable()
 export class PricingService implements PricingServiceInterface {

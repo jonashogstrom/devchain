@@ -13,6 +13,7 @@ import { HooksModule } from '../hooks/hooks.module';
 import { TerminalViewportModule } from '../terminal/terminal-viewport.module';
 import { TerminalKeyInputModule } from '../terminal/terminal-key-input.module';
 import { E2eeModule } from '../e2ee/e2ee.module';
+import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { TunnelKeypairService } from './services/tunnel-keypair.service';
 import { TunnelHandlerService } from './services/tunnel-handler.service';
 import { TunnelRpcCryptoService, E2EE_REQUIRED_POLICY } from './services/tunnel-rpc-crypto.service';
@@ -26,12 +27,11 @@ import { MobileBoardRpcService } from './services/mobile-board-rpc.service';
 import { LifecycleOperationTracker } from './services/lifecycle-operation-tracker';
 import { ViewportStreamerService } from './services/viewport-streamer.service';
 import { ViewportFrameSink } from './services/viewport-frame-sink';
+import { MobileRpcWorkspaceAccessService } from './services/mobile-rpc-workspace-access.service';
 
 @Module({
   // Mobile chat composes domain services through the *narrowest* facade modules
   // only — never HTTP controllers and never ChatModule (thread-free by design).
-  // This makes CloudTunnelModule a leaf/transitive consumer of the allowlisted
-  // Sessions↔Terminal SCC; see apps/local-app/scripts/cycle-allowlist.json.
   //   - SessionsReadModule        → ActiveSessionLookup (presence + ownership)
   //   - SessionReaderModule       → SessionReaderService (transcripts)
   //   - SessionsLifecycleModule   → SessionLifecycleFacade (launch/restart/restore/terminate)
@@ -59,9 +59,7 @@ import { ViewportFrameSink } from './services/viewport-frame-sink';
     // HooksModule only adds StorageModule + EventsCoreModule edges (no new cycle).
     HooksModule,
     // NARROW viewport facade (TerminalViewportFacade only) for the live tmux viewport
-    // streamer. Imported instead of TerminalModule wholesale so CloudTunnel stays a
-    // leaf/transitive consumer of the Sessions↔Terminal SCC
-    // (apps/local-app/scripts/cycle-allowlist.json).
+    // streamer. Imported instead of TerminalModule wholesale to bound the dependency surface.
     TerminalViewportModule,
     // NARROW key-input facade (TerminalKeyInputFacade only) for discrete mobile key presses
     // (terminal.sendKey). Same leaf-consumer rationale as TerminalViewportModule above;
@@ -71,6 +69,7 @@ import { ViewportFrameSink } from './services/viewport-frame-sink';
     // PC's capability + X25519 public key for relayed delivery (Task:5). E2eeModule is a
     // DbModule-only leaf — no import cycle.
     E2eeModule,
+    WorkspacesModule,
   ],
   providers: [
     TunnelKeypairService,
@@ -96,6 +95,7 @@ import { ViewportFrameSink } from './services/viewport-frame-sink';
     MobileBoardRpcService,
     LifecycleOperationTracker,
     ViewportStreamerService,
+    MobileRpcWorkspaceAccessService,
     // Dependency-inversion binding: the viewport streamer pushes frames through the
     // ViewportFrameSink abstraction. The factory depends ONLY on ModuleRef and resolves the
     // concrete TunnelClientService LAZILY (at first send / onPushReady), so there is no

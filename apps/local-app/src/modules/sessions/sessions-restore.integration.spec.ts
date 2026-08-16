@@ -139,7 +139,10 @@ describe('POST /api/sessions/:id/restore', () => {
     deliverImmediate: jest.fn().mockResolvedValue({ confirmed: true, method: 'bracketed-paste' }),
     sendControl: jest.fn().mockResolvedValue(undefined),
   };
-  const mockPty = { startStreaming: jest.fn().mockResolvedValue(undefined) };
+  const mockPty = {
+    setOutputHandler: jest.fn(),
+    startStreaming: jest.fn().mockResolvedValue(undefined),
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();

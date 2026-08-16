@@ -4,7 +4,7 @@ import { Badge } from '@/ui/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/components/ui/alert';
 import { cn } from '@/ui/lib/utils';
 import { getProviderIconDataUri } from '@/ui/lib/providers';
-import type { SetupPreviewProviderSummary } from '@/ui/pages/projects/lib/project-api';
+import type { SetupPreviewProviderSummary } from '@/ui/pages/projects/lib/project-contracts';
 
 /**
  * Display names for known providers. `providerSummary[].name` is the lowercase canonical name, so a

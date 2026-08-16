@@ -1,8 +1,15 @@
 import { MODULE_METADATA } from '@nestjs/common/constants';
+import { AnthropicSkillSource } from './adapters/anthropic-skill-source.adapter';
 import type { SkillSourceAdapter } from './adapters/skill-source.adapter';
 import { GitHubDirectorySkillSourceAdapter } from './adapters/github-directory-skill-source.adapter';
+import { MicrosoftSkillSource } from './adapters/microsoft-skill-source.adapter';
+import { OpenAISkillSource } from './adapters/openai-skill-source.adapter';
 import { SkillsModule } from './skills.module';
 import { SKILL_SOURCE_ADAPTERS } from './adapters/skill-source.adapter';
+import { TrailOfBitsSkillSource } from './adapters/trailofbits-skill-source.adapter';
+import { VercelSkillSource } from './adapters/vercel-skill-source.adapter';
+import { SkillSourceLifecycleService } from './services/skill-source-lifecycle.service';
+import { SkillSyncService } from './services/skill-sync.service';
 
 type FactoryProvider = {
   provide: unknown;
@@ -17,18 +24,21 @@ function providers(): FactoryProvider[] {
   );
 }
 
-function makeAdapter(sourceName: string): SkillSourceAdapter {
-  return {
-    sourceName,
-    repoUrl: `https://example.test/${sourceName}`,
-    createSyncContext: jest.fn(),
-    listSkills: jest.fn(),
-    downloadSkill: jest.fn(),
-    getLatestCommit: jest.fn(),
-  };
-}
-
 describe('SkillsModule', () => {
+  it('registers one lifecycle owner and keeps the sync executor private', () => {
+    const moduleProviders =
+      (Reflect.getMetadata(MODULE_METADATA.PROVIDERS, SkillsModule) as unknown[]) ?? [];
+    const moduleExports =
+      (Reflect.getMetadata(MODULE_METADATA.EXPORTS, SkillsModule) as unknown[]) ?? [];
+
+    expect(
+      moduleProviders.filter((provider) => provider === SkillSourceLifecycleService),
+    ).toHaveLength(1);
+    expect(moduleProviders).toContain(SkillSyncService);
+    expect(moduleExports).not.toContain(SkillSyncService);
+    expect(moduleExports).not.toContain(SkillSourceLifecycleService);
+  });
+
   it('registers exactly one configured native devchain adapter in the built-in list', () => {
     const moduleProviders = providers();
     const configuredProvider = moduleProviders.find(
@@ -53,14 +63,22 @@ describe('SkillsModule', () => {
       ...adapters: SkillSourceAdapter[]
     ) => SkillSourceAdapter[];
     const builtIns = createBuiltIns(
-      makeAdapter('anthropic'),
-      makeAdapter('microsoft'),
-      makeAdapter('openai'),
-      makeAdapter('trailofbits'),
-      makeAdapter('vercel'),
+      new AnthropicSkillSource(),
+      new MicrosoftSkillSource(),
+      new OpenAISkillSource(),
+      new TrailOfBitsSkillSource(),
+      new VercelSkillSource(),
       devchainAdapter,
     );
 
+    expect(builtIns.map((adapter) => adapter.sourceName)).toEqual([
+      'anthropic',
+      'microsoft',
+      'openai',
+      'trailofbits',
+      'vercel',
+      'devchain',
+    ]);
     expect(builtIns.filter((adapter) => adapter.sourceName === 'devchain')).toHaveLength(1);
     expect(adapterListProvider?.inject).toEqual([
       expect.anything(),

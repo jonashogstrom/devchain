@@ -62,6 +62,7 @@ describe('ProjectRegistryImportService', () => {
     const storage = {
       createProject: jest.fn().mockResolvedValue({
         id: 'project-1',
+        workspaceId: '0defa017-0000-4000-8000-000000000001',
         name: 'Project 1',
         rootPath: '/tmp/project-1',
         description: null,
@@ -129,6 +130,22 @@ describe('ProjectRegistryImportService', () => {
       preserved: 0,
       skipped: 0,
     });
+  });
+
+  it('passes an explicit workspace destination into the initial project mutation', async () => {
+    const { service, storage } = createHarness();
+    const workspaceId = '22222222-2222-4222-8222-222222222222';
+
+    const result = await service.createProjectFromRegistry({
+      slug: 'template-1',
+      version: '1.0.0',
+      projectName: 'Project 1',
+      rootPath: '/tmp/project-1',
+      workspaceId,
+    });
+
+    expect(storage.createProject).toHaveBeenCalledWith(expect.objectContaining({ workspaceId }));
+    expect(result.project.workspaceId).toBe('0defa017-0000-4000-8000-000000000001');
   });
 
   it('downloads before import when the template is not already cached', async () => {

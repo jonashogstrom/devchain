@@ -17,7 +17,7 @@ import { PtyService } from '../services/pty.service';
 import { TerminalSeedService } from '../services/terminal-seed.service';
 import { TerminalIOService } from '../services/terminal-io/terminal-io.service';
 import { TerminalSessionRegistry } from '../services/terminal-session/terminal-session-registry';
-import { SessionsService } from '../../sessions/services/sessions.service';
+import type { SessionTerminalRuntimeService } from '../../session-terminal-runtime/session-terminal-runtime.service';
 import type { Socket } from 'socket.io';
 
 function createMockSocket(id: string): Socket {
@@ -65,6 +65,7 @@ function createGateway() {
   };
 
   const ptyService: Partial<PtyService> = {
+    setOutputHandler: jest.fn(),
     resize: jest.fn(),
     startStreaming: jest.fn(),
     isStreaming: jest.fn().mockReturnValue(true),
@@ -89,9 +90,14 @@ function createGateway() {
     sessionExists: jest.fn().mockResolvedValue(true),
   };
 
-  const sessionsService: Partial<SessionsService> = {
-    markSessionFailed: jest.fn(),
-    usesAlternateScreenFor: jest.fn().mockReturnValue(false),
+  const sessionTerminalRuntime: Partial<SessionTerminalRuntimeService> = {
+    retireConfirmedLoss: jest.fn(),
+    getDescriptor: jest.fn().mockImplementation((sessionId: string) => ({
+      sessionId,
+      tmuxSessionName: `tmux_${sessionId}`,
+      normalizeLf: true,
+      usesAlternateScreen: false,
+    })),
   };
 
   const registry = new TerminalSessionRegistry();
@@ -129,7 +135,7 @@ function createGateway() {
     seedService as TerminalSeedService,
     terminalIO as TerminalIOService,
     registry,
-    sessionsService as SessionsService,
+    sessionTerminalRuntime as SessionTerminalRuntimeService,
     mockRealtimeBroadcast as never,
     sendScheduler as never,
     mockMetricsService,
